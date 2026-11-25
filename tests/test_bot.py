@@ -393,6 +393,92 @@ def test_openai_reasoning_setting_falls_back_for_older_models():
     assert len(sent) == 4 and "reasoning_effort" not in sent[3]  # remembered: no second failed try
 
 
+def _responses_reply(body, output, usage=(50, 0, 5)):
+    return httpx.Response(200, json={
+        "id": "resp_1", "object": "response", "created_at": 0, "model": body["model"], "status": "completed",
+        "output": output, "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+        "usage": {"input_tokens": usage[0], "input_tokens_details": {"cached_tokens": usage[1]},
+                  "output_tokens": usage[2], "output_tokens_details": {"reasoning_tokens": 0},
+                  "total_tokens": usage[0] + usage[2]}})
+
+
+def test_openai_uses_responses_api_with_thinking_and_tools():
+    import openai
+
+    from arrbot.llm import (MAX_OUTPUT_TOKENS, REASONING_EXTRA_TOKENS, OpenAIResponsesProvider, ToolSpec, Turn,
+                            make_provider, uses_responses)
+
+    assert isinstance(make_provider(LLMConfig("openai", "gpt-6-luna", "k")), OpenAIResponsesProvider)
+    assert not uses_responses(LLMConfig("openai", "llama3", None, base_url="http://ollama:11434/v1"))
+    assert uses_responses(LLMConfig("openai", "x", "k", base_url="https://api.openai.com/v1"))
+    assert not uses_responses(LLMConfig("openai", "gpt-6-luna", "k", api="chat"))
+    assert not uses_responses(LLMConfig("gemini", "g", "k"))
+
+    sent = []
+
+    def handler(req):
+        assert req.url.path.endswith("/responses")
+        body = json.loads(req.content)
+        sent.append(body)
+        if len(sent) == 1:
+            return _responses_reply(body, [
+                {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "GEHEIM"},
+                {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "ping",
+                 "arguments": '{"x": 1}', "status": "completed"}], usage=(3000, 2048, 120))
+        return _responses_reply(body, [{"id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
+                                        "content": [{"type": "output_text", "text": "Fertig.", "annotations": []}]}])
+
+    o = make_provider(LLMConfig("openai", "gpt-6-luna", "k", reasoning="low"))
+    o.client = openai.AsyncOpenAI(api_key="k", max_retries=0,
+                                  http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    ping = ToolSpec("ping", "x", {"type": "object", "properties": {}})
+    history = [Turn("user", text="hi")]
+    t1 = asyncio.run(o.complete("sys", history, [ping]))
+    assert t1.tool_calls[0].id == "call_1" and t1.tool_calls[0].args == {"x": 1}
+    assert t1.usage == {"input": 3000, "cached": 2048, "output": 120}
+    b = sent[0]
+    assert b["instructions"] == "sys" and b["store"] is False and b["reasoning"] == {"effort": "low"}
+    assert b["include"] == ["reasoning.encrypted_content"]
+    assert b["max_output_tokens"] == MAX_OUTPUT_TOKENS + REASONING_EXTRA_TOKENS
+    assert b["tools"][0]["name"] == "ping" and b["tools"][0]["type"] == "function"
+
+    history += [t1, Turn("tool", tool_results=[ToolResult("call_1", "ping", "pong")])]
+    t2 = asyncio.run(o.complete("sys", history, [ping]))
+    assert t2.text == "Fertig." and not t2.tool_calls
+    items = sent[1]["input"]
+    assert items[0] == {"role": "user", "content": "hi"}
+    assert items[1]["type"] == "reasoning" and items[1]["encrypted_content"] == "GEHEIM"  # thinking goes along
+    assert items[2] == {"type": "function_call", "call_id": "call_1", "name": "ping", "arguments": '{"x": 1}'}
+    assert items[3] == {"type": "function_call_output", "call_id": "call_1", "output": "pong"}
+
+
+def test_openai_responses_falls_back_without_reasoning_for_older_models():
+    import openai
+
+    from arrbot.llm import MAX_OUTPUT_TOKENS, ToolSpec, Turn, make_provider
+
+    sent = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        sent.append(body)
+        if "reasoning" in body:
+            return httpx.Response(400, json={"error": {
+                "message": "Unsupported parameter: 'reasoning.effort' is not supported with this model.",
+                "type": "invalid_request_error", "param": "reasoning.effort", "code": "unsupported_parameter"}})
+        return _responses_reply(body, [{"id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
+                                        "content": [{"type": "output_text", "text": "ok", "annotations": []}]}])
+
+    o = make_provider(LLMConfig("openai", "gpt-4o-mini", "k", reasoning="low"))
+    o.client = openai.AsyncOpenAI(api_key="k", max_retries=0,
+                                  http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    ping = ToolSpec("ping", "x", {"type": "object", "properties": {}})
+    assert asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping])).text == "ok"
+    assert "reasoning" not in sent[1] and "include" not in sent[1] and sent[1]["max_output_tokens"] == MAX_OUTPUT_TOKENS
+    asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping]))
+    assert len(sent) == 3 and "reasoning" not in sent[2] and not o.reasoning_ok
+
+
 def test_openai_thinking_model_with_tools_gets_reasoning_none():
     """gpt-6-luna: tools in Chat Completions only with reasoning_effort "none" (leaving it out = thinks)."""
     import openai
@@ -422,3 +508,91 @@ def test_openai_thinking_model_with_tools_gets_reasoning_none():
     assert [b.get("reasoning_effort") for b in sent] == ["low", "none"]
     asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping]))
     assert sent[2]["reasoning_effort"] == "none"  # remembered
+
+
+class Library:
+    """Sonarr/Radarr with titles already in the library (for "such nochmal")."""
+
+    def __init__(self):
+        self.series = {5: {"id": 5, "title": "Married... with Children", "year": 1987, "monitored": False,
+                           "alternateTitles": [{"title": "Eine schrecklich nette Familie"}],
+                           "seasons": [{"seasonNumber": 0, "monitored": False}, {"seasonNumber": 1, "monitored": False},
+                                       {"seasonNumber": 2, "monitored": False}]},
+                       6: {"id": 6, "title": "Married at First Sight", "year": 2014, "monitored": True, "seasons": []}}
+        self.movies = {9: {"id": 9, "title": "Dune", "year": 2021, "monitored": False, "hasFile": False}}
+        self.eps = [
+            {"id": 1, "seasonNumber": 0, "episodeNumber": 1, "airDateUtc": "1989-01-01T00:00:00Z", "hasFile": False},
+            {"id": 11, "seasonNumber": 1, "episodeNumber": 1, "airDateUtc": "1987-04-05T00:00:00Z", "hasFile": False},
+            {"id": 12, "seasonNumber": 1, "episodeNumber": 2, "airDateUtc": "1987-04-12T00:00:00Z", "hasFile": True,
+             "episodeFileId": 3},
+            {"id": 21, "seasonNumber": 2, "episodeNumber": 1, "airDateUtc": "1987-09-27T00:00:00Z", "hasFile": False},
+            {"id": 22, "seasonNumber": 2, "episodeNumber": 2, "hasFile": False},  # no air date yet
+        ]
+        self.commands, self.monitored, self.puts = [], [], []
+
+    def handler(self, req):
+        p = req.url.path.removeprefix("/api/v3")
+        body = json.loads(req.content) if req.content else None
+        if p == "/series" and req.method == "GET":
+            return httpx.Response(200, json=list(self.series.values()))
+        if p == "/movie" and req.method == "GET":
+            return httpx.Response(200, json=list(self.movies.values()))
+        for path, lib in (("/series/", self.series), ("/movie/", self.movies)):
+            if p.startswith(path) and p.split("/")[-1].isdigit():
+                if req.method == "PUT":
+                    self.puts.append(body)
+                    lib[body["id"]] = body
+                return httpx.Response(200, json=lib[int(p.split("/")[-1])])
+        if p in ("/series/lookup", "/movie/lookup"):
+            return httpx.Response(200, json=[])
+        if p == "/episode":
+            return httpx.Response(200, json=self.eps)
+        if p == "/episode/monitor":
+            self.monitored += body["episodeIds"]
+            return httpx.Response(202, json={})
+        if p == "/command":
+            self.commands.append(body)
+            return httpx.Response(201, json={"id": 1})
+        return httpx.Response(404, text=f"unhandled {req.method} {p}")
+
+
+def test_search_again_finds_title_monitors_and_searches_missing_episodes(tmp_path):
+    lib = Library()
+    radarr = Radarr(ArrConfig("http://r", "k"), transport=httpx.MockTransport(lib.handler))
+    sonarr = Sonarr(ArrConfig("http://s", "k"), transport=httpx.MockTransport(lib.handler))
+    tools = ToolRunner(radarr, sonarr, Store(str(tmp_path)), "released")
+
+    # German title (alternate title), unmonitored series: monitored first, then only aired missing episodes.
+    res = asyncio.run(tools.run(ToolCall("x", "search_existing",
+                                         {"kind": "series", "title": "Eine schrecklich nette Familie"}), 42))
+    assert not res.is_error, res.content
+    # Season 2 is missing completely (aired): season search for a pack; season 1 only the missing episode.
+    assert lib.commands == [{"name": "SeasonSearch", "seriesId": 5, "seasonNumber": 2},
+                            {"name": "EpisodeSearch", "episodeIds": [11]}]  # no special, no file, no future
+    assert lib.series[5]["monitored"] and [s["monitored"] for s in lib.series[5]["seasons"]] == [False, True, True]
+    assert sorted(lib.monitored) == [11, 21]
+    assert "2 fehlende Folgen" in res.final and "nicht überwacht" in res.final
+
+    # Only one season.
+    lib.commands.clear()
+    asyncio.run(tools.run(ToolCall("x", "search_existing", {"kind": "series", "lib_id": 5, "seasons": [2]}), 42))
+    assert lib.commands == [{"name": "SeasonSearch", "seriesId": 5, "seasonNumber": 2}]
+
+    # Ambiguous title -> the AI gets the candidates.
+    res = asyncio.run(tools.run(ToolCall("x", "search_existing", {"kind": "series", "title": "Married"}), 42))
+    assert res.is_error and "lib_id=5" in res.content and "lib_id=6" in res.content
+
+    # Not in the library.
+    res = asyncio.run(tools.run(ToolCall("x", "search_existing", {"kind": "series", "title": "Severance"}), 42))
+    assert res.is_error and "nicht in der Bibliothek" in res.content
+
+    # Nothing missing.
+    lib.eps = [e for e in lib.eps if e["id"] == 12]
+    res = asyncio.run(tools.run(ToolCall("x", "search_existing", {"kind": "series", "lib_id": 5}), 42))
+    assert "keine bereits erschienene Folge" in res.final
+
+    # Movie: unmonitored -> monitored, then searched.
+    lib.commands.clear()
+    res = asyncio.run(tools.run(ToolCall("x", "search_existing", {"kind": "movie", "title": "dune"}), 42))
+    assert lib.movies[9]["monitored"] and lib.commands == [{"name": "MoviesSearch", "movieIds": [9]}]
+    assert "Neue Suche für Dune (2021)" in res.final

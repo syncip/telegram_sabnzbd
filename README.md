@@ -52,6 +52,11 @@ Außerdem:
   Bei Filmen („Wann kommt Dune 3 auf Deutsch?“) deutscher Kinostart, Digital- und Disc-Termin,
   Streaming und ob du ihn schon auf Deutsch hast. Die Antwort baut der Bot selbst aus den Quellen
   zusammen, die KI formuliert hier nichts um (sie hatte vorher Termine erfunden).
+- **Nochmal suchen:** „Such Eine schrecklich nette Familie nochmal“ (oder nur „such nochmal“ nach einer
+  Antwort, „such die fehlenden Folgen von Dark“, „Staffel 2 nochmal suchen“) startet für einen Titel, der schon
+  in Radarr/Sonarr ist, eine neue Suche – auch unter dem deutschen Titel. Bei Serien nur die fehlenden, schon
+  erschienenen Folgen; fehlt eine ganze Staffel, sucht Sonarr zuerst nach einem Staffelpaket. Ist der Titel
+  nicht überwacht, schaltet der Bot die Überwachung dafür ein (sonst lädt Sonarr/Radarr nichts) und sagt es.
 - **Deutsche Folgen nachladen (Admin):** „Prüf, ob die Folgen von Dark auf Deutsch da sind“ prüft alle
   ausgestrahlten Folgen in der Bibliothek, sucht auf den Indexern deutsche Releases (bei vielen
   Folgen bevorzugt Staffelpakete, alle Staffeln; dauert es über 2½ Minuten, macht „🔎 Weiter suchen“
@@ -266,9 +271,13 @@ Gemessen mit `gpt-4o-mini`: Eine typische Anfrage („lad mir Dune 2“) braucht
 etwa 3.200 Tokens rein und 60 raus. Mit dem Standard **`gpt-6-luna`** ($0,10 rein, $0,01 zwischengespeichert,
 $0,50 raus pro 1 Mio. Tokens) sind das **etwa 0,02–0,035 Cent**, bei 5 Anfragen am Tag **rund 0,04–0,05 $
 im Monat** – ein Drittel bis die Hälfte weniger als mit `gpt-4o-mini`. Mit `/limit gesamt kosten 1` bleibt
-der Bot sicher unter 1 $. Das Nachdenken steht auf `none` (`LLM_REASONING`): `gpt-6-luna` kann Werkzeuge über
-die Chat-Schnittstelle nur ohne Denk-Stufe nutzen. Lehnt ein Modell die eingestellte Stufe ab, schaltet der Bot
-von selbst auf `none` bzw. ohne um.
+der Bot sicher unter 1 $. Das Nachdenken steht auf `low` (`LLM_REASONING`); das reicht zum Auswählen der
+Werkzeuge und hält die Denk-Tokens klein. Bei OpenAI spricht der Bot die **Responses-API** an – nur dort
+dürfen Denk-Modelle wie `gpt-6-luna` nachdenken und gleichzeitig Werkzeuge nutzen. Bei OpenAI wird dabei
+nichts gespeichert (`store=false`); das verschlüsselte Nachdenken geht innerhalb einer Frage mit. Andere
+OpenAI-kompatible Server (`LLM_BASE_URL`, z. B. Ollama, OpenRouter) laufen weiter über Chat Completions;
+mit `LLM_API` (`responses` oder `chat`) lässt sich das erzwingen. Lehnt ein Modell die Denk-Stufe ab,
+schaltet der Bot von selbst um.
 
 Warum so wenig:
 

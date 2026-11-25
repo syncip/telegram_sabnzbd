@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta, tzinfo
@@ -87,14 +88,16 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
         ),
         ToolSpec(
             "search_existing",
-            "Neue Download-Suche für einen Titel aus der Bibliothek (lib_id aus der Suche).",
+            "Sucht einen Titel, der schon in Radarr/Sonarr ist, nochmal (Serie: alle fehlenden, schon erschienenen "
+            "Folgen; schaltet Überwachung ein). title reicht (Original- oder deutscher Titel), lib_id falls bekannt.",
             obj(
                 {
                     "kind": {"type": "string", "enum": ["movie", "series"]},
+                    "title": {"type": "string"},
                     "lib_id": {"type": "integer"},
-                    "seasons": {"type": "array", "items": {"type": "integer"}},
+                    "seasons": {"type": "array", "items": {"type": "integer"}, "description": "nur diese Staffeln"},
                 },
-                ["kind", "lib_id"],
+                ["kind"],
             ),
         ),
         ToolSpec(
@@ -1026,9 +1029,81 @@ class ToolRunner:
         return offer
 
     async def _t_search_existing(
-        self, chat_id: int, kind: str, lib_id: int, seasons: list[int] | None = None
+        self, chat_id: int, kind: str, lib_id: int | None = None, seasons: list[int] | None = None,
+        title: str | None = None,
     ) -> Final:
-        return await self._search_existing(chat_id, kind, int(lib_id), [int(s) for s in seasons] if seasons else None)
+        """"Such nochmal": a title that is already in Radarr/Sonarr searches again."""
+        if lib_id is None:
+            if not title:
+                raise ArrError("Welcher Titel? Nenn mir den Namen.")
+            lib_id = await self._find_in_library(kind, title)
+        return await self._search_again(chat_id, kind, int(lib_id), [int(s) for s in seasons] if seasons else None)
+
+    @staticmethod
+    def _norm(s: str) -> str:
+        s = re.sub(r"[^a-z0-9äöüß]+", " ", (s or "").lower()).strip()
+        return re.sub(r"^(the|der|die|das) ", "", s)
+
+    async def _find_in_library(self, kind: str, title: str) -> int:
+        """lib_id of a title in Radarr/Sonarr: exact (also alternative/original titles), else contained.
+        Several hits: an error with the candidates so the AI can ask or pick."""
+        svc = self._svc(kind)
+        want = self._norm(title)
+        items = await svc.library()
+
+        def names(i: dict) -> list[str]:
+            alt = [a.get("title", "") for a in i.get("alternateTitles") or []]
+            return [self._norm(x) for x in [i.get("title", ""), i.get("originalTitle", ""), *alt] if x]
+
+        hits = [i for i in items if want in names(i)]
+        if not hits:
+            hits = [i for i in items if any(want in n or (len(n) > 3 and n in want) for n in names(i))]
+        if not hits:
+            # German or other titles Sonarr/Radarr do not keep: ask their title search, it knows more names.
+            try:
+                found = await svc.lookup(title)
+            except ArrError:
+                found = []
+            in_lib = {i["id"] for i in items}
+            hits = [f for f in found[:5] if f.get("id") in in_lib]
+        if not hits:
+            what = "Film" if kind == "movie" else "Serie"
+            raise ArrError(f"{title} ist als {what} nicht in der Bibliothek. Erst hinzufügen "
+                           f"({'add_movie' if kind == 'movie' else 'add_series'}).")
+        if len({h["id"] for h in hits}) > 1:
+            listed = "; ".join(f"{h.get('title')} ({h.get('year')}) lib_id={h['id']}" for h in hits[:6])
+            raise ArrError(f"Mehrere Treffer in der Bibliothek: {listed}. Mit lib_id nochmal aufrufen oder nachfragen.")
+        return hits[0]["id"]
+
+    async def _search_again(self, chat_id: int, kind: str, lib_id: int, seasons: list[int] | None) -> Final:
+        if kind == "movie":
+            radarr: Radarr = self._need(self.radarr, "Radarr")
+            movie = await radarr.get(lib_id)
+            was_off = not movie.get("monitored", True)
+            await radarr.monitor(movie)
+            name = f"{movie['title']} ({movie.get('year')})" if movie.get("year") else movie["title"]
+            if movie.get("hasFile"):
+                note = " Er liegt schon vor – Radarr holt nur eine bessere Fassung, falls das Profil eine will."
+            else:
+                note = ""
+            await radarr.search(movie["id"])
+            self.store.track("radarr", movie["id"], name, chat_id)
+            await self._added(chat_id, f"🔍 {name} (neue Suche)")
+            off = " Er war nicht überwacht – jetzt schon, sonst lädt Radarr nichts." if was_off else ""
+            return Final(f"🔍 Neue Suche für {name} gestartet.{off}{note} Ich melde mich, wenn der Download startet.")
+        sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
+        series = await sonarr.get(lib_id)
+        missing, was_off = await sonarr.search_missing(series["id"], seasons)
+        where = f" in Staffel {', '.join(map(str, seasons))}" if seasons else ""
+        if not missing:
+            return Final(f"👍 Bei {series['title']} fehlt{where} keine bereits erschienene Folge – nichts zu suchen.")
+        self.store.track("sonarr", series["id"], series["title"], chat_id)
+        await self._added(chat_id, f"🔍 {series['title']}{where} ({len(missing)} Folgen neu gesucht)")
+        eps = manage._eps_text(missing)
+        off = " Die Serie war nicht überwacht – jetzt schon, sonst lädt Sonarr nichts." if was_off else ""
+        n = len(missing)
+        return Final(f"🔍 Neue Suche für {series['title']}: {n} fehlende Folge{'n' if n != 1 else ''}"
+                     f"{f' ({eps})' if eps else ''}.{off} Ich melde mich, wenn Downloads starten.")
 
     async def _search_existing(self, chat_id: int, kind: str, lib_id: int, seasons: list[int] | None) -> Final:
         if kind == "movie":

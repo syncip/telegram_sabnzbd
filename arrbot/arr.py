@@ -182,6 +182,12 @@ class Radarr(_ArrBase):
         await self._req("DELETE", f"/moviefile/{file_id}")
         log.info("Radarr: Filmdatei %s gelöscht", file_id)
 
+    async def monitor(self, movie: dict) -> None:
+        """Radarr only grabs for monitored movies (RSS, later searches) – switch it on before searching."""
+        if not movie.get("monitored", True):
+            movie["monitored"] = True
+            await self._req("PUT", f"/movie/{movie['id']}", json=movie)
+
     async def search(self, movie_id: int) -> dict:
         cmd = await self.command("MoviesSearch", movieIds=[movie_id])
         log.info("Radarr: Suche für Film %s gestartet (Befehl %s)", movie_id, (cmd or {}).get("id"))
@@ -351,3 +357,41 @@ class Sonarr(_ArrBase):
             await self._monitor_and_search(series_id, seasons, True)
         else:
             await self.command("SeriesSearch", seriesId=series_id)
+
+    async def search_missing(self, series_id: int, seasons: list[int] | None = None,
+                             now: str | None = None) -> tuple[list[dict], bool]:
+        """Search the aired episodes without a file again ("such nochmal").
+
+        Sonarr's own SeriesSearch skips unmonitored series and episodes without a word, so the missing
+        episodes (and their series/seasons) are monitored first and then searched by id.
+        Returns (searched episodes, series was unmonitored)."""
+        from datetime import datetime, timezone
+
+        now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        eps = await self.episodes(series_id)
+        missing = [e for e in eps if not e.get("hasFile") and not e.get("episodeFileId")
+                   and (e.get("seasonNumber") in seasons if seasons else e.get("seasonNumber", 0) > 0)
+                   and (e.get("airDateUtc") or "") <= now and e.get("airDateUtc")]
+        series = await self.get(series_id)
+        was_off = not series.get("monitored", True)
+        want = {e["seasonNumber"] for e in missing}
+        if missing and (was_off or any(s["seasonNumber"] in want and not s.get("monitored")
+                                       for s in series.get("seasons", []))):
+            series["monitored"] = True
+            for s in series.get("seasons", []):
+                if s["seasonNumber"] in want:
+                    s["monitored"] = True
+            await self._req("PUT", f"/series/{series_id}", json=series)
+        await self.set_episodes_monitored([e["id"] for e in missing if not e.get("monitored")], True)
+        # A season with every aired episode missing: season search, so Sonarr takes a season pack if there
+        # is one. Partly missing seasons: only those episodes.
+        aired = [e for e in eps if e.get("airDateUtc") and e["airDateUtc"] <= now]
+        whole = sorted(n for n in want
+                       if len([e for e in missing if e["seasonNumber"] == n])
+                       == len([e for e in aired if e.get("seasonNumber") == n]))
+        for n in whole:
+            await self.command("SeasonSearch", seriesId=series_id, seasonNumber=n)
+        await self.search_episodes([e["id"] for e in missing if e["seasonNumber"] not in whole])
+        log.info("Sonarr: Serie %s – %d fehlende Folgen neu gesucht (ganze Staffeln: %s)", series_id,
+                 len(missing), whole or "-")
+        return missing, was_off

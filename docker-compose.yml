@@ -42,9 +42,10 @@ services:
       # (gpt-4o-mini und gpt-4.1 schaltet OpenAI am 14.01.2027 ab – nicht mehr eintragen)
       LLM_MODEL: ""
       # Nur OpenAI: wie viel das Modell vor der Antwort nachdenkt: none | low | medium | high
-      # (Leer = none – gpt-6-luna kann Werkzeuge nur ohne Denk-Stufe. Lehnt ein Modell die Stufe ab,
-      #  schaltet der Bot automatisch auf none bzw. lässt sie weg.)
+      # (Leer = low. Lehnt ein Modell die Stufe ab, schaltet der Bot automatisch um.)
       LLM_REASONING: ""
+      # Nur OpenAI: responses | chat (Leer = Responses-API bei OpenAI selbst, Chat Completions bei LLM_BASE_URL)
+      LLM_API: ""
       # Nur für OpenAI-kompatible Server, z. B. http://ollama:11434/v1 oder https://openrouter.ai/api/v1
       LLM_BASE_URL: ""
 

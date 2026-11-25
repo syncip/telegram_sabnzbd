@@ -30,6 +30,8 @@ SYSTEM_PROMPT = """Du steuerst Radarr (Filme) und Sonarr (Serien) einer privaten
 - seasons/monitor nur, wenn der Nutzer Staffeln nennt ("alle" = monitor all, "nur neue" = future, "neueste" = last_season). Sonst weglassen: der Bot fragt per Buttons.
 - Serie schon da (lib_id): trotzdem add_series, der Bot bietet fehlende Staffeln an.
 - Film schon da: mit Datei sag das, sonst search_existing.
+- "Such nochmal", "neu suchen", "such die fehlenden Folgen", "warum lädt X nicht" für einen Titel in der Bibliothek: \
+search_existing mit title (seasons nur wenn genannt), ohne vorher zu suchen. Ohne Titel: der Titel von eben.
 - quality_profile nur, wenn der Nutzer eine Qualität nennt (Namen per list_quality_profiles).
 - "Was können X und ich zusammen schauen?": suggest_together.
 - "Was soll ich schauen?"/Vorschläge: suggest (Wünsche zu Jahr/Bewertung als Parameter). Top/Charts/beste eines Jahres, Monats oder Studios (Marvel, Pixar …): top_titles (studio=…, year nur wenn genannt).

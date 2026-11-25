@@ -417,7 +417,120 @@ class OpenAICompatProvider(LLMProvider):
         )
 
 
+class OpenAIResponsesProvider(OpenAICompatProvider):
+    """OpenAI itself via the Responses API: thinking models (gpt-6-luna, 6.1 Sol, Astra ...) may think
+    and call tools at the same time, which Chat Completions does not allow.
+
+    Nothing is stored at OpenAI (store=False). The encrypted thinking of a turn comes back with the
+    answer and is sent along on the next call of the same turn, so the model keeps its train of thought
+    across tool calls."""
+
+    def _input(self, history: list[Turn]) -> list[dict]:
+        out: list[dict] = []
+        for t in history:
+            if t.role == "user":
+                out.append({"role": "user", "content": t.text or ""})
+            elif t.role == "assistant":
+                if t.provider == self.name and t.raw:
+                    out += t.raw  # reasoning items (encrypted), in their original place
+                if t.text:
+                    out.append({"role": "assistant", "content": t.text})
+                for c in t.tool_calls:
+                    out.append({"type": "function_call", "call_id": c.id, "name": c.name,
+                                "arguments": json.dumps(c.args)})
+            else:
+                for r in t.tool_results:
+                    out.append({"type": "function_call_output", "call_id": r.call_id,
+                                "output": f"FEHLER: {r.content}" if r.is_error else r.content})
+        return out
+
+    async def complete(self, system, history, tools):
+        import openai
+
+        kwargs: dict[str, Any] = dict(
+            model=self.model,
+            instructions=system,
+            input=self._input(history),
+            prompt_cache_key=_cache_key(tools),
+            store=False,
+            tools=[{"type": "function", "name": t.name, "description": t.description, "parameters": t.schema,
+                    "strict": False} for t in tools],
+        )
+        thinking = self.reasoning and self.reasoning_ok and self.reasoning != "none"
+        kwargs["max_output_tokens"] = self.max_output + (REASONING_EXTRA_TOKENS if thinking else 0)
+        if self.reasoning and self.reasoning_ok:
+            kwargs["reasoning"] = {"effort": self.reasoning}
+            if thinking:
+                kwargs["include"] = ["reasoning.encrypted_content"]
+        try:
+            try:
+                resp = await self.client.responses.create(**kwargs)
+            except openai.BadRequestError as e:
+                if "reasoning" not in kwargs or "reason" not in str(e.message).lower():
+                    raise
+                # Older models (gpt-4o-mini ...) or a level the model lacks: from now on without.
+                log.warning("%s: reasoning=%s geht nicht (%s) – ab jetzt ohne", self.model, self.reasoning,
+                            e.message)
+                self.reasoning_ok = False
+                for k in ("reasoning", "include"):
+                    kwargs.pop(k, None)
+                kwargs["max_output_tokens"] = self.max_output
+                resp = await self.client.responses.create(**kwargs)
+        except openai.RateLimitError as e:
+            raise LLMError("Ratenlimit des KI-Anbieters erreicht. Bitte gleich nochmal.") from e
+        except openai.APIStatusError as e:
+            raise LLMError(f"KI-Fehler {e.status_code}: {e.message}") from e
+        except openai.APIConnectionError as e:
+            raise LLMError("KI-Anbieter ist nicht erreichbar.") from e
+
+        texts, calls, raw = [], [], []
+        for item in resp.output or []:
+            if item.type == "reasoning":
+                if getattr(item, "encrypted_content", None):
+                    raw.append(item.model_dump(exclude_none=True, include={"id", "type", "summary",
+                                                                          "encrypted_content"}))
+            elif item.type == "function_call":
+                try:
+                    args = json.loads(item.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                calls.append(ToolCall(id=item.call_id, name=item.name, args=args))
+            elif item.type == "message":
+                texts += [c.text for c in item.content or [] if getattr(c, "type", "") == "output_text"]
+        if not texts and not calls and getattr(resp, "incomplete_details", None):
+            why = getattr(resp.incomplete_details, "reason", "") or "?"
+            texts.append(f"(Keine Antwort vom Modell: {why})")
+        u = resp.usage
+        usage = {}
+        if u:
+            details = getattr(u, "input_tokens_details", None)
+            usage = {
+                "input": u.input_tokens or 0,
+                "cached": (getattr(details, "cached_tokens", 0) or 0) if details else 0,
+                "output": u.output_tokens or 0,  # includes the thinking
+            }
+        return Turn(
+            role="assistant",
+            text="".join(texts).strip() or None,
+            tool_calls=calls,
+            raw=raw or None,
+            provider=self.name,
+            usage=usage,
+        )
+
+
+def uses_responses(cfg: LLMConfig) -> bool:
+    """OpenAI itself -> Responses API; other OpenAI-compatible servers (LLM_BASE_URL) -> Chat Completions."""
+    if cfg.provider != "openai":
+        return False
+    if cfg.api in ("responses", "chat"):
+        return cfg.api == "responses"
+    return not cfg.base_url or "api.openai.com" in cfg.base_url
+
+
 def make_provider(cfg: LLMConfig) -> LLMProvider:
+    if uses_responses(cfg):
+        return OpenAIResponsesProvider(cfg)
     return {
         "gemini": GeminiProvider,
         "anthropic": AnthropicProvider,

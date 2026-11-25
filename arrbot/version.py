@@ -14,9 +14,10 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 
 CHANGES = {
+    "1.10.0": "OpenAI über die Responses-API: gpt-6-luna denkt wieder nach (Stufe low) und nutzt dabei Werkzeuge; nichts wird bei OpenAI gespeichert. Andere Server bleiben bei Chat Completions (LLM_API). „Such nochmal“ für Titel in der Bibliothek: auch per deutschem Titel, nur fehlende Folgen, Staffelpaket bei ganzen Staffeln, schaltet die Überwachung ein",
     "1.9.1": "Fix: KI-Fehler 400 mit gpt-6-luna (Werkzeuge nur ohne Denk-Stufe) – Standard jetzt „none“, bei Ablehnung schaltet der Bot selbst um",
     "1.9.0": "/admin-Übersicht mit Buttons, Nutzerkarte (ℹ️ in /nutzer, „Zeig mir Anna“), Version und KI-Modell "
              "per /version oder Frage („Welches Modell nutzt du?“), Modelle mit Preis und Abschalt-Warnung in "

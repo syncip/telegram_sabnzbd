@@ -37,6 +37,7 @@ class LLMConfig:
     base_url: str | None = None
     reasoning: str = ""  # OpenAI thinking models: none | low | medium | high; "" = model default
     max_output: int = 0  # cap for one answer; 0 = the normal small cap
+    api: str = ""  # OpenAI: responses | chat; "" = Responses for OpenAI itself, Chat for other servers
 
 
 @dataclass
@@ -75,8 +76,9 @@ class Config:
 
 
 RECIPE_MODELS = {"openai": "gpt-6.1-terra"}  # others: the configured model
-# Chat: gpt-6-luna takes tools in Chat Completions only without thinking ("none"); recipes think a little.
-REASONING_DEFAULT = {"openai": "none"}
+# Think a little: enough for picking tools, cheap. (Over Chat Completions gpt-6-luna allows tools only
+# with "none" – the bot then switches by itself.)
+REASONING_DEFAULT = {"openai": "low"}
 RECIPE_REASONING_DEFAULT = {"openai": "low"}
 DEFAULT_MODELS = {
     "gemini": "gemini-flash-latest",
@@ -108,6 +110,7 @@ def load_config() -> Config:
         api_key=api_key,
         base_url=base_url,
         reasoning=(_env("LLM_REASONING") or REASONING_DEFAULT.get(provider, "")).lower(),
+        api=(_env("LLM_API") or "").lower(),
     )
 
     def arr(prefix: str) -> ArrConfig | None:
