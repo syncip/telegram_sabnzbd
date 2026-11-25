@@ -1,8 +1,9 @@
 # arrbot – Telegram-Bot für Radarr & Sonarr
 
-Schreib dem Bot ganz normal, was du sehen willst („die neueste Staffel von Severance“,
-„Dune, den neuen“). Er sucht den Titel, fragt nach, wenn mehrere passen, fügt ihn zu Radarr/Sonarr hinzu
-und schreibt dir:
+Schreib dem Bot ganz normal, was du sehen willst („Staffel 1 und 2 von Dragonball Z“, „Dune, den
+neuen“), oder schick einen Link (IMDb, TMDB, TVDB, Trakt, Letterboxd, JustWatch …). Er sucht den
+Titel, bietet bei mehreren Treffern und bei der Staffelwahl Buttons an, fügt ihn zu Radarr/Sonarr
+hinzu und schreibt dir:
 
 - 🎚 Buttons zur Qualität, falls du keine genannt hast (ohne Auswahl nach 60 s das Standardprofil aus
   `RADARR_QUALITY_PROFILE` / `SONARR_QUALITY_PROFILE`)
@@ -24,6 +25,8 @@ oder alles **OpenAI-kompatible** (OpenAI, OpenRouter, Groq, lokal mit Ollama/LM 
 4. In `docker-compose.yml` unter `environment:` die Werte eintragen: `TELEGRAM_BOT_TOKEN`, `LLM_API_KEY`,
    `RADARR_*`, `SONARR_*` und `ALLOWED_USER_IDS`. Jede Einstellung ist dort kommentiert.
    **Danach die Datei nicht mehr committen**, sonst landen die Keys im Repo.
+   `PUID`/`PGID` müssen zum Besitzer des Daten-Ordners passen: Unraid `99`/`100`, andere Linux-Server
+   meist `1000`/`1000`.
    Deine Telegram-ID kennst du nicht? Lass `ALLOWED_USER_IDS` erstmal auf einer beliebigen Zahl, starte den
    Bot und schreib ihm – er antwortet mit „Kein Zugriff. Deine Telegram-ID ist …“.
 5. Starten:

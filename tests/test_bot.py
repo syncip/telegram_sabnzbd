@@ -111,7 +111,8 @@ def test_agent_adds_movie_and_tracks(tmp_path):
     assert search_result[0]["tmdb_id"] == 693134 and len(search_result) == 1  # year filter
     added = fr.movies[7]
     assert added["qualityProfileId"] == 1 and added["rootFolderPath"] == "/media"
-    assert added["addOptions"] == {"searchForMovie": True}
+    assert added["addOptions"] == {"searchForMovie": False}
+    assert fr.commands == [{"name": "MoviesSearch", "movieIds": [7]}]  # manual search like the button
     assert store.state.tracked["radarr:7"].chat_ids == [42]
 
 
@@ -259,3 +260,16 @@ def test_quality_prompt_default_profile_from_config(tmp_path):
     assert p.default == "Ultra-HD"
     asyncio.run(tools.complete_pending(tools.pop_pending(p.id), p.default))  # timeout path
     assert fr.movies[7]["qualityProfileId"] == 2
+
+
+def test_unwritable_data_dir_does_not_break_adding(tmp_path, monkeypatch):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+
+    def deny(*a, **kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("arrbot.state.tempfile.mkstemp", deny)
+    tools = ToolRunner(radarr, sonarr, store, "released")
+    res = asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 42))
+    assert not res.is_error, res.content
+    assert fr.movies[7] and "radarr:7" in store.state.tracked and store.writable is False

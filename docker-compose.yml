@@ -9,6 +9,11 @@ services:
     volumes:
       - ./data:/data
     environment:
+      # Benutzer/Gruppe, dem der Daten-Ordner gehört. Unraid: 99 / 100 (nobody:users).
+      # Andere Linux-Server meist 1000 / 1000 (Ausgabe von "id" auf dem Server).
+      PUID: "99"
+      PGID: "100"
+
       # --- Telegram ---------------------------------------------------------
       # Token von @BotFather
       TELEGRAM_BOT_TOKEN: ""

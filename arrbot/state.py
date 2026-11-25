@@ -47,6 +47,8 @@ class Store:
         self.path = Path(data_dir) / "state.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.state = self._load()
+        self.writable = True
+        self.save()  # surfaces permission problems at startup instead of on the first add
 
     def _load(self) -> State:
         if not self.path.exists():
@@ -68,10 +70,20 @@ class Store:
             "tracked": {k: asdict(v) for k, v in self.state.tracked.items()},
             "queue_notified": self.state.queue_notified,
         }
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        try:
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.path)
+            self.writable = True
+        except OSError as e:
+            # Keep working from memory; only a restart would lose tracked items.
+            if self.writable:
+                log.error(
+                    "Kann %s nicht schreiben (%s). Beobachtete Downloads gehen beim Neustart verloren. "
+                    "PUID/PGID in docker-compose.yml prüfen.", self.path, e,
+                )
+            self.writable = False
 
     def track(self, service: str, arr_id: int, title: str, chat_id: int) -> Tracked:
         now = utcnow().isoformat()

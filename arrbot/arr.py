@@ -119,9 +119,14 @@ class Radarr(_ArrBase):
             rootFolderPath=await self.root_folder(),
             monitored=True,
             minimumAvailability=min_availability,
-            addOptions={"searchForMovie": search},
+            # No search-on-add: that one is an automatic search and skips movies Radarr does not yet
+            # consider "available". The explicit command below counts as manual, like the Search button.
+            addOptions={"searchForMovie": False},
         )
-        return await self._req("POST", "/movie", json=movie)
+        created = await self._req("POST", "/movie", json=movie)
+        if search:
+            await self.search(created["id"])
+        return created
 
     async def search(self, movie_id: int) -> dict:
         return await self.command("MoviesSearch", movieIds=[movie_id])
