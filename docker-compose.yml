@@ -35,8 +35,12 @@ services:
       LLM_PROVIDER: "gemini"
       # Key des gewählten Anbieters. Gemini: https://aistudio.google.com/apikey
       LLM_API_KEY: ""
-      # Leer = Standard: gemini-flash-latest / claude-opus-5-5 / gpt-4o-mini
+      # Leer = Standard: gemini-flash-latest / claude-opus-5-5 / gpt-6-luna
+      # (gpt-4o-mini und gpt-4.1 schaltet OpenAI am 14.01.2027 ab – nicht mehr eintragen)
       LLM_MODEL: ""
+      # Nur OpenAI: wie viel das Modell vor der Antwort nachdenkt: none | low | medium | high
+      # (Leer = low. Kennt ein Modell das nicht, lässt der Bot es automatisch weg.)
+      LLM_REASONING: ""
       # Nur für OpenAI-kompatible Server, z. B. http://ollama:11434/v1 oder https://openrouter.ai/api/v1
       LLM_BASE_URL: ""
 
@@ -96,8 +100,10 @@ services:
       SITE_CHECK_HOURS: "6"
       # Spam-Schutz: Flut-Nachrichten -> vorsorglich sperren, Übertreibung -> Warnung ("0" = aus)
       SPAM_CHECK: "1"
-      # Modell, das neue Werkzeuge (Rezepte) für den Admin baut ("" = gpt-4.1 bei OpenAI, sonst LLM_MODEL)
+      # Modell, das neue Werkzeuge (Rezepte) für den Admin baut ("" = gpt-6.1-terra bei OpenAI, sonst LLM_MODEL)
       RECIPE_MODEL: ""
+      # Nachdenken beim Werkzeugbau: none | low | medium | high ("" = low)
+      RECIPE_REASONING: ""
 
       # Zeitzone für "fertig ca. 21:45 Uhr"
       TZ: "Europe/Berlin"

@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 LLM_TIMEOUT_SECONDS = 60
 MAX_OUTPUT_TOKENS = 800
+REASONING_EXTRA_TOKENS = 4000  # room for thinking (billed only when used)
 
 
 @dataclass
@@ -298,6 +299,9 @@ class OpenAICompatProvider(LLMProvider):
         import openai
 
         self.model = cfg.model
+        self.reasoning = (cfg.reasoning or "").lower()  # reasoning_effort for thinking models; "" = model default
+        self.reasoning_ok = True  # turned off when the model does not know the setting
+        self.max_output = cfg.max_output or MAX_OUTPUT_TOKENS
         self.client = openai.AsyncOpenAI(
             api_key=cfg.api_key or "not-needed", base_url=cfg.base_url, timeout=LLM_TIMEOUT_SECONDS, max_retries=1
         )
@@ -328,23 +332,39 @@ class OpenAICompatProvider(LLMProvider):
     async def complete(self, system, history, tools):
         import openai
 
+        kwargs: dict[str, Any] = dict(
+            model=self.model,
+            messages=self._messages(system, history),
+            # Same key for the same tool set -> requests with the same prompt start land on the same
+            # cache (admins get extra tools, so they get their own key).
+            prompt_cache_key=_cache_key(tools),
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": t.name, "description": t.description, "parameters": t.schema},
+                }
+                for t in tools
+            ],
+        )
+        # Answers are short; the cap only guards against runaway output. Thinking models count their
+        # thinking as output too, so they get more room.
+        thinking = self.reasoning and self.reasoning_ok and self.reasoning != "none"
+        kwargs["max_completion_tokens"] = self.max_output + (REASONING_EXTRA_TOKENS if thinking else 0)
+        if self.reasoning and self.reasoning_ok:
+            kwargs["reasoning_effort"] = self.reasoning
         try:
-            resp = await self.client.chat.completions.create(
-                model=self.model,
-                messages=self._messages(system, history),
-                # Answers are short; the cap only guards against runaway output.
-                max_completion_tokens=MAX_OUTPUT_TOKENS,
-                # Same key for the same tool set -> requests with the same prompt start land on the same
-                # cache (admins get extra tools, so they get their own key).
-                prompt_cache_key=_cache_key(tools),
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {"name": t.name, "description": t.description, "parameters": t.schema},
-                    }
-                    for t in tools
-                ],
-            )
+            try:
+                resp = await self.client.chat.completions.create(**kwargs)
+            except openai.BadRequestError as e:
+                if "reasoning_effort" not in kwargs or "reason" not in str(e.message).lower():
+                    raise
+                # Older models (gpt-4o-mini ...) or a level the model lacks: from now on without.
+                log.warning("%s kennt reasoning_effort=%s nicht (%s) – ab jetzt ohne", self.model, self.reasoning,
+                            e.message)
+                self.reasoning_ok = False
+                kwargs.pop("reasoning_effort")
+                kwargs["max_completion_tokens"] = self.max_output
+                resp = await self.client.chat.completions.create(**kwargs)
         except openai.RateLimitError as e:
             raise LLMError("Ratenlimit des KI-Anbieters erreicht. Bitte gleich nochmal.") from e
         except openai.APIStatusError as e:

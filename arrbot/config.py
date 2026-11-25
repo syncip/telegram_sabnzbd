@@ -35,6 +35,8 @@ class LLMConfig:
     model: str
     api_key: str | None
     base_url: str | None = None
+    reasoning: str = ""  # OpenAI thinking models: none | low | medium | high; "" = model default
+    max_output: int = 0  # cap for one answer; 0 = the normal small cap
 
 
 @dataclass
@@ -67,15 +69,17 @@ class Config:
     update_repo: str = "syncip/telegram_sabnzbd"  # GitHub repo for the update check; empty = off
     update_token: str | None = None  # read-only GitHub token, only for a private repo
     spam_check: bool = True  # block spammers as a precaution, warn on overuse
+    recipe_reasoning: str = ""
     recipe_model: str = ""  # model that builds new tools for admins; empty = a stronger one of the same provider
     extra: dict = field(default_factory=dict)
 
 
-RECIPE_MODELS = {"openai": "gpt-4.1"}  # others: the configured model
+RECIPE_MODELS = {"openai": "gpt-6.1-terra"}  # others: the configured model
+REASONING_DEFAULT = {"openai": "low"}  # think a little: enough for picking tools, cheap
 DEFAULT_MODELS = {
     "gemini": "gemini-flash-latest",
     "anthropic": "claude-opus-5-5",
-    "openai": "gpt-4o-mini",
+    "openai": "gpt-6-luna",
 }
 
 KEY_VARS = {
@@ -101,6 +105,7 @@ def load_config() -> Config:
         model=_env("LLM_MODEL") or DEFAULT_MODELS[provider],
         api_key=api_key,
         base_url=base_url,
+        reasoning=(_env("LLM_REASONING") or REASONING_DEFAULT.get(provider, "")).lower(),
     )
 
     def arr(prefix: str) -> ArrConfig | None:
@@ -153,6 +158,7 @@ def load_config() -> Config:
         update_repo=_env("UPDATE_REPO", "syncip/telegram_sabnzbd") or "",  # type: ignore[arg-type]
         update_token=_env("UPDATE_TOKEN"),
         spam_check=(_env("SPAM_CHECK", "1") or "1").lower() not in ("0", "false", "nein", "aus", "off"),
+        recipe_reasoning=(_env("RECIPE_REASONING") or REASONING_DEFAULT.get(llm.provider, "")).lower(),
         recipe_model=_env("RECIPE_MODEL") or RECIPE_MODELS.get(llm.provider, llm.model),
         llm=llm,
         radarr=radarr,

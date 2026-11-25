@@ -93,8 +93,8 @@ def test_build_keep_and_use_only_for_admins(tmp_path):
     tools.recipes = recipes.RecipeStore(str(tmp_path))
     broken = {**MARVEL, "path": "/command", "source": "radarr"}
     tools.builder = FakeBuilder([broken, MARVEL])  # first try fails the check, the second is fixed
-    tools.builder_model = "gpt-4.1"
-    tools.builder_cost = lambda u: UsageStats.cost("gpt-4.1", u.get("input", 0), u.get("cached", 0), u.get("output", 0))
+    tools.builder_model = "gpt-6.1-terra"
+    tools.builder_cost = lambda u: UsageStats.cost("gpt-6.1-terra", u.get("input", 0), u.get("cached", 0), u.get("output", 0))
     booked = []
     tools.on_llm_usage = lambda uid, u, cost: booked.append((uid, u["input"] + u["output"], cost))
 
@@ -107,7 +107,7 @@ def test_build_keep_and_use_only_for_admins(tmp_path):
     flow = asyncio.run(tools.choose(flow.id, "build"))
     assert "nicht erlaubt" in tools.builder.seen[1]  # the error went back to the model
     assert "Probelauf" in flow.step.text and "Avengers: Endgame (2019) ⭐ 8,2" in flow.step.text
-    assert booked == [(1, 5200, pytest.approx(0.0176))] and "5.200 Tokens ≈ 1,76 ct" in flow.step.text
+    assert booked == [(1, 5200, pytest.approx(0.01))] and "5.200 Tokens ≈ 1,00 ct" in flow.step.text
     flow = asyncio.run(tools.choose(flow.id, "keep"))
     assert flow.step.done and "gespeichert" in flow.step.text
 

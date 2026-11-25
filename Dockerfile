@@ -7,7 +7,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Patient with flaky networks (Unraid): longer timeout, more retries.
+RUN pip install --no-cache-dir --timeout 60 --retries 10 -r requirements.txt
 
 COPY arrbot ./arrbot
 COPY entrypoint.sh /entrypoint.sh

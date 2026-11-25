@@ -14,9 +14,12 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 CHANGES = {
+    "1.8.1": "Neue Standard-Modelle: gpt-6-luna für den Bot (günstiger als gpt-4o-mini, das OpenAI im Januar "
+             "abschaltet), gpt-6.1-terra für selbstgebaute Werkzeuge; Denk-Stufe einstellbar (LLM_REASONING), "
+             "/check prüft auch, ob die KI Werkzeuge aufruft",
     "1.8.0": "Nutzer dürfen nur noch suchen und hinzufügen (Löschen, Pausieren, Austauschen nur Admin), "
              "Höchstqualität pro Nutzer oder für alle, Spam-Schutz mit vorsorglicher Sperre und Warnungen, "
              "Monatsbericht (/monatsbericht), selbstgebaute Werkzeuge für den Admin (/rezepte), "

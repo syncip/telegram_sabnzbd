@@ -142,7 +142,8 @@ def build_app(cfg: Config) -> Application:
     tools.wishes = wishes
     tools.recipes = recipes.RecipeStore(cfg.data_dir)
     try:
-        tools.builder = make_provider(dataclasses.replace(cfg.llm, model=cfg.recipe_model))
+        tools.builder = make_provider(dataclasses.replace(cfg.llm, model=cfg.recipe_model,
+                                                          reasoning=cfg.recipe_reasoning, max_output=3000))
         tools.builder_model = cfg.recipe_model
     except Exception as e:  # noqa: BLE001 - the bot works without building tools
         log.warning("Werkzeug-Modell %s nicht nutzbar: %s", cfg.recipe_model, e)
@@ -627,7 +628,9 @@ def build_app(cfg: Config) -> Application:
 
     async def check_text() -> str:
         checks = await health.run_checks(bot=app.bot, provider=agent.provider, model=cfg.llm.model,
-                                         radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb, plex=plex_probe())
+                                         radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb, plex=plex_probe(),
+                                         builder=tools.builder if cfg.recipe_model != cfg.llm.model else None,
+                                         builder_model=cfg.recipe_model)
         update_state["latest"] = await version.latest(cfg.update_repo, token=cfg.update_token) or update_state["latest"]
         extra = [version.line(update_state["latest"])]
         if cfg.monitor_minutes > 0:

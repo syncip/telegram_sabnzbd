@@ -56,18 +56,23 @@ def _short(e: Exception) -> str:
 
 async def run_checks(*, bot: Any, provider: LLMProvider | None, model: str, radarr: Any, sonarr: Any,
                      sab: Any, tmdb: Any, plex: Callable[[], Awaitable[str]] | None = None,
-                     light: bool = False) -> list[Check]:
+                     light: bool = False, builder: LLMProvider | None = None, builder_model: str = "") -> list[Check]:
     """light: only the services (no Telegram, no AI call) - for the regular monitoring."""
     async def telegram() -> str:
         me = await bot.get_me()
         return f"@{me.username}"
 
-    async def llm() -> str:
-        # Smallest possible call (~60 tokens). The dummy tool keeps providers happy that reject empty lists.
-        ping = ToolSpec("ping", "Nicht benutzen.", {"type": "object", "properties": {}})
-        turn = await provider.complete("Antworte nur mit: ok", [Turn("user", text="ping")], [ping])
-        tokens = (turn.usage or {}).get("input", 0) + (turn.usage or {}).get("output", 0)
-        return f"{model} antwortet" + (f" ({tokens} Tokens)" if tokens else "")
+    def llm_check(prov: Any, name: str) -> Callable[[], Awaitable[str]]:
+        async def check() -> str:
+            # Small call (~100 tokens) that must use a tool: proves tool calling works with this model.
+            ping = ToolSpec("ping", "Immer aufrufen.", {"type": "object", "properties": {}})
+            turn = await prov.complete("Ruf das Werkzeug ping auf.", [Turn("user", text="ping")], [ping])
+            tokens = (turn.usage or {}).get("input", 0) + (turn.usage or {}).get("output", 0)
+            tools_ok = "" if any(c.name == "ping" for c in turn.tool_calls) else " – ⚠️ ruft keine Werkzeuge auf"
+            return f"{name} antwortet{tools_ok}" + (f" ({tokens} Tokens)" if tokens else "")
+        return check
+
+    llm = llm_check(provider, model)
 
     def arr(svc: Any) -> Callable[[], Awaitable[str]]:
         async def check() -> str:
@@ -88,6 +93,8 @@ async def run_checks(*, bot: Any, provider: LLMProvider | None, model: str, rada
         return f"Key gültig, deutsche Titel kommen an („{info.get('title')}“)"
 
     jobs: list[Awaitable[Check]] = [] if light else [_timed("Telegram", telegram), _timed("KI", llm)]
+    if builder is not None and not light:
+        jobs.append(_timed("KI für Werkzeuge", llm_check(builder, builder_model)))
     skipped: list[Check] = []
     for name, svc, fn in (("Radarr", radarr, arr(radarr) if radarr else None),
                           ("Sonarr", sonarr, arr(sonarr) if sonarr else None),

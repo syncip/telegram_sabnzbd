@@ -166,14 +166,14 @@ Außerdem:
   usw.; es wird nur ergänzt, nie entfernt. Braucht das Plex-Konto des Server-Besitzers.
 - **Selbstgebaute Werkzeuge (Admin):** Fragst du etwas, wofür es kein Werkzeug gibt („Welche Filme mit
   Keanu Reeves habe ich noch nicht?“), bietet der Bot an, sich eins zu bauen – mit geschätzten Kosten
-  vorher (mit `gpt-4.1` etwa 1–3 Cent pro Bau). Ein stärkeres Modell (`RECIPE_MODEL`) schreibt ein
+  vorher (mit `gpt-6.1-terra` etwa 0,5–1,5 Cent pro Bau). Ein stärkeres Modell (`RECIPE_MODEL`) schreibt ein
   **Rezept**: keine Programmierung, sondern ein paar lesende Abfragen an TMDB, Radarr oder Sonarr plus
   Filter, Sortierung und Textvorlage. Der Bot prüft es gegen eine feste Liste erlaubter Abfragen (nur
   lesen), macht einen Probelauf und zeigt dir Ergebnis und echte Kosten: „✅ Behalten“ oder „🗑 Verwerfen“.
   Behaltene Werkzeuge nutzt die normale KI ab dann direkt, das kostet nur die normale Frage. /rezepte
   listet sie, „Lösch das Werkzeug …“ entfernt eins.
 
-Die Sprach-KI ist austauschbar: **OpenAI** (z. B. `gpt-4o-mini`), **Gemini**, **Claude** oder alles
+Die Sprach-KI ist austauschbar: **OpenAI** (Standard `gpt-6-luna`), **Gemini**, **Claude** oder alles
 OpenAI-kompatible (OpenRouter, Groq, lokal mit Ollama/LM Studio).
 
 ## Einrichtung
@@ -251,8 +251,11 @@ gehen weiter, die kosten nichts. Standard-Limits gelten nie für den Admin; das 
 ## Was kostet das?
 
 Gemessen mit `gpt-4o-mini`: Eine typische Anfrage („lad mir Dune 2“) braucht 2 KI-Aufrufe mit zusammen
-etwa 3.200 Tokens rein und 60 raus, also **etwa 0,05 Cent**. Bei 5 Anfragen am Tag sind das rund
-**0,08 $ im Monat**. Mit `/limit gesamt kosten 1` bleibt der Bot sicher unter 1 $.
+etwa 3.200 Tokens rein und 60 raus. Mit dem Standard **`gpt-6-luna`** ($0,10 rein, $0,01 zwischengespeichert,
+$0,50 raus pro 1 Mio. Tokens) sind das **etwa 0,02–0,035 Cent**, bei 5 Anfragen am Tag **rund 0,04–0,05 $
+im Monat** – ein Drittel bis die Hälfte weniger als mit `gpt-4o-mini`. Mit `/limit gesamt kosten 1` bleibt
+der Bot sicher unter 1 $. Das Nachdenken steht auf `low` (`LLM_REASONING`); das reicht zum Auswählen der
+Werkzeuge und hält die Denk-Tokens klein.
 
 Warum so wenig:
 
@@ -264,8 +267,9 @@ Warum so wenig:
   „lad Dune 2“ schickt rund 690 statt 1.900 Tokens Werkzeugbeschreibung. Fehlt doch eins, holt die KI
   sich mit `more_tools` alle.
 
-`gpt-4o-mini` ist für diesen Umfang die richtige Wahl. `gpt-4.1-mini` versteht etwas besser, kostet
-aber etwa das Dreifache. Lohnt sich nur, wenn der Bot oft falsch versteht.
+`gpt-4o-mini` und `gpt-4.1` schaltet OpenAI am 14.01.2027 ab; Nachfolger ist `gpt-6-luna`. Wer ein
+altes Modell fest in `LLM_MODEL` eingetragen hat, sollte den Eintrag leeren. `/check` zeigt, ob die KI
+antwortet **und** Werkzeuge aufruft – auch für die Werkzeug-KI (`RECIPE_MODEL`).
 
 ## Woher die Daten kommen
 

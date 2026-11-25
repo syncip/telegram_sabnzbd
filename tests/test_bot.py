@@ -356,3 +356,37 @@ def test_unwritable_data_dir_does_not_break_adding(tmp_path, monkeypatch):
     res = asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 42))
     assert not res.is_error, res.content
     assert fr.movies[7] and "radarr:7" in store.state.tracked and store.writable is False
+
+
+def test_openai_reasoning_setting_falls_back_for_older_models():
+    import openai
+
+    from arrbot.llm import MAX_OUTPUT_TOKENS, REASONING_EXTRA_TOKENS, ToolSpec, Turn
+
+    sent = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        sent.append(body)
+        if "reasoning_effort" in body:
+            return httpx.Response(400, json={"error": {
+                "message": "Unsupported parameter: 'reasoning_effort' is not supported with this model.",
+                "type": "invalid_request_error", "param": "reasoning_effort", "code": "unsupported_parameter"}})
+        return httpx.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}]}}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55}})
+
+    o = OpenAICompatProvider(LLMConfig("openai", "gpt-4o-mini", "k", reasoning="low"))
+    o.client = openai.AsyncOpenAI(api_key="k", max_retries=0,
+                                  http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    ping = ToolSpec("ping", "x", {"type": "object", "properties": {}})
+    turn = asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping]))
+    assert turn.tool_calls[0].name == "ping" and turn.usage["input"] == 50
+    assert sent[0]["reasoning_effort"] == "low"
+    assert sent[0]["max_completion_tokens"] == MAX_OUTPUT_TOKENS + REASONING_EXTRA_TOKENS
+    assert "reasoning_effort" not in sent[1] and sent[1]["max_completion_tokens"] == MAX_OUTPUT_TOKENS
+    asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping]))
+    assert len(sent) == 3 and "reasoning_effort" not in sent[2]  # remembered: no second failed try
