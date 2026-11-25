@@ -88,6 +88,34 @@ class _ArrBase:
         data = await self._req("GET", "/queue", params={"pageSize": 500, **self._queue_params})
         return (data or {}).get("records", [])
 
+    async def releases(self, **params: Any) -> list[dict]:
+        """Interactive search on the indexers (slow, costs indexer API hits: use sparingly)."""
+        return await self._req("GET", "/release", params=params, timeout=90.0) or []
+
+    _item_path = ""  # "/movie" or "/series"
+
+    async def set_monitored(self, item_id: int, monitored: bool) -> dict:
+        """Off = Radarr/Sonarr stop searching for it (pause); on = search again."""
+        item = await self._req("GET", f"{self._item_path}/{item_id}")
+        item["monitored"] = monitored
+        return await self._req("PUT", f"{self._item_path}/{item_id}", json=item)
+
+    async def delete(self, item_id: int, delete_files: bool) -> None:
+        """Remove from the library; running downloads of it are removed from the download client too."""
+        id_field = "movieId" if self._item_path == "/movie" else "seriesId"
+        for q in await self.queue():
+            if q.get(id_field) == item_id and q.get("id"):
+                try:
+                    await self._req("DELETE", f"/queue/{q['id']}",
+                                    params={"removeFromClient": "true", "blocklist": "false"})
+                except ArrError as e:
+                    log.warning("Warteschlangen-Eintrag %s nicht entfernt: %s", q["id"], e)
+        params = {"deleteFiles": str(delete_files).lower()}
+        if self._item_path == "/movie":
+            params["addImportExclusion"] = "false"
+        await self._req("DELETE", f"{self._item_path}/{item_id}", params=params)
+        log.info("%s: %s %s gelöscht (Dateien: %s)", self.kind, self._item_path, item_id, delete_files)
+
     async def command(self, name: str, **body: Any) -> dict:
         return await self._req("POST", "/command", json={"name": name, **body})
 
@@ -97,6 +125,7 @@ class _ArrBase:
 
 class Radarr(_ArrBase):
     kind = "Radarr"
+    _item_path = "/movie"
     _history_params = {"includeMovie": "true"}
     _queue_params = {"includeMovie": "true"}
 
@@ -108,6 +137,9 @@ class Radarr(_ArrBase):
 
     async def get(self, movie_id: int) -> dict:
         return await self._req("GET", f"/movie/{movie_id}")
+
+    async def library(self) -> list[dict]:
+        return await self._req("GET", "/movie") or []
 
     async def add(self, tmdb_id: int, profile: str | None, min_availability: str, search: bool = True) -> dict:
         movie = await self.lookup_tmdb(tmdb_id)
@@ -136,6 +168,7 @@ class Radarr(_ArrBase):
 
 class Sonarr(_ArrBase):
     kind = "Sonarr"
+    _item_path = "/series"
     _history_params = {"includeSeries": "true", "includeEpisode": "true"}
     _queue_params = {"includeSeries": "true", "includeEpisode": "true"}
 
@@ -150,6 +183,9 @@ class Sonarr(_ArrBase):
 
     async def get(self, series_id: int) -> dict:
         return await self._req("GET", f"/series/{series_id}")
+
+    async def library(self) -> list[dict]:
+        return await self._req("GET", "/series") or []
 
     async def _language_profile_id(self) -> int | None:
         # Only Sonarr v3 has language profiles; v4 removed them.

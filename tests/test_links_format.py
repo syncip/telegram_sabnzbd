@@ -58,7 +58,7 @@ def test_local_network_links_are_refused():
         asyncio.run(urlinfo.identify("ftp://example.com/x"))
 
 
-def test_open_url_and_buttons_tools(tmp_path):
+def test_open_url_tool_returns_compact_ids(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
     tools = ToolRunner(radarr, sonarr, store, "released")
     tools.url_options = {
@@ -66,13 +66,8 @@ def test_open_url_and_buttons_tools(tmp_path):
         "check_host": False,
     }
     res = asyncio.run(tools.run(ToolCall("u", "open_url", {"url": "https://letterboxd.com/film/x/"}), 1))
-    assert json.loads(res.content)["ids"]["imdb"] == "tt12042730"
-
-    long = "x" * 60
-    res = asyncio.run(tools.run(ToolCall("b", "show_buttons", {"options": ["Alle Staffeln", " ", long]}), 1))
-    assert not res.is_error
-    assert tools.take_buttons(1) == ["Alle Staffeln", "x" * 40]
-    assert tools.take_buttons(1) == []
+    data = json.loads(res.content)
+    assert data["ids"]["imdb"] == "tt12042730" and "description" not in data
 
 
 def test_to_html_formats_and_escapes():

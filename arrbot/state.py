@@ -12,6 +12,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+FINISHED_KEEP = 200
+REQUESTS_KEEP = 1000
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -28,6 +31,8 @@ class Tracked:
     grabbed: bool = False
     completed: bool = False
     no_release_notified: bool = False
+    # [downloadId, polls waited] of grabbed downloads whose SABnzbd finish time is not announced yet
+    pending_downloads: list = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -40,6 +45,12 @@ class State:
     tracked: dict[str, Tracked] = field(default_factory=dict)
     # downloadId|status -> iso time; avoids repeating the same queue warning.
     queue_notified: dict[str, str] = field(default_factory=dict)
+    # Finished imports for "Meine Downloads": {"title", "service", "chat_ids", "at"} (newest last)
+    finished: list[dict] = field(default_factory=list)
+    # What each chat asked for (for suggestions): {"kind", "tmdb", "tvdb", "title", "chat_id", "at"}
+    requests: list[dict] = field(default_factory=list)
+    # Paused searches by key "radarr:7": {"title", "chat_ids", "until" (iso or None = until resumed)}
+    paused: dict[str, dict] = field(default_factory=dict)
 
 
 class Store:
@@ -59,6 +70,9 @@ class Store:
                 cursors=raw.get("cursors", {}),
                 tracked={k: Tracked(**v) for k, v in raw.get("tracked", {}).items()},
                 queue_notified=raw.get("queue_notified", {}),
+                finished=raw.get("finished", []),
+                requests=raw.get("requests", []),
+                paused=raw.get("paused", {}),
             )
         except (ValueError, TypeError) as e:
             log.error("state.json unlesbar (%s), starte leer", e)
@@ -69,6 +83,9 @@ class Store:
             "cursors": self.state.cursors,
             "tracked": {k: asdict(v) for k, v in self.state.tracked.items()},
             "queue_notified": self.state.queue_notified,
+            "finished": self.state.finished,
+            "requests": self.state.requests,
+            "paused": self.state.paused,
         }
         try:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
@@ -102,3 +119,29 @@ class Store:
             self.state.tracked[key] = t
         self.save()
         return t
+
+    def finish(self, t: Tracked, title: str) -> None:
+        self.state.finished.append(
+            {"title": title, "service": t.service, "chat_ids": list(t.chat_ids), "at": utcnow().isoformat()}
+        )
+        del self.state.finished[:-FINISHED_KEEP]
+
+    def owners(self, kind: str, ext_id: int | None, key: str) -> set[int]:
+        """Chats that asked for a title (requests history plus tracking)."""
+        field_name = "tmdb" if kind == "movie" else "tvdb"
+        found = {r["chat_id"] for r in self.state.requests if r["kind"] == kind and ext_id and r.get(field_name) == ext_id}
+        t = self.state.tracked.get(key)
+        return found | set(t.chat_ids if t else [])
+
+    def forget(self, key: str) -> None:
+        self.state.tracked.pop(key, None)
+        self.state.paused.pop(key, None)
+        self.save()
+
+    def record_request(self, chat_id: int, kind: str, title: str, tmdb: int | None, tvdb: int | None = None) -> None:
+        reqs = [r for r in self.state.requests
+                if not (r["chat_id"] == chat_id and r["kind"] == kind and r.get("tmdb") == tmdb and r.get("tvdb") == tvdb)]
+        reqs.append({"kind": kind, "tmdb": tmdb, "tvdb": tvdb, "title": title, "chat_id": chat_id,
+                     "at": utcnow().isoformat()})
+        self.state.requests = reqs[-REQUESTS_KEEP:]
+        self.save()

@@ -21,6 +21,7 @@ from .config import LLMConfig
 log = logging.getLogger(__name__)
 
 LLM_TIMEOUT_SECONDS = 60
+MAX_OUTPUT_TOKENS = 800
 
 
 @dataclass
@@ -43,6 +44,7 @@ class ToolResult:
     name: str
     content: str
     is_error: bool = False
+    final: str | None = None  # set by action tools: the turn ends without another AI call
 
 
 @dataclass
@@ -53,6 +55,7 @@ class Turn:
     tool_results: list[ToolResult] = field(default_factory=list)
     raw: Any = None
     provider: str | None = None
+    usage: dict = field(default_factory=dict)  # input / cached / output tokens of this call
 
 
 class LLMError(Exception):
@@ -165,12 +168,19 @@ class GeminiProvider(LLMProvider):
                 )
             elif p.text and not p.thought:
                 texts.append(p.text)
+        um = resp.usage_metadata
+        usage = {
+            "input": (um.prompt_token_count or 0) if um else 0,
+            "cached": (um.cached_content_token_count or 0) if um else 0,
+            "output": ((um.candidates_token_count or 0) + (um.thoughts_token_count or 0)) if um else 0,
+        }
         return Turn(
             role="assistant",
             text="".join(texts).strip() or None,
             tool_calls=calls,
             raw=content,
             provider=self.name,
+            usage=usage,
         )
 
 
@@ -227,6 +237,7 @@ class AnthropicProvider(LLMProvider):
             model=self.model,
             max_tokens=16000,
             system=system,
+            cache_control={"type": "ephemeral"},  # system prompt + tools are identical on every call
             messages=self._messages(history),
             tools=[{"name": t.name, "description": t.description, "input_schema": t.schema} for t in tools],
         )
@@ -254,12 +265,19 @@ class AnthropicProvider(LLMProvider):
                 texts.append(b.text)
             elif b.type == "tool_use":
                 calls.append(ToolCall(id=b.id, name=b.name, args=dict(b.input or {})))
+        u = resp.usage
+        usage = {
+            "input": u.input_tokens + (u.cache_read_input_tokens or 0) + (u.cache_creation_input_tokens or 0),
+            "cached": u.cache_read_input_tokens or 0,
+            "output": u.output_tokens,
+        }
         return Turn(
             role="assistant",
             text="".join(texts).strip() or None,
             tool_calls=calls,
             raw=resp.content,
             provider=self.name,
+            usage=usage,
         )
 
 
@@ -307,6 +325,10 @@ class OpenAICompatProvider(LLMProvider):
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=self._messages(system, history),
+                # Answers are short; the cap only guards against runaway output.
+                max_completion_tokens=MAX_OUTPUT_TOKENS,
+                # Same key for every call -> better hit rate on OpenAI's automatic prompt cache.
+                prompt_cache_key="arrbot",
                 tools=[
                     {
                         "type": "function",
@@ -330,7 +352,22 @@ class OpenAICompatProvider(LLMProvider):
             except json.JSONDecodeError:
                 args = {}
             calls.append(ToolCall(id=c.id, name=c.function.name, args=args))
-        return Turn(role="assistant", text=(msg.content or "").strip() or None, tool_calls=calls, provider=self.name)
+        u = resp.usage
+        usage = {}
+        if u:
+            details = getattr(u, "prompt_tokens_details", None)
+            usage = {
+                "input": u.prompt_tokens or 0,
+                "cached": (getattr(details, "cached_tokens", 0) or 0) if details else 0,
+                "output": u.completion_tokens or 0,
+            }
+        return Turn(
+            role="assistant",
+            text=(msg.content or "").strip() or None,
+            tool_calls=calls,
+            provider=self.name,
+            usage=usage,
+        )
 
 
 def make_provider(cfg: LLMConfig) -> LLMProvider:

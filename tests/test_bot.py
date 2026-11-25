@@ -102,18 +102,21 @@ def test_agent_adds_movie_and_tracks(tmp_path):
     llm = ScriptedLLM([
         Turn("assistant", tool_calls=[ToolCall("1", "search_movies", {"query": "Dune 2", "year": 2024})]),
         Turn("assistant", tool_calls=[ToolCall("2", "add_movie", {"tmdb_id": 693134})]),
-        Turn("assistant", text="Dune: Part Two ist hinzugefügt."),
     ])
     agent = Agent(llm, tools, 30, 40)
     reply = asyncio.run(agent.handle(42, "lad dune 2"))
-    assert reply == "Dune: Part Two ist hinzugefügt."
+    # The add ends the turn: no third AI call just to say "done", and the history is cleared.
+    assert len(llm.seen) == 2 and llm.script == []
+    assert reply.startswith("✅ Dune: Part Two (2024) hinzugefügt")
+    assert agent.convs[42].history == []
     search_result = json.loads(llm.seen[1][-1].tool_results[0].content)
-    assert search_result[0]["tmdb_id"] == 693134 and len(search_result) == 1  # year filter
+    assert search_result == [{"tmdb": 693134, "title": "Dune: Part Two", "year": 2024}]  # compact, year filter
     added = fr.movies[7]
     assert added["qualityProfileId"] == 1 and added["rootFolderPath"] == "/media"
     assert added["addOptions"] == {"searchForMovie": False}
     assert fr.commands == [{"name": "MoviesSearch", "movieIds": [7]}]  # manual search like the button
     assert store.state.tracked["radarr:7"].chat_ids == [42]
+    assert agent.usage.requests == 1 and agent.usage.calls == 2
 
 
 def test_tool_error_is_reported_not_raised(tmp_path):
@@ -190,15 +193,19 @@ def test_no_release_notice(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
     sent = []
 
-    async def send(chat, text):
+    buttons = []
+
+    async def send(chat, text, kb=None):
         sent.append(text)
+        buttons.append(kb)
 
     tr = Tracker(radarr, sonarr, store, send, no_release_minutes=30, track_days=30)
     t = store.track("radarr", 7, "Obscure Film (1950)", 1)
     t.added_at = (utcnow() - timedelta(minutes=31)).isoformat()
     asyncio.run(tr.poll())
     asyncio.run(tr.poll())
-    assert len(sent) == 1 and "kein passender Download" in sent[0]
+    assert len(sent) == 1 and "kein passender Download" in sent[0]  # only once
+    assert ("⏸ In 3 Tagen nochmal", "n:p3:radarr:7") in buttons[0] and ("🗑 Löschen", "n:rm:radarr:7") in buttons[0]
 
 
 HISTORY = [
@@ -226,40 +233,76 @@ def test_provider_wire_formats():
     assert om[3] == {"role": "tool", "tool_call_id": "c1", "content": "[]"}
 
 
-def test_quality_prompt_flow(tmp_path):
+def test_movie_quality_buttons_without_ai(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
     tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
 
-    # No quality named -> nothing added yet, a prompt is queued for the chat.
     res = asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 42))
-    data = json.loads(res.content)
-    assert data["waiting_for_quality_choice"] and fr.movies == {}
-    [p] = tools.take_new_prompts(42)
-    assert p.profiles == ["HD-1080p", "Ultra-HD"] and p.default == "HD-1080p"
-    assert tools.take_new_prompts(42) == []
+    assert res.final == "" and not res.is_error and fr.movies == {}
+    [flow] = tools.take_outbox(42)
+    assert flow.stage == "quality" and flow.step.timeout == 60
+    assert flow.step.buttons == [("⭐ HD-1080p", "p0"), ("Ultra-HD", "p1")]
+    assert tools.take_outbox(42) == []
 
-    # Button press picks a profile; a later timeout finds nothing left to do.
-    assert tools.pop_pending(p.id) is p
-    msg = asyncio.run(tools.complete_pending(p, "Ultra-HD"))
-    assert msg.startswith("✅") and fr.movies[7]["qualityProfileId"] == 2
-    assert tools.pop_pending(p.id) is None
+    flow = asyncio.run(tools.choose(flow.id, "p1"))
+    assert flow.step.done and flow.step.text.startswith("✅") and fr.movies[7]["qualityProfileId"] == 2
+    assert asyncio.run(tools.choose(flow.id, "p0")) is None  # stale button
+    assert asyncio.run(tools.quality_timeout(flow.id)) is None
     assert "radarr:7" in store.state.tracked
 
-    # Explicit quality -> added directly, no prompt.
-    res = asyncio.run(tools.run(ToolCall("y", "add_series", {"tvdb_id": 371980, "quality_profile": "ultra-hd"}), 42))
-    assert json.loads(res.content)["added"] and fs.series[3]["qualityProfileId"] == 2
-    assert tools.take_new_prompts(42) == []
 
-
-def test_quality_prompt_default_profile_from_config(tmp_path):
+def test_quality_timeout_takes_configured_default(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
     radarr.cfg.quality_profile = "Ultra-HD"
     tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
     asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 1))
-    [p] = tools.take_new_prompts(1)
-    assert p.default == "Ultra-HD"
-    asyncio.run(tools.complete_pending(tools.pop_pending(p.id), p.default))  # timeout path
-    assert fr.movies[7]["qualityProfileId"] == 2
+    [flow] = tools.take_outbox(1)
+    assert flow.default_profile == "Ultra-HD"
+    flow = asyncio.run(tools.quality_timeout(flow.id))
+    assert flow.step.done and fr.movies[7]["qualityProfileId"] == 2
+
+
+def test_series_season_then_quality_buttons(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
+    asyncio.run(tools.run(ToolCall("s", "search_series", {"query": "severance"}), 1))
+    res = asyncio.run(tools.run(ToolCall("x", "add_series", {"tvdb_id": 371980}), 1))
+    assert res.final == ""
+    [flow] = tools.take_outbox(1)
+    assert flow.stage == "seasons" and flow.step.timeout == 0
+    assert flow.step.buttons == [("Alle Staffeln", "all"), ("Staffel 1", "s1"), ("Staffel 2", "s2"),
+                                 ("Nur neue Folgen", "future")]
+    flow = asyncio.run(tools.choose(flow.id, "s2"))
+    assert flow.stage == "quality" and "Staffel 2" in flow.step.text
+    flow = asyncio.run(tools.choose(flow.id, "p0"))
+    assert flow.step.done, flow.step.text
+    assert {x["seasonNumber"]: x["monitored"] for x in fs.series[3]["seasons"]} == {0: False, 1: False, 2: True}
+
+
+def test_explicit_choices_add_immediately(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
+    args = {"tvdb_id": 371980, "monitor": "all", "quality_profile": "ultra-hd"}
+    res = asyncio.run(tools.run(ToolCall("y", "add_series", args), 42))
+    assert res.final.startswith("✅") and fs.series[3]["qualityProfileId"] == 2
+    assert tools.take_outbox(42) == []
+
+
+def test_offer_titles_and_pick_without_ai(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
+    llm = ScriptedLLM([
+        Turn("assistant", tool_calls=[ToolCall("1", "search_movies", {"query": "Dune"})]),
+        Turn("assistant", tool_calls=[ToolCall("2", "offer_titles", {"kind": "movie", "ids": [693134, 438631]})]),
+    ])
+    agent = Agent(llm, tools, 30, 40)
+    assert asyncio.run(agent.handle(1, "dune")) == ""  # buttons only, no extra AI text
+    [offer] = tools.take_outbox(1)
+    assert [c.label for c in offer.cands] == ["Dune: Part Two (2024)", "Dune (2021)"]
+    offer.message_id = 99
+    _, flow = asyncio.run(tools.choose_offer(offer.id, 1))
+    assert flow.cand.ext_id == 438631 and flow.stage == "quality" and flow.message_id == 99
+    assert asyncio.run(tools.choose_offer(offer.id, 0)) is None  # offer used up
 
 
 def test_unwritable_data_dir_does_not_break_adding(tmp_path, monkeypatch):

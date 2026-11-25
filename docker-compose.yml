@@ -20,8 +20,11 @@ services:
       # --- Telegram ---------------------------------------------------------
       # Token von @BotFather
       TELEGRAM_BOT_TOKEN: ""
-      # Wer den Bot benutzen darf, kommagetrennt (z. B. "12345,67890").
-      # Deine ID: dem Bot schreiben, er antwortet mit "Kein Zugriff. Deine Telegram-ID ist ..."
+      # Deine Telegram-ID (z. B. über @userinfobot). Du bist Admin: du gibst andere Nutzer
+      # im Bot per Button frei, sperrst sie und setzt Limits (/nutzer, /limit).
+      ADMIN_USER_ID: ""
+      # Optional: weitere Nutzer, die sofort freigeschaltet sind, kommagetrennt ("12345,67890").
+      # Alle anderen, die dem Bot schreiben, landen als Anfrage bei dir.
       ALLOWED_USER_IDS: ""
 
       # --- Sprach-KI ---------------------------------------------------------
@@ -53,18 +56,32 @@ services:
       # Standard-Qualitätsprofil in Sonarr (wie bei Radarr)
       SONARR_QUALITY_PROFILE: ""
 
+      # --- SABnzbd (optional): Fortschritt, Geschwindigkeit, Fertig-Uhrzeit --------
+      # Leer lassen, wenn nicht genutzt.
+      SABNZBD_URL: "http://sabnzbd:8080"
+      # SABnzbd -> Config -> General -> API Key
+      SABNZBD_API_KEY: ""
+
+      # --- TMDB (optional, kostenlos): deutsche Titel, deutsche Termine, Vorschläge, Top-Listen ---
+      # themoviedb.org -> Einstellungen -> API: "API-Schlüssel" oder "Lesezugriffs-Token"
+      TMDB_API_KEY: ""
+
+      # Zeitzone für "fertig ca. 21:45 Uhr"
+      TZ: "Europe/Berlin"
+
       # --- Verhalten ----------------------------------------------------------
       # Nennst du keine Qualität, zeigt der Bot Buttons mit allen Profilen und nimmt nach
       # so vielen Sekunden ohne Auswahl das Standardprofil. "0" = nie fragen, sofort Standard.
       QUALITY_PROMPT_SECONDS: "60"
       # Wie oft Radarr/Sonarr nach neuen Ereignissen gefragt werden (Sekunden)
       POLL_INTERVAL_SECONDS: "60"
-      # Nach so vielen Minuten ohne gefundenen Download einmal Bescheid geben
+      # Nach so vielen Minuten ohne gefundenen Download EINMAL Bescheid geben (mit Buttons
+      # „In 3/7 Tagen nochmal“ und „Löschen“). Danach still weitersuchen. "0" = nie melden.
       NO_RELEASE_NOTICE_MINUTES: "30"
       # So lange werden Serien nach der letzten Aktivität weiter beobachtet (Tage)
       TRACK_DAYS: "30"
       # Nach so vielen Minuten Pause beginnt ein neues Gespräch
-      CONVERSATION_IDLE_MINUTES: "30"
+      CONVERSATION_IDLE_MINUTES: "10"
       LOG_LEVEL: "INFO"
 
     # Laufen Radarr/Sonarr in einem anderen Compose-Projekt, das gemeinsame Netzwerk

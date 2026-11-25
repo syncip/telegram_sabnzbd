@@ -40,6 +40,7 @@ class LLMConfig:
 @dataclass
 class Config:
     telegram_token: str
+    admin_id: int
     allowed_users: set[int]
     llm: LLMConfig
     radarr: ArrConfig | None
@@ -47,11 +48,15 @@ class Config:
     poll_interval: int = 60
     no_release_minutes: int = 30
     track_days: int = 30
-    history_idle_minutes: int = 30
-    max_history_messages: int = 40
+    history_idle_minutes: int = 10
+    max_history_messages: int = 16
     minimum_availability: str = "released"
     quality_prompt_seconds: int = 60
     data_dir: str = "/data"
+    sabnzbd_url: str | None = None
+    sabnzbd_api_key: str | None = None
+    timezone: str = "Europe/Berlin"
+    tmdb_api_key: str | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -103,22 +108,36 @@ def load_config() -> Config:
         raise SystemExit("Mindestens RADARR_URL/RADARR_API_KEY oder SONARR_URL/SONARR_API_KEY setzen.")
 
     allowed = _int_list(_env("ALLOWED_USER_IDS"))
-    if not allowed:
+    admin_raw = _env("ADMIN_USER_ID")
+    if admin_raw:
+        admin_id = int(admin_raw)
+    elif len(allowed) == 1:
+        admin_id = next(iter(allowed))  # older setups: the single allowed user becomes admin
+    else:
         raise SystemExit(
-            "ALLOWED_USER_IDS fehlt. Ohne Liste könnte jeder deinen Bot steuern. "
-            "Deine ID bekommst du z. B. über @userinfobot."
+            "ADMIN_USER_ID fehlt. Trag deine Telegram-ID ein (z. B. über @userinfobot herausfinden). "
+            "Weitere Nutzer gibst du dann im Bot frei."
         )
+
+    sab_url, sab_key = _env("SABNZBD_URL"), _env("SABNZBD_API_KEY")
+    if bool(sab_url) != bool(sab_key):
+        raise SystemExit("Für SABnzbd bitte SABNZBD_URL und SABNZBD_API_KEY beide setzen (oder beide leer).")
 
     return Config(
         telegram_token=_env("TELEGRAM_BOT_TOKEN", required=True),  # type: ignore[arg-type]
+        admin_id=admin_id,
         allowed_users=allowed,
+        sabnzbd_url=sab_url,
+        sabnzbd_api_key=sab_key,
+        timezone=_env("TZ", "Europe/Berlin"),  # type: ignore[arg-type]
+        tmdb_api_key=_env("TMDB_API_KEY"),
         llm=llm,
         radarr=radarr,
         sonarr=sonarr,
         poll_interval=int(_env("POLL_INTERVAL_SECONDS", "60")),  # type: ignore[arg-type]
         no_release_minutes=int(_env("NO_RELEASE_NOTICE_MINUTES", "30")),  # type: ignore[arg-type]
         track_days=int(_env("TRACK_DAYS", "30")),  # type: ignore[arg-type]
-        history_idle_minutes=int(_env("CONVERSATION_IDLE_MINUTES", "30")),  # type: ignore[arg-type]
+        history_idle_minutes=int(_env("CONVERSATION_IDLE_MINUTES", "10")),  # type: ignore[arg-type]
         minimum_availability=_env("RADARR_MINIMUM_AVAILABILITY", "released"),  # type: ignore[arg-type]
         quality_prompt_seconds=int(_env("QUALITY_PROMPT_SECONDS", "60")),  # type: ignore[arg-type]
         data_dir=_env("DATA_DIR", "/data"),  # type: ignore[arg-type]
