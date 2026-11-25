@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from .arr import ArrError, Radarr, Sonarr
@@ -23,7 +25,12 @@ def _short(text: str | None, n: int = 160) -> str:
 
 def build_specs(has_radarr: bool, has_sonarr: bool) -> list[ToolSpec]:
     specs: list[ToolSpec] = []
-    profile = {"type": "string", "description": "Name des Qualitätsprofils. Weglassen = Standard."}
+    profile = {
+        "type": "string",
+        "description": "Name des Qualitätsprofils (aus list_quality_profiles). NUR setzen, wenn der Nutzer "
+        "ausdrücklich eine Qualität verlangt (z. B. '4K', 'in 1080p'). Sonst weglassen: dann fragt der Bot "
+        "selbst per Buttons nach und nimmt ohne Antwort den Standard.",
+    }
     if has_radarr:
         specs += [
             ToolSpec(
@@ -126,13 +133,79 @@ def build_specs(has_radarr: bool, has_sonarr: bool) -> list[ToolSpec]:
     return specs
 
 
+@dataclass
+class PendingAdd:
+    """An add that waits for the user to pick a quality profile."""
+
+    id: str
+    chat_id: int
+    kind: str  # "movie" | "series"
+    title: str
+    params: dict
+    profiles: list[str]
+    default: str
+    message_id: int | None = None
+
+
 class ToolRunner:
-    def __init__(self, radarr: Radarr | None, sonarr: Sonarr | None, store: Store, min_availability: str):
+    def __init__(
+        self,
+        radarr: Radarr | None,
+        sonarr: Sonarr | None,
+        store: Store,
+        min_availability: str,
+        quality_prompt_seconds: int = 0,
+    ):
         self.radarr = radarr
         self.sonarr = sonarr
         self.store = store
         self.min_availability = min_availability
+        self.quality_prompt_seconds = quality_prompt_seconds
         self.specs = build_specs(radarr is not None, sonarr is not None)
+        self.pending: dict[str, PendingAdd] = {}
+        self._new_prompts: dict[int, list[PendingAdd]] = {}
+
+    # ---- quality choice -------------------------------------------------
+    def take_new_prompts(self, chat_id: int) -> list[PendingAdd]:
+        """Prompts created during the last agent turn; the bot sends them as buttons."""
+        return self._new_prompts.pop(chat_id, [])
+
+    def pop_pending(self, pid: str) -> PendingAdd | None:
+        return self.pending.pop(pid, None)
+
+    async def _maybe_ask(self, chat_id: int, kind: str, svc: Any, title: str, params: dict) -> dict | None:
+        """Register a quality prompt instead of adding right away. None = add directly."""
+        if self.quality_prompt_seconds <= 0:
+            return None
+        profiles = [p["name"] for p in await svc.quality_profiles()]
+        if len(profiles) < 2:
+            return None
+        default = (await svc.resolve_profile(None))["name"]
+        p = PendingAdd(uuid.uuid4().hex[:10], chat_id, kind, title, params, profiles, default)
+        self.pending[p.id] = p
+        self._new_prompts.setdefault(chat_id, []).append(p)
+        return {
+            "waiting_for_quality_choice": True,
+            "title": title,
+            "note": f"Noch NICHT hinzugefügt. Direkt nach deiner Antwort bekommt der Nutzer Buttons mit den "
+            f"Qualitätsprofilen. Ohne Auswahl wird nach {self.quality_prompt_seconds} Sekunden das "
+            f"Standardprofil '{default}' genommen. Sag das in einem kurzen Satz; frag nicht selbst nach "
+            "der Qualität und zähle die Profile nicht auf.",
+        }
+
+    async def complete_pending(self, p: PendingAdd, profile: str) -> str:
+        """Actually add the title with the chosen profile; returns a user-facing message."""
+        try:
+            if p.kind == "movie":
+                res = await self._add_movie(p.chat_id, profile=profile, **p.params)
+            else:
+                res = await self._add_series(p.chat_id, profile=profile, **p.params)
+        except ArrError as e:
+            return f"❌ {p.title} konnte nicht hinzugefügt werden: {e}"
+        except Exception as e:  # noqa: BLE001
+            log.exception("Hinzufügen nach Qualitätswahl fehlgeschlagen")
+            return f"❌ {p.title} konnte nicht hinzugefügt werden: {e}"
+        return f"✅ {res['title']} hinzugefügt ({profile}). Ich melde mich, wenn der Download startet."
 
     async def run(self, call: ToolCall, chat_id: int) -> ToolResult:
         fn = getattr(self, f"_t_{call.name}", None)
@@ -204,14 +277,25 @@ class ToolRunner:
 
     async def _t_add_movie(self, chat_id: int, tmdb_id: int, quality_profile: str | None = None) -> dict:
         radarr: Radarr = self._need(self.radarr, "Radarr")
-        movie = await radarr.add(int(tmdb_id), quality_profile, self.min_availability)
+        if quality_profile:
+            await radarr.resolve_profile(quality_profile)  # fail early on a wrong name
+        else:
+            movie = await radarr.lookup_tmdb(int(tmdb_id))
+            if movie.get("id"):
+                raise ArrError(f"'{movie.get('title')}' ist schon in Radarr (id {movie['id']}).")
+            title = f"{movie.get('title')} ({movie.get('year')})"
+            asked = await self._maybe_ask(chat_id, "movie", radarr, title, {"tmdb_id": int(tmdb_id)})
+            if asked:
+                return asked
+        res = await self._add_movie(chat_id, int(tmdb_id), quality_profile)
+        res["note"] = "Suche gestartet. Der Nutzer bekommt automatisch Bescheid, wenn der Download startet und fertig ist."
+        return res
+
+    async def _add_movie(self, chat_id: int, tmdb_id: int, profile: str | None) -> dict:
+        radarr: Radarr = self._need(self.radarr, "Radarr")
+        movie = await radarr.add(tmdb_id, profile, self.min_availability)
         self.store.track("radarr", movie["id"], f"{movie['title']} ({movie.get('year')})", chat_id)
-        return {
-            "added": True,
-            "title": movie["title"],
-            "year": movie.get("year"),
-            "note": "Suche gestartet. Der Nutzer bekommt automatisch Bescheid, wenn der Download startet und fertig ist.",
-        }
+        return {"added": True, "title": movie["title"], "year": movie.get("year")}
 
     async def _t_add_series(
         self,
@@ -222,14 +306,37 @@ class ToolRunner:
         quality_profile: str | None = None,
     ) -> dict:
         sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
-        seasons = [int(s) for s in seasons] if seasons else None
-        series = await sonarr.add(int(tvdb_id), quality_profile, monitor=monitor, seasons=seasons)
+        params = {
+            "tvdb_id": int(tvdb_id),
+            "monitor": monitor,
+            "seasons": [int(s) for s in seasons] if seasons else None,
+        }
+        if quality_profile:
+            await sonarr.resolve_profile(quality_profile)
+        else:
+            series = await sonarr.lookup_tvdb(int(tvdb_id))
+            if series.get("id"):
+                raise ArrError(f"'{series.get('title')}' ist schon in Sonarr (id {series['id']}).")
+            title = series.get("title", "?")
+            if params["seasons"]:
+                title += " (Staffel " + ", ".join(map(str, params["seasons"])) + ")"
+            asked = await self._maybe_ask(chat_id, "series", sonarr, title, params)
+            if asked:
+                return asked
+        res = await self._add_series(chat_id, profile=quality_profile, **params)
+        res["note"] = "Suche gestartet. Der Nutzer bekommt automatisch Bescheid, wenn Downloads starten und fertig sind."
+        return res
+
+    async def _add_series(
+        self, chat_id: int, tvdb_id: int, monitor: str, seasons: list[int] | None, profile: str | None
+    ) -> dict:
+        sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
+        series = await sonarr.add(tvdb_id, profile, monitor=monitor, seasons=seasons)
         self.store.track("sonarr", series["id"], series["title"], chat_id)
         return {
             "added": True,
             "title": series["title"],
             "monitor": "Staffeln " + ", ".join(map(str, seasons)) if seasons else monitor,
-            "note": "Suche gestartet. Der Nutzer bekommt automatisch Bescheid, wenn Downloads starten und fertig sind.",
         }
 
     async def _t_search_existing(

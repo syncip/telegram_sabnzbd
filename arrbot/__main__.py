@@ -11,7 +11,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)  # hides the bot token in URLs
-    build_app(load_config()).run_polling(allowed_updates=["message"])
+    build_app(load_config()).run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

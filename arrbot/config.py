@@ -50,6 +50,7 @@ class Config:
     history_idle_minutes: int = 30
     max_history_messages: int = 40
     minimum_availability: str = "released"
+    quality_prompt_seconds: int = 60
     data_dir: str = "/data"
     extra: dict = field(default_factory=dict)
 
@@ -119,5 +120,6 @@ def load_config() -> Config:
         track_days=int(_env("TRACK_DAYS", "30")),  # type: ignore[arg-type]
         history_idle_minutes=int(_env("CONVERSATION_IDLE_MINUTES", "30")),  # type: ignore[arg-type]
         minimum_availability=_env("RADARR_MINIMUM_AVAILABILITY", "released"),  # type: ignore[arg-type]
+        quality_prompt_seconds=int(_env("QUALITY_PROMPT_SECONDS", "60")),  # type: ignore[arg-type]
         data_dir=_env("DATA_DIR", "/data"),  # type: ignore[arg-type]
     )

@@ -223,3 +223,39 @@ def test_provider_wire_formats():
     om = o._messages("sys", HISTORY)
     assert om[0]["role"] == "system" and om[2]["tool_calls"][0]["function"]["name"] == "search_movies"
     assert om[3] == {"role": "tool", "tool_call_id": "c1", "content": "[]"}
+
+
+def test_quality_prompt_flow(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
+
+    # No quality named -> nothing added yet, a prompt is queued for the chat.
+    res = asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 42))
+    data = json.loads(res.content)
+    assert data["waiting_for_quality_choice"] and fr.movies == {}
+    [p] = tools.take_new_prompts(42)
+    assert p.profiles == ["HD-1080p", "Ultra-HD"] and p.default == "HD-1080p"
+    assert tools.take_new_prompts(42) == []
+
+    # Button press picks a profile; a later timeout finds nothing left to do.
+    assert tools.pop_pending(p.id) is p
+    msg = asyncio.run(tools.complete_pending(p, "Ultra-HD"))
+    assert msg.startswith("✅") and fr.movies[7]["qualityProfileId"] == 2
+    assert tools.pop_pending(p.id) is None
+    assert "radarr:7" in store.state.tracked
+
+    # Explicit quality -> added directly, no prompt.
+    res = asyncio.run(tools.run(ToolCall("y", "add_series", {"tvdb_id": 371980, "quality_profile": "ultra-hd"}), 42))
+    assert json.loads(res.content)["added"] and fs.series[3]["qualityProfileId"] == 2
+    assert tools.take_new_prompts(42) == []
+
+
+def test_quality_prompt_default_profile_from_config(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    radarr.cfg.quality_profile = "Ultra-HD"
+    tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
+    asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 1))
+    [p] = tools.take_new_prompts(1)
+    assert p.default == "Ultra-HD"
+    asyncio.run(tools.complete_pending(tools.pop_pending(p.id), p.default))  # timeout path
+    assert fr.movies[7]["qualityProfileId"] == 2

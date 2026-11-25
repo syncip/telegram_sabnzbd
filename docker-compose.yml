@@ -30,8 +30,10 @@ services:
       RADARR_URL: "http://radarr:7878"
       # Radarr -> Settings -> General -> API Key
       RADARR_API_KEY: ""
-      # Leer = erster Root-Ordner / erstes Qualitätsprofil in Radarr
+      # Leer = erster Root-Ordner in Radarr
       RADARR_ROOT_FOLDER: ""
+      # Standard-Qualitätsprofil, exakt wie in Radarr benannt (Groß/klein egal), z. B. "1080p german".
+      # Wird genommen, wenn bei der Nachfrage nichts gewählt wird. Leer = erstes Profil in Radarr.
       RADARR_QUALITY_PROFILE: ""
       # announced | inCinemas | released
       RADARR_MINIMUM_AVAILABILITY: "released"
@@ -40,9 +42,13 @@ services:
       SONARR_URL: "http://sonarr:8989"
       SONARR_API_KEY: ""
       SONARR_ROOT_FOLDER: ""
+      # Standard-Qualitätsprofil in Sonarr (wie bei Radarr)
       SONARR_QUALITY_PROFILE: ""
 
       # --- Verhalten ----------------------------------------------------------
+      # Nennst du keine Qualität, zeigt der Bot Buttons mit allen Profilen und nimmt nach
+      # so vielen Sekunden ohne Auswahl das Standardprofil. "0" = nie fragen, sofort Standard.
+      QUALITY_PROMPT_SECONDS: "60"
       # Wie oft Radarr/Sonarr nach neuen Ereignissen gefragt werden (Sekunden)
       POLL_INTERVAL_SECONDS: "60"
       # Nach so vielen Minuten ohne gefundenen Download einmal Bescheid geben

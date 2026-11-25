@@ -4,6 +4,9 @@ Schreib dem Bot ganz normal, was du sehen willst („die neueste Staffel von Sev
 „Dune, den neuen“). Er sucht den Titel, fragt nach, wenn mehrere passen, fügt ihn zu Radarr/Sonarr hinzu
 und schreibt dir:
 
+- 🎚 Buttons zur Qualität, falls du keine genannt hast (ohne Auswahl nach 60 s das Standardprofil aus
+  `RADARR_QUALITY_PROFILE` / `SONARR_QUALITY_PROFILE`)
+
 - ⬇️ wenn der Download startet (mit Qualität und Indexer)
 - ✅ wenn er fertig und importiert ist
 - ❌ wenn er fehlschlägt (mit Grund)
