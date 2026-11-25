@@ -54,8 +54,10 @@ def _short(e: Exception) -> str:
     return text[:150]
 
 
-async def run_checks(*, bot: Any, provider: LLMProvider, model: str, radarr: Any, sonarr: Any,
-                     sab: Any, tmdb: Any) -> list[Check]:
+async def run_checks(*, bot: Any, provider: LLMProvider | None, model: str, radarr: Any, sonarr: Any,
+                     sab: Any, tmdb: Any, plex: Callable[[], Awaitable[str]] | None = None,
+                     light: bool = False) -> list[Check]:
+    """light: only the services (no Telegram, no AI call) - for the regular monitoring."""
     async def telegram() -> str:
         me = await bot.get_me()
         return f"@{me.username}"
@@ -85,12 +87,14 @@ async def run_checks(*, bot: Any, provider: LLMProvider, model: str, radarr: Any
         info = await tmdb._get("/movie/603", language="de-DE")  # "Matrix": stable test title
         return f"Key gültig, deutsche Titel kommen an („{info.get('title')}“)"
 
-    jobs: list[Awaitable[Check]] = [_timed("Telegram", telegram), _timed("KI", llm)]
+    jobs: list[Awaitable[Check]] = [] if light else [_timed("Telegram", telegram), _timed("KI", llm)]
     skipped: list[Check] = []
     for name, svc, fn in (("Radarr", radarr, arr(radarr) if radarr else None),
                           ("Sonarr", sonarr, arr(sonarr) if sonarr else None),
-                          ("SABnzbd", sab, sabnzbd), ("TMDB", tmdb, tmdb_check)):
+                          ("SABnzbd", sab, sabnzbd), ("TMDB", tmdb, tmdb_check), ("Plex", plex, plex)):
         if svc is None:
+            if light or name == "Plex":
+                continue
             hint = {"TMDB": "nicht eingerichtet – ohne Key keine deutschen Titel, Top-Listen, Vorschläge",
                     "SABnzbd": "nicht eingerichtet – ohne SABnzbd keine Fertig-Uhrzeit"}.get(name, "nicht eingerichtet")
             skipped.append(Check(name, None, hint))
@@ -104,3 +108,49 @@ def render(checks: list[Check]) -> str:
     head = "🩺 <b>API-Check</b> – " + ("alles in Ordnung ✅" if not bad else f"{bad} Problem{'e' if bad > 1 else ''} ❌")
     return "\n".join([head, ""] + [c.line for c in checks])
 
+
+
+class Monitor:
+    """Regular check of the services. Tells the admins when one goes down and when it is back.
+
+    A service counts as down only after FAILS checks in a row, so a single hiccup (restart, update)
+    stays quiet.
+    """
+
+    FAILS = 2
+
+    def __init__(self) -> None:
+        self.fails: dict[str, int] = {}
+        self.down: dict[str, tuple[float, str]] = {}  # name -> (since, reason)
+
+    def update(self, checks: list[Check], now: float | None = None) -> list[str]:
+        now = time.time() if now is None else now
+        out = []
+        for c in checks:
+            if c.ok is None:
+                continue
+            if c.ok:
+                self.fails.pop(c.name, None)
+                if c.name in self.down:
+                    since, _ = self.down.pop(c.name)
+                    out.append(f"✅ {c.name} läuft wieder (war {_duration(now - since)} weg).")
+                continue
+            self.fails[c.name] = self.fails.get(c.name, 0) + 1
+            if self.fails[c.name] == self.FAILS and c.name not in self.down:
+                self.down[c.name] = (now, c.detail)
+                out.append(f"🚨 {c.name} ist nicht erreichbar: {c.detail}")
+        return out
+
+    def status(self) -> str:
+        if not self.down:
+            return "🛡 Überwachung: alle Dienste laufen"
+        return "🛡 Überwachung: " + ", ".join(f"{n} weg seit {_duration(time.time() - s)}"
+                                            for n, (s, _) in self.down.items())
+
+
+def _duration(seconds: float) -> str:
+    m = int(seconds // 60)
+    if m < 60:
+        return f"{max(m, 1)} Min."
+    h, m = divmod(m, 60)
+    return f"{h} Std. {m} Min." if h < 24 else f"{h // 24} Tagen"

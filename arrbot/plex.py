@@ -13,7 +13,7 @@ import logging
 import sqlite3
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +64,56 @@ class Item:
     def complete(self) -> bool:
         """Seen completely by this user."""
         return self.watched if self.kind == "movie" else bool(self.leaves) and self.viewed_leaves >= self.leaves
+
+
+@dataclass
+class New:
+    kind: str  # movie | series
+    title: str
+    year: int | None
+    rating_key: str
+    added: int  # unix time
+    genres: list[str] = field(default_factory=list)
+    episodes: list[str] = field(default_factory=list)  # "S02E03"
+    seasons: list[int] = field(default_factory=list)
+
+    @property
+    def line(self) -> str:
+        name = f"{self.title} ({self.year})" if self.year else self.title
+        if self.kind == "movie":
+            return f"🎬 {name}"
+        if self.seasons:
+            return f"📺 {name} – Staffel {', '.join(map(str, sorted(set(self.seasons))))}"
+        eps = sorted(set(self.episodes))
+        if len(eps) == 1:
+            return f"📺 {name} – {eps[0]}"
+        return f"📺 {name} – {len(eps)} neue Folgen ({eps[0]}–{eps[-1]})" if eps else f"📺 {name}"
+
+
+def new_text(items: list[New], like: list[str], avoid: list[str], limit: int = 12,
+             norm: Any = None) -> tuple[str, list[New]]:
+    """Daily 'Neu in Plex' for one user: avoided genres left out, liked ones first (⭐).
+    norm: maps genre names to one spelling ("Comedy" / "Komödie"), default: lower case."""
+    def n_(g: str) -> str:
+        return ((norm(g) if norm else None) or g).lower()
+
+    low_avoid = {n_(g) for g in avoid}
+    low_like = {n_(g) for g in like}
+
+    def genres(n: New) -> set[str]:
+        return {n_(g) for g in n.genres}
+
+    keep = [n for n in items if not (genres(n) & low_avoid)]
+    if not keep:
+        return "", []
+    keep.sort(key=lambda n: (not (genres(n) & low_like), -n.added))
+    lines = ["🍿 <b>Neu in Plex</b>"]
+    for n in keep[:limit]:
+        star = " ⭐" if genres(n) & low_like else ""
+        lines.append(html.escape(n.line) + star)
+    if len(keep) > limit:
+        lines.append(f"<i>… und {len(keep) - limit} weitere</i>")
+    return "\n".join(lines), keep[:limit]
 
 
 def utcnow() -> str:
@@ -122,6 +172,18 @@ class PlexStore:
     def remove(self, user_id: int) -> None:
         with self._lock, self._db:
             self._db.execute("DELETE FROM plex WHERE user_id=?", (user_id,))
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str | None) -> None:
+        with self._lock, self._db:
+            if value is None:
+                self._db.execute("DELETE FROM meta WHERE key=?", (key,))
+            else:
+                self._db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value))
 
 
 def _ids(meta: dict) -> tuple[int | None, int | None]:
@@ -261,6 +323,30 @@ class Plex:
 
     async def episodes(self, a: Account, rating_key: str) -> list[dict]:
         return (await self._srv(a, f"/library/metadata/{rating_key}/allLeaves")).get("Metadata") or []
+
+    async def recently_added(self, a: Account, since: int) -> list["New"]:
+        """Movies and shows that came into Plex after `since` (unix time); new episodes grouped per show."""
+        data = await self._srv(a, "/library/recentlyAdded", includeGuids=1,
+                               **{"X-Plex-Container-Start": 0, "X-Plex-Container-Size": 100})
+        out: dict[str, New] = {}
+        for m in data.get("Metadata") or []:
+            added = int(m.get("addedAt") or 0)
+            if added <= since:
+                continue
+            t = m.get("type")
+            if t == "movie":
+                out[str(m.get("ratingKey"))] = New("movie", m.get("title") or "?", m.get("year"), str(m.get("ratingKey")),
+                                                   added, [g.get("tag") for g in m.get("Genre") or [] if g.get("tag")])
+            elif t in ("episode", "season", "show"):
+                key = str(m.get("grandparentRatingKey") or m.get("parentRatingKey") or m.get("ratingKey"))                     if t != "show" else str(m.get("ratingKey"))
+                title = m.get("grandparentTitle") or m.get("parentTitle") or m.get("title") or "?"
+                n = out.setdefault(key, New("series", title, m.get("year") if t == "show" else None, key, added, []))
+                n.added = max(n.added, added)
+                if t == "episode":
+                    n.episodes.append(_ep(m))
+                elif t == "season":
+                    n.seasons.append(int(m.get("index") or 0))
+        return sorted(out.values(), key=lambda n: -n.added)
 
     async def on_deck(self, a: Account) -> list[dict]:
         return (await self._srv(a, "/library/onDeck")).get("Metadata") or []

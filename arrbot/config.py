@@ -60,6 +60,11 @@ class Config:
     plex_url: str | None = None  # optional: local address of the Plex server, e.g. http://192.168.1.10:32400
     disk_warn_gb: int = 50  # warn admins below this much free space; 0 = off
     unwatched_days: int = 180  # media check: "on the server for a long time" means this many days
+    media_paths: str | None = None  # 🎧 listening: "/tv=/media/tv;/movies=/media/movies" (Sonarr path = bot path)
+    listen_api_key: str | None = None  # 🎧 listening: OpenAI key; empty = the AI key if the AI is OpenAI
+    site_hours: int = 6  # watched websites: look this often; 0 = off
+    monitor_minutes: int = 5  # check Radarr/Sonarr/SABnzbd/TMDB/Plex this often, tell admins on outage; 0 = off
+    update_repo: str = "syncip/telegram_sabnzbd"  # GitHub repo for the update check; empty = off
     extra: dict = field(default_factory=dict)
 
 
@@ -137,6 +142,11 @@ def load_config() -> Config:
         plex_url=_env("PLEX_URL"),
         disk_warn_gb=int(_env("DISK_WARN_GB", "50")),  # type: ignore[arg-type]
         unwatched_days=int(_env("UNWATCHED_DAYS", "180")),  # type: ignore[arg-type]
+        media_paths=_env("MEDIA_PATHS"),
+        listen_api_key=_env("LISTEN_API_KEY") or (llm.api_key if llm.provider == "openai" else None),
+        site_hours=int(_env("SITE_CHECK_HOURS", "6")),  # type: ignore[arg-type]
+        monitor_minutes=int(_env("MONITOR_MINUTES", "5")),  # type: ignore[arg-type]
+        update_repo=_env("UPDATE_REPO", "syncip/telegram_sabnzbd") or "",  # type: ignore[arg-type]
         llm=llm,
         radarr=radarr,
         sonarr=sonarr,

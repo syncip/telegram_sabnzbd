@@ -66,6 +66,7 @@ class Title:
     last_viewed: datetime | None = None
     not_german: int = 0  # files whose audio track has no German (movie: 0/1, series: episodes)
     mislabelled: int = 0  # of those: the name says German
+    mistagged: bool = False  # every file named German, no German-tagged track: probably only wrong tags
 
     @property
     def name(self) -> str:
@@ -93,7 +94,10 @@ class Report:
         if name == "missing":
             return sorted((x for x in t if x.monitored and x.missing), key=lambda x: (-x.missing, x.name))
         if name == "not_german":
-            return sorted((x for x in t if x.not_german), key=lambda x: (-x.mislabelled, -x.not_german, x.name))
+            return sorted((x for x in t if x.not_german and not x.mistagged),
+                          key=lambda x: (-x.mislabelled, -x.not_german, x.name))
+        if name == "mistagged":
+            return sorted((x for x in t if x.not_german and x.mistagged), key=lambda x: x.name)
         if not self.plex_ok:
             return []
         if name == "not_in_plex":
@@ -124,6 +128,7 @@ async def _series_languages(sonarr: Any, series: list[Title], errors: list[str])
         checks = [file_check(f) for f in files]
         t.not_german = sum(c in ("other", "mislabelled") for c in checks)
         t.mislabelled = checks.count("mislabelled")
+        t.mistagged = t.mislabelled >= 2 and t.mislabelled == t.not_german and "german" not in checks
 
     await asyncio.gather(*(one(t) for t in series))
 
@@ -206,8 +211,11 @@ def render_overview(r: Report, days: int, name_of: Callable[[int], str]) -> tupl
         size = sum(t.size for t in items)
         extra = f" · {size_text(size)}" if key in ("watched", "unwatched") and size else ""
         what = f" (seit über {days} Tagen)" if key == "unwatched" else ""
+        unsure = len(r.section("mistagged")) if key == "not_german" else 0
+        if unsure:
+            extra += f" · ❔ {unsure} vermutlich nur falsch markiert"
         out.append(f"{label}{what}: <b>{len(items)}</b>{extra}")
-        if items:
+        if items or unsure:
             buttons.append((f"{label.split(' ', 1)[0]} {len(items)} anzeigen", f"m:{key}"))
     for e in r.errors[:3]:
         out.append(f"⚠️ {html.escape(e[:150])}")
@@ -216,7 +224,8 @@ def render_overview(r: Report, days: int, name_of: Callable[[int], str]) -> tupl
     return "\n".join(out), buttons
 
 
-def render_section(r: Report, key: str, days: int, name_of: Callable[[int], str]) -> tuple[str, list[tuple[str, str]]]:
+def render_section(r: Report, key: str, days: int, name_of: Callable[[int], str],
+                   can_listen: bool = False) -> tuple[str, list[tuple[str, str]]]:
     items = r.section(key, days)
     e = lambda s: html.escape(str(s), quote=False)  # noqa: E731
     title = SECTIONS[key] + (f" (seit über {days} Tagen)" if key == "unwatched" else "")
@@ -250,10 +259,27 @@ def render_section(r: Report, key: str, days: int, name_of: Callable[[int], str]
     if key == "missing" and items:
         out.append("\n<i>Meist gibt es noch keinen passenden Download (z. B. nicht auf Deutsch).</i>")
         buttons.append(("🔍 Alle fehlenden suchen", "m:search"))
-    elif key == "not_german" and items:
-        out.append("\n<i>Geprüft wird die echte Tonspur, die Radarr/Sonarr beim Import auslesen – nicht der "
-                   "Release-Name. Antippen: ich suche ein anderes deutsches Release und frage vor dem Ersetzen.</i>")
+    elif key == "not_german":
+        unsure = r.section("mistagged")
+        if unsure:
+            out.append(f"\n<b>❔ Vermutlich nur falsch markiert – {len(unsure)}</b>")
+            out += [f"{'🎬' if t.kind == 'movie' else '📺'} {e(t.name)} – alle {t.files} Folgen heißen Deutsch, "
+                    "keine Tonspur ist als Deutsch markiert" for t in unsure[:MAX_LINES]]
+            out.append("<i>Alte DVD-Rips markieren die deutsche Tonspur oft als Englisch. "
+                       + ("„🎧 Reinhören“: ich höre ein paar kurze Stellen an (ca. 0,2 ct pro Stelle) und merke mir "
+                          "das Ergebnis." if can_listen else
+                          "Hör kurz rein – ist es Deutsch, tipp „✅ Ist Deutsch“ und ich melde den Titel nie wieder.")
+                       + "</i>")
+        if items:
+            out.append("\n<i>Geprüft wird die Tonspur-Markierung, die Radarr/Sonarr beim Import auslesen – nicht der "
+                       "Release-Name. 🇩🇪 antippen: ich suche ein anderes deutsches Release und frage vor dem "
+                       "Ersetzen. Stimmt es doch: „✅ Ist Deutsch“.</i>")
         buttons += [(f"🇩🇪 {t.name[:34]}", f"m:gf:{t.kind[0]}:{t.ext_id}") for t in items[:MAX_BUTTONS] if t.ext_id]
+        check = unsure + [t for t in items if t.mislabelled or can_listen]
+        if can_listen:
+            buttons += [(f"🎧 Reinhören: {t.name[:30]}", f"m:hear:{t.kind[0]}:{t.arr_id}") for t in check[:MAX_BUTTONS]]
+        else:
+            buttons += [(f"✅ Ist Deutsch: {t.name[:28]}", f"m:ok:{t.kind[0]}:{t.arr_id}") for t in check[:MAX_BUTTONS]]
     elif key == "not_in_plex" and items:
         out.append("\n<i>Oft fehlt nur ein Scan in Plex. Bleibt es danach, stimmt meist der Bibliotheks-Pfad "
                    "in Plex nicht mit dem von Radarr/Sonarr überein.</i>")

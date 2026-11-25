@@ -68,6 +68,14 @@ def _score(r: dict) -> tuple:
             r.get("seeders") or 0, -(r.get("size") or 0))
 
 
+def _usable_any(r: dict) -> bool:
+    """Any release Radarr would take (approval size check), German or not."""
+    if not r.get("guid") or r.get("indexerId") is None or r.get("rejected"):
+        return False
+    rejections = " ".join(r.get("rejections") or []).lower()
+    return not any(b in rejections for b in BAD_REJECTIONS)
+
+
 def _usable(r: dict, bad: set[str] = frozenset()) -> bool:  # type: ignore[assignment]
     """A German release we can grab; never one of the releases that turned out not to be German."""
     if not _is_german_release(r) or not r.get("guid") or r.get("indexerId") is None:
@@ -151,6 +159,12 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
     if plan.mislabelled:
         lines.append(f"🏷 Davon {len(plan.mislabelled)} als Deutsch benannt, die Tonspur ist aber "
                      f"{langs_de(file_langs(plan.mislabelled[0].get('episodeFile')))} ({_eps_text(plan.mislabelled)})")
+    ok_button: list[tuple[str, str]] = []
+    if plan.mislabelled:
+        ok_button = [("✅ Ist Deutsch (nur falsch markiert)", "ok")]
+        if likely_mistagged(plan):
+            lines.append("🤔 Alle Dateien heißen Deutsch und keine Tonspur ist als Deutsch markiert – oft ist nur die "
+                     "Markierung falsch (alte DVD-Rips). Hör kurz rein: ist es Deutsch, tipp „Ist Deutsch“.")
     if plan.missing:
         lines.append(f"❌ {len(plan.missing)} fehlen ({_eps_text(plan.missing)})")
     if not plan.other_lang and not plan.missing:
@@ -168,7 +182,7 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
         lines.append(f"ℹ️ Staffel {', '.join(map(str, plan.skipped_seasons))} nicht durchsucht (max. {MAX_SEASONS} "
                      "auf einmal) – frag einfach nochmal mit Staffel.")
     if not covered:
-        return "\n".join(lines), []
+        return "\n".join(lines), ok_button + ([("Abbrechen", "no")] if ok_button else [])
 
     replace = [e for g in plan.grabs for e in g.episodes if e.get("hasFile")]
     buttons = []
@@ -180,8 +194,14 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
             buttons.append((f"⬇️ Nur fehlende ({len(only_missing)})", "missing"))
     else:
         buttons.append((f"⬇️ {len(covered)} Folgen auf Deutsch laden", "all"))
+    buttons += ok_button
     buttons.append(("Abbrechen", "no"))
     return "\n".join(lines), buttons
+
+
+def likely_mistagged(plan: FixPlan) -> bool:
+    """Every file is named German and none has a German-tagged track: most likely the tags are wrong."""
+    return not plan.german and len(plan.mislabelled) >= 2 and len(plan.mislabelled) == len(plan.other_lang)
 
 
 async def run_fix(sonarr: Any, plan: FixPlan, only_missing: bool) -> str:
@@ -296,12 +316,16 @@ def render_movie(fix: MovieFix) -> tuple[str, list[tuple[str, str]]]:
         head = f"⏳ {fix.title} ist noch nicht geladen."
     else:
         head = f"📁 {fix.title} ist bei dir nur auf {langs_de(fix.langs)}."
+    ok = [("✅ Ist Deutsch (nur falsch markiert)", "ok")] if fix.check == "mislabelled" else []
+    if ok:
+        head += "\nManchmal ist nur die Markierung falsch (alte DVD-Rips) – hör kurz rein."
     if not fix.release:
-        return head + f"\n🔍 Auf deinen Indexern gibt es noch kein (anderes) deutsches Release ({fix.releases} geprüft).", []
+        text = head + f"\n🔍 Auf deinen Indexern gibt es noch kein (anderes) deutsches Release ({fix.releases} geprüft)."
+        return text, ok + ([("Abbrechen", "no")] if ok else [])
     size = _gb(fix.release.get("size") or 0)
     text = f"{head}\n\n⬇️ Deutsches Release gefunden: {fix.release.get('title')} ({size})"
     label = "🔁 Datei ersetzen" if fix.file_id else "⬇️ Laden"
-    return text, [(label, "all"), ("Abbrechen", "no")]
+    return text, [(label, "all")] + ok + [("Abbrechen", "no")]
 
 
 async def run_movie(radarr: Any, fix: MovieFix) -> str:

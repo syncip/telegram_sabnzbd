@@ -260,3 +260,35 @@ def test_cache_key_per_tool_set():
     a = [ToolSpec("x", "", {}), ToolSpec("y", "", {})]
     assert _cache_key(a) == _cache_key(list(a)) != _cache_key(a + [ToolSpec("admin_stats", "", {})])
     assert datetime.now(timezone.utc)  # keep import used
+
+
+def test_new_in_plex_groups_episodes_and_follows_taste():
+    import asyncio as aio
+
+    import httpx as hx
+
+    from arrbot import plex as px
+    from arrbot.profiles import genre_de
+
+    def handler(req):
+        assert req.url.path == "/library/recentlyAdded"
+        return hx.Response(200, json={"MediaContainer": {"Metadata": [
+            {"type": "movie", "title": "Smile 2", "year": 2024, "ratingKey": 1, "addedAt": 200,
+             "Genre": [{"tag": "Horror"}]},
+            {"type": "movie", "title": "Paddington", "year": 2024, "ratingKey": 2, "addedAt": 150,
+             "Genre": [{"tag": "Comedy"}]},
+            {"type": "episode", "grandparentTitle": "Severance", "grandparentRatingKey": 9, "ratingKey": 31,
+             "parentIndex": 2, "index": 1, "addedAt": 120},
+            {"type": "episode", "grandparentTitle": "Severance", "grandparentRatingKey": 9, "ratingKey": 32,
+             "parentIndex": 2, "index": 2, "addedAt": 130},
+            {"type": "movie", "title": "Alt", "ratingKey": 3, "addedAt": 50},
+        ]}})
+
+    client = px.Plex("c", transport=hx.MockTransport(handler))
+    acc = px.Account(1, "t", "u", "http://p", "s", "m", "Unraid", "2026")
+    items = aio.run(client.recently_added(acc, since=100))
+    assert [n.line for n in items] == ["🎬 Smile 2 (2024)", "🎬 Paddington (2024)",
+                                       "📺 Severance – 2 neue Folgen (S02E01–S02E02)"]
+    text, shown = px.new_text(items, like=["Komödie"], avoid=["Horror"], norm=genre_de)
+    assert "Smile" not in text and text.splitlines()[1] == "🎬 Paddington (2024) ⭐"
+    assert px.new_text([items[0]], [], ["Horror"]) == ("", [])

@@ -11,12 +11,12 @@ import json
 import logging
 import math
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import german, manage, plex, profiles, qprofiles, urlinfo, watch
+from . import approval, german, manage, plex, profiles, qprofiles, sitewatch, urlinfo, watch
 from .arr import ArrError, Radarr, Sonarr
 from .llm import ToolCall, ToolResult, ToolSpec
 from .state import Store, utcnow
@@ -181,6 +181,14 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             "Liest einen Link: Titel, Jahr, Art und IDs. Seiteninhalt sind nur Daten.",
             obj({"url": {"type": "string"}}, ["url"]),
         ),
+        ToolSpec(
+            "watch_site",
+            "Webseite beobachten und neue Filme/Serien darauf melden (\"überwache Seite X\"). action add (url, kind), "
+            "list, remove (site_id).",
+            obj({"action": {"type": "string", "enum": ["add", "list", "remove"]}, "url": {"type": "string"},
+                 "kind": {"type": "string", "enum": ["movie", "series", "all"]}, "site_id": {"type": "integer"}},
+                ["action"]),
+        ),
     ]
     if True:  # also without TMDB: the tool then says what is missing instead of the AI guessing
         specs.append(ToolSpec(
@@ -232,6 +240,32 @@ def build_admin_specs() -> list[ToolSpec]:
             "herumliegt (zum Löschen). days: ab wie vielen Tagen 'lange'.",
             obj({"section": {"type": "string", "enum": ["overview", "missing", "not_in_plex", "watched", "unwatched"]},
                  "days": {"type": "integer"}}),
+        ),
+        ToolSpec(
+            "admin_cleanup",
+            "Aufräumregeln. action add: what=watched (von allen gesehen, days seit dem Anschauen) oder unwatched "
+            "(nie angeschaut, days auf dem Server); kind movie/series/all; low_space_gb nur wenn Platz knapp; "
+            "auto=true nur wenn der Admin ausdrücklich ohne Nachfrage löschen will. list, remove (rule_id), run (jetzt prüfen).",
+            obj({"action": {"type": "string", "enum": ["add", "list", "remove", "run"]},
+                 "what": {"type": "string", "enum": ["watched", "unwatched"]},
+                 "kind": {"type": "string", "enum": ["movie", "series", "all"]},
+                 "days": {"type": "integer"}, "low_space_gb": {"type": "integer"}, "auto": {"type": "boolean"},
+                 "rule_id": {"type": "integer"}}, ["action"]),
+        ),
+        ToolSpec(
+            "admin_approval",
+            "Freigabe-Regeln: Wünsche erst vom Admin freigeben lassen. action add: user (Name, leer = alle), "
+            "kind movie/series/all, genres (z. B. [\"Horror\"]) nur bei diesen Genres, min_gb nur wenn der Download "
+            "größer ist (Filme). list, remove (rule_id).",
+            obj({"action": {"type": "string", "enum": ["add", "list", "remove"]}, "user": {"type": "string"},
+                 "kind": {"type": "string", "enum": ["movie", "series", "all"]},
+                 "genres": {"type": "array", "items": {"type": "string"}}, "min_gb": {"type": "number"},
+                 "rule_id": {"type": "integer"}}, ["action"]),
+        ),
+        ToolSpec(
+            "admin_activity",
+            "Was Nutzer gefragt haben, was geklappt hat, wo es Probleme gab. user: Name/ID (leer = alle).",
+            obj({"user": {"type": "string"}, "problems_only": {"type": "boolean"}, "days": {"type": "integer"}}),
         ),
         ToolSpec(
             "admin_set_limit",
@@ -336,6 +370,10 @@ def DownloadsView(chat_id: int, finished: bool = False) -> "View":  # noqa: N802
     return View(chat_id, "downloads", finished)
 
 
+
+class Held(ArrError):
+    """The wish waits for the admin's approval (not an error for the user)."""
+
 class ToolRunner:
     def __init__(
         self,
@@ -369,6 +407,11 @@ class ToolRunner:
         self.profiles: profiles.ProfileStore | None = None  # set by the bot
         self.plex: plex.Plex | None = None  # set by the bot
         self.plex_store: plex.PlexStore | None = None
+        self.cleanup: Any = None  # cleanup.RuleStore, set by the bot
+        self.sites: sitewatch.SiteStore | None = None  # set by the bot
+        self.site_hours = 6
+        self.approvals: approval.ApprovalStore | None = None  # set by the bot
+        self.on_approval: Callable[[approval.Pending], Awaitable[None]] | None = None  # bot asks the admins
         self.trace: dict[int, list[tuple[str, str | None, str]]] = {}
 
     # ---- plumbing -------------------------------------------------------
@@ -378,6 +421,38 @@ class ToolRunner:
 
     def specs_for(self, user_id: int) -> list[ToolSpec]:
         return self.specs + self.admin_specs if self.users is not None and self.is_admin(user_id) else self.specs
+
+    # ---- buttons that survive a restart ----------------------------------------------------------
+    KEEP_STAGES = ("", "seasons", "quality", "extend")  # flows with a plan (gfix, clean ...) are rebuilt on demand
+    KEEP_MAX = 300
+
+    def dump_buttons(self) -> dict:
+        flows = [asdict(f) for f in self.flows.values() if f.stage in self.KEEP_STAGES and f.data is None]
+        offers = [asdict(o) for o in self.offers.values()]
+        return {"flows": flows[-self.KEEP_MAX:], "offers": offers[-self.KEEP_MAX:]}
+
+    def load_buttons(self, data: dict) -> int:
+        n = 0
+        for f in data.get("flows") or []:
+            try:
+                f = dict(f)
+                cand = Candidate(**f.pop("cand"))
+                step = f.pop("step", None)
+                flow = Flow(cand=cand, step=Step(**{**step, "buttons": [tuple(b) for b in step["buttons"]]})
+                            if step else None, **f)
+                self.flows.setdefault(flow.id, flow)
+                n += 1
+            except (TypeError, KeyError) as e:
+                log.info("Button-Zustand übersprungen: %s", e)
+        for o in data.get("offers") or []:
+            try:
+                o = dict(o)
+                offer = Offer(cands=[Candidate(**c) for c in o.pop("cands")], **o)
+                self.offers.setdefault(offer.id, offer)
+                n += 1
+            except (TypeError, KeyError) as e:
+                log.info("Button-Zustand übersprungen: %s", e)
+        return n
 
     def take_trace(self, chat_id: int) -> list[tuple[str, str | None, str]]:
         """(tool, error or None, final text) of every tool run since the last call (activity log)."""
@@ -472,6 +547,8 @@ class ToolRunner:
         self.flows.pop(flow.id, None)
         try:
             await self._add(flow)
+        except Held as e:
+            return Step(f"⏳ {_what(flow)}: {e}", done=True)
         except ArrError as e:
             return Step(f"❌ {c.label} konnte nicht hinzugefügt werden: {e}", done=True)
         except Exception as e:  # noqa: BLE001
@@ -525,11 +602,55 @@ class ToolRunner:
         final = await self._search_existing(flow.chat_id, "series", flow.cand.lib_id, flow.seasons)
         return Step(final.text, done=True)
 
-    async def _add(self, flow: Flow) -> None:
+    async def _hold_rule(self, flow: Flow) -> approval.Rule | None:
+        """The approval rule that applies to this wish (genres checked here, size later)."""
+        if self.approvals is None or self.is_admin(flow.chat_id):
+            return None
         c = flow.cand
+        rules = self.approvals.applies(flow.chat_id, c.kind)
+        if not rules:
+            return None
+        genres = list(c.genres)
+        if not genres and any(r.genres for r in rules):
+            try:
+                found = await (self._need(self.radarr, "Radarr").lookup_tmdb(c.ext_id) if c.kind == "movie"
+                               else self._need(self.sonarr, "Sonarr").lookup_tvdb(c.ext_id))
+                genres = found.get("genres") or []
+            except ArrError:
+                genres = []
+        hits = [r for r in rules if r.matches(flow.chat_id, c.kind, genres)]
+        # A rule without size holds everything; otherwise the smallest size limit decides.
+        return next((r for r in hits if not r.min_gb), None) or min(hits, key=lambda r: r.min_gb, default=None)
+
+    async def _hold(self, flow: Flow, reason: str, **extra: Any) -> None:
+        c = flow.cand
+        p = self.approvals.hold(approval.Pending(  # type: ignore[union-attr]
+            "", flow.chat_id, c.kind, c.ext_id, _what(flow), reason, flow.monitor, flow.seasons, flow.profile, **extra))
+        if self.on_approval:
+            await self.on_approval(p)
+        raise Held("wartet auf Freigabe durch den Admin. Ich sage dir Bescheid.")
+
+    async def _add(self, flow: Flow, approved: bool = False) -> None:
+        c = flow.cand
+        rule = None if approved else await self._hold_rule(flow)
+        if rule and not rule.min_gb:
+            await self._hold(flow, f"Genre {' / '.join(rule.genres)}" if rule.genres else "Freigabe nötig")
         if c.kind == "movie":
-            movie = await self._need(self.radarr, "Radarr").add(c.ext_id, flow.profile, self.min_availability)
+            radarr = self._need(self.radarr, "Radarr")
+            movie = await radarr.add(c.ext_id, flow.profile, self.min_availability, search=rule is None)
             title = f"{c.title or movie['title']} ({movie.get('year')})"
+            if rule:  # size rule: look at the release Radarr would take
+                try:
+                    rel = sorted((r for r in await radarr.releases(movieId=movie["id"]) if manage._usable_any(r)),
+                                 key=manage._score, reverse=True)
+                except ArrError:
+                    rel = []
+                size = (rel[0].get("size") or 0) / 2**30 if rel else 0
+                if size > (rule.min_gb or 0):
+                    await radarr.set_monitored(movie["id"], False)  # Radarr must not grab it by itself
+                    await self._hold(flow, f"Download {size:.1f} GB (Grenze {rule.min_gb:g} GB)".replace(".", ","),
+                                     arr_id=movie["id"], release=rel[0])
+                await radarr.search(movie["id"])
             self.store.track("radarr", movie["id"], title, flow.chat_id)
             self.store.record_request(flow.chat_id, "movie", title, c.ext_id)
             self._learn(flow.chat_id, "requested", "movie", movie, title)
@@ -542,6 +663,36 @@ class ToolRunner:
             self.store.record_request(flow.chat_id, "series", title, series.get("tmdbId"), c.ext_id)
             self._learn(flow.chat_id, "requested", "series", series, title)
         await self._added(flow.chat_id, f"➕ {_what(flow)}")
+
+    async def decide(self, pid: str, ok: bool) -> tuple[approval.Pending | None, str]:
+        """Admin pressed Freigeben/Ablehnen. Returns (wish, text for the admin); the user is told here."""
+        p = self.approvals.take(pid) if self.approvals else None
+        if p is None:
+            return None, "Schon erledigt."
+        radarr = self.radarr
+        try:
+            if not ok:
+                if p.arr_id and radarr:
+                    await radarr.delete(p.arr_id, delete_files=False)
+                note = f"🙅 {p.title}: Der Admin hat den Wunsch abgelehnt."
+            elif p.arr_id and radarr:  # size check: movie is there, grab the held release
+                await radarr.set_monitored(p.arr_id, True)
+                try:
+                    await radarr.grab(p.release or {})
+                except (ArrError, KeyError):
+                    await radarr.search(p.arr_id)
+                self.store.track("radarr", p.arr_id, p.title, p.user_id)
+                self.store.record_request(p.user_id, "movie", p.title, p.ext_id)
+                note = f"✅ {p.title}: freigegeben, der Download startet."
+            else:
+                c = Candidate(p.kind, p.ext_id, p.title, None)
+                await self._add(Flow(uuid.uuid4().hex[:10], p.user_id, c, p.monitor, p.seasons, p.profile), approved=True)
+                note = f"✅ {p.title}: freigegeben und hinzugefügt."
+        except ArrError as e:
+            return p, f"❌ {p.title}: {e}"
+        if self.notify_user:
+            await self.notify_user(p.user_id, note)
+        return p, ("✅ Freigegeben: " if ok else "🙅 Abgelehnt: ") + p.title
 
     async def _added(self, chat_id: int, text: str) -> None:
         if self.on_added:
@@ -605,6 +756,8 @@ class ToolRunner:
             try:
                 await self._add(Flow(uuid.uuid4().hex[:10], offer.chat_id, c, monitor="all"))
                 lines.append(f"✅ {name}")
+            except Held:
+                lines.append(f"⏳ {name} – wartet auf Freigabe")
             except ArrError as e:
                 lines.append(f"❌ {name} – {e}")
         lines.append("\nQualität: Standardprofil. Ich melde mich, wenn Downloads starten.")
@@ -914,6 +1067,11 @@ class ToolRunner:
 
     async def _run_series_job(self, flow: Flow, value: str) -> Step:
         plan, title = flow.data, flow.cand.title
+        if value == "ok" and flow.stage in ("gfix", "mfix"):
+            kind, arr_id = ("m", plan.movie_id) if flow.stage == "mfix" else ("s", plan.series_id)
+            german.confirmed.add(kind, arr_id)
+            return Step(f"👍 Gemerkt: {title} ist Deutsch, nur die Tonspur ist falsch markiert. "
+                        "Ich melde das nicht mehr.", done=True)
         if value not in ("all", "missing", "research", "drop"):
             return Step(f"👍 Okay, bei {title} bleibt alles, wie es ist.", done=True)
         if flow.stage == "mfix":
@@ -971,6 +1129,114 @@ class ToolRunner:
 
     async def _t_admin_media(self, chat_id: int, section: str = "overview", days: int | None = None) -> Final:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "media", arg=(section, days)))
+        return Final("")
+
+    async def _t_watch_site(self, chat_id: int, action: str, url: str | None = None, kind: str = "all",
+                            site_id: int | None = None) -> Final:
+        if self.sites is None:
+            raise ArrError("Seiten-Beobachtung ist nicht eingerichtet.")
+        if action == "add":
+            if not url:
+                raise ArrError("Welche Seite soll ich beobachten? Schick mir den Link.")
+            url = url.strip() if "://" in url else "https://" + url.strip()
+            mine = self.sites.sites(chat_id)
+            if any(s.url == url for s in mine):
+                return Final("👀 Die Seite beobachte ich schon für dich.")
+            if len(mine) >= sitewatch.MAX_SITES_PER_USER and not self.is_admin(chat_id):
+                raise ArrError(f"Du beobachtest schon {len(mine)} Seiten – lösch erst eine („Beobachtete Seiten“).")
+            try:
+                final_url, page = await urlinfo.fetch(url)
+            except urlinfo.UrlError as e:
+                raise ArrError(f"Seite nicht lesbar: {e}") from e
+            lines = sitewatch.page_lines(page)
+            if len(lines) < 5:
+                raise ArrError("Auf der Seite steht kaum Text (lädt sie erst per JavaScript?). Die kann ich nicht beobachten.")
+            site = self.sites.add(chat_id, final_url, kind or "all", lines)
+            what = {"movie": "Filme", "series": "Serien"}.get(site.kind, "Filme und Serien")
+            return Final(f"👀 Ich beobachte {site.host} auf neue {what} und schaue alle {self.site_hours} Std. nach. "
+                         "Nur was neu dazukommt, zeige ich dir – mit Buttons zum Hinzufügen. "
+                         "„Nichts davon“ merke ich mir für bessere Vorschläge.")
+        if action == "remove":
+            mine = None if self.is_admin(chat_id) else chat_id
+            if site_id is None or not self.sites.remove(int(site_id), mine):
+                raise ArrError(f"Seite {site_id} gibt es nicht.")
+            return Final(f"🗑 Seite {site_id} wird nicht mehr beobachtet.")
+        return Final(sitewatch.render_sites(self.sites.sites(chat_id)))
+
+    async def check_site(self, site: sitewatch.Site, provider: Any) -> dict:
+        """One look at a watched page. New titles go to the user as buttons. Returns the AI usage."""
+        _, page = await urlinfo.fetch(site.url)
+        lines = sitewatch.page_lines(page)
+        if sitewatch.digest(lines) == site.digest:
+            self.sites.touch(site)  # type: ignore[union-attr]
+            return {}
+        fresh = sitewatch.new_lines(site, lines)
+        if not fresh:
+            self.sites.update(site, lines, 0)  # type: ignore[union-attr]
+            return {}
+        items, usage = await sitewatch.extract(provider, fresh)
+        found = await sitewatch.resolve(items, site.kind, self.radarr, self.sonarr, profiles.genre_de)
+        prof = self.profiles.profile(site.user_id) if self.profiles else None
+        avoid = {g.lower() for g in (prof.prefs.avoid if prof else [])}
+        cands = []
+        for f in found:
+            if f["have"] or {g.lower() for g in f["genres"]} & avoid:
+                continue
+            if prof and f["tmdb_id"] and ((f["kind"], f["tmdb_id"]) in prof.rejected or (f["kind"], f["tmdb_id"]) in prof.seen):
+                continue
+            cands.append(Candidate(f["kind"], f["ext_id"], f["title"], f["year"], tmdb_id=f["tmdb_id"],
+                                   genres=f["genres"], rating=0.0))
+        if prof:
+            cands.sort(key=lambda c: -prof.genre_bonus(c.genres))
+        self.sites.update(site, lines, len(cands))  # type: ignore[union-attr]
+        if cands:
+            self._offer(site.user_id, cands[:sitewatch.MAX_OFFER], f"🌐 Neu auf {site.host}:", bulk=len(cands) > 1,
+                        suggest=True)
+        return usage
+
+    async def _t_admin_approval(self, chat_id: int, action: str, user: str | None = None, kind: str = "all",
+                                genres: list[str] | None = None, min_gb: float | None = None,
+                                rule_id: int | None = None) -> Final:
+        if self.approvals is None:
+            raise ArrError("Freigaben sind nicht eingerichtet.")
+        if action == "add":
+            who = self.users.find(user) if user and user.lower() not in ("alle", "allen", "jeder", "all") else None
+            if user and who is None and user.lower() not in ("alle", "allen", "jeder", "all"):
+                raise ArrError(f"Nutzer {user} nicht gefunden.")
+            rule = self.approvals.add(who, kind or "all", genres, min_gb)
+            return Final(f"✋ Regel {rule.id}: {rule.text(self.users.name)} – erst nach deiner Freigabe.")
+        if action == "remove":
+            if rule_id is None or not self.approvals.remove(int(rule_id)):
+                raise ArrError(f"Regel {rule_id} gibt es nicht.")
+            return Final(f"🗑 Freigabe-Regel {rule_id} gelöscht.")
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "approvals"))
+        return Final("")
+
+    async def _t_admin_cleanup(self, chat_id: int, action: str, what: str | None = None, kind: str = "all",
+                               days: int | None = None, low_space_gb: int | None = None, auto: bool = False,
+                               rule_id: int | None = None) -> Final:
+        if self.cleanup is None:
+            raise ArrError("Aufräumregeln sind nicht eingerichtet.")
+        if action == "add":
+            if not what or not days:
+                raise ArrError("Für eine Regel brauche ich: gesehen oder ungesehen, und nach wie vielen Tagen.")
+            rule = self.cleanup.add(what, kind or "all", int(days), low_space_gb, bool(auto))
+            return Final(f"🧹 Regel {rule.id} angelegt: {rule.text}.\nIch prüfe täglich um 11 Uhr – "
+                         "oder sofort: „Aufräumregeln jetzt prüfen“.")
+        if action == "remove":
+            if rule_id is None or not self.cleanup.remove(int(rule_id)):
+                raise ArrError(f"Regel {rule_id} gibt es nicht.")
+            return Final(f"🗑 Regel {rule_id} gelöscht.")
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "cleanup", arg=action == "run"))
+        return Final("")
+
+    async def _t_admin_activity(self, chat_id: int, user: str | None = None, problems_only: bool = False,
+                                days: int = 7) -> Final:
+        who = self.users.find(user) if user else None
+        if user and who is None:
+            raise ArrError(f"Nutzer {user} nicht gefunden.")
+        mode = "problems" if problems_only else "all"
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "activity", arg=(mode, max(1, min(days, 90)), who)))
         return Final("")
 
     async def _t_admin_stats(self, chat_id: int) -> Final:
@@ -1313,6 +1579,8 @@ class ToolRunner:
             try:
                 await self._add(Flow(uuid.uuid4().hex[:10], chat_id, c, monitor="all"))
                 lines.append(f"{i}. ✅ {name} – hinzugefügt")
+            except Held:
+                lines.append(f"{i}. ⏳ {name} – wartet auf Freigabe")
             except ArrError as e:
                 lines.append(f"{i}. ❌ {name} – {e}")
         lines.append("\nQualität: Standardprofil. Ich melde mich, wenn Downloads starten.")

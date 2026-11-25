@@ -9,9 +9,11 @@ Movies: German cinema / digital / disc dates and streaming (TMDB), file language
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .arr import ArrError
@@ -45,6 +47,58 @@ LANG_DE = {"German": "Deutsch", "English": "Englisch", "French": "Französisch",
            "Polish": "Polnisch", "Turkish": "Türkisch", "Dutch": "Niederländisch"}
 
 
+class Confirmed:
+    """Titles the admin confirmed as German by listening (data/german_ok.json).
+
+    Old German DVD rips often have their German track tagged as English. Such a title then looks
+    "named German, audio English" in every file. Once confirmed it is never flagged again.
+    """
+
+    def __init__(self) -> None:
+        self.keys: set[str] = set()
+        self.path: Path | None = None
+
+    def load(self, data_dir: str) -> None:
+        self.path = Path(data_dir) / "german_ok.json"
+        try:
+            self.keys = set(json.loads(self.path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            self.keys = set()
+
+    def _save(self) -> None:
+        if self.path:
+            try:
+                self.path.write_text(json.dumps(sorted(self.keys)), encoding="utf-8")
+            except OSError as e:
+                log.warning("german_ok.json nicht gespeichert: %s", e)
+
+    def add(self, kind: str, arr_id: int) -> None:
+        self.keys.add(f"{kind[0]}:{arr_id}")
+        self._save()
+
+    def remove(self, kind: str, arr_id: int) -> None:
+        self.keys.discard(f"{kind[0]}:{arr_id}")
+        self._save()
+
+    def add_file(self, kind: str, file_id: int) -> None:
+        """One file was heard to be German (the rest of the title may still be wrong)."""
+        self.keys.add(f"f{kind[0]}:{file_id}")
+        self._save()
+
+    def has(self, kind: str, arr_id: int | None) -> bool:
+        return arr_id is not None and f"{kind[0]}:{arr_id}" in self.keys
+
+    def owns(self, file: dict | None) -> bool:
+        """Is the file part of a confirmed title? (episode files carry seriesId, movie files movieId)"""
+        f = file or {}
+        kind = "s" if "seriesId" in f else "m"
+        return (self.has("s", f.get("seriesId")) or self.has("m", f.get("movieId"))
+                or (f.get("id") is not None and f"f{kind}:{f['id']}" in self.keys))
+
+
+confirmed = Confirmed()
+
+
 def audio_langs(file: dict | None) -> list[str] | None:
     """The real audio tracks of a file (Sonarr/Radarr read them on import). None = not known."""
     raw = ((file or {}).get("mediaInfo") or {}).get("audioLanguages")
@@ -70,7 +124,9 @@ def file_check(file: dict | None) -> str:
     if audio is not None:
         if "German" in audio:
             return "german"
-        return "mislabelled" if "German" in named else "other"
+        if "German" in named:
+            return "german" if confirmed.owns(file) else "mislabelled"
+        return "other"
     if "German" in named:
         return "german"
     return "other" if named else "unknown"

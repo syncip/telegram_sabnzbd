@@ -64,6 +64,16 @@ Außerdem:
   Deutsch, Tonspur aber nicht“). „Ist Eine schrecklich nette Familie wirklich auf Deutsch?“ oder „Ist
   Dune auf Deutsch?“ bietet dann ein **anderes** deutsches Release als Ersatz an (nie dasselbe noch
   einmal) und löscht die alte Datei erst nach deinem Okay.
+- **🎧 Reinhören:** Die Markierung der Tonspur kann falsch sein – alte DVD-Rips markieren Deutsch oft als
+  Englisch. Heißen alle Folgen einer Serie „Deutsch“, ist aber keine Spur als Deutsch markiert, zeigt die
+  Mediathek sie als „❔ vermutlich nur falsch markiert“. Mit „🎧 Reinhören“ schneidet der Bot (lokal,
+  ffmpeg) 20-Sekunden-Ausschnitte bei 25, 50 und 72 % der Laufzeit aus – nie Intro oder Abspann – und lässt
+  nur diese von OpenAI-Spracherkennung prüfen (ca. 0,2 Cent pro Ausschnitt; zwei gleiche Ergebnisse
+  reichen). Bei Serien, die überall gleich aussehen, entscheiden 3 Folgen vom Anfang, aus der Mitte und vom
+  Ende; sonst wird jede verdächtige Folge geprüft. Was Deutsch ist, merkt sich der Bot
+  (`data/german_ok.json`); echte englische Folgen bekommen den Button „Deutsch suchen und ersetzen“.
+  Braucht die Medien-Ordner im Container (nur lesend) und `MEDIA_PATHS`. Ohne gibt es stattdessen
+  „✅ Ist Deutsch“ zum Bestätigen nach eigenem Anhören.
 - **Deutsch-Benachrichtigung:** „Sag mir, wenn Dune 3 auf Deutsch kommt“ – der Bot prüft täglich um 9 Uhr
   (Filme: deutsche Termine und Streaming laut TMDB, Serien: neue deutsche Folgen auf deinen Indexern),
   startet dann die Suche oder bietet die Folgen per Button an. Auch als Button „🔔 Bei Deutsch melden“
@@ -86,6 +96,38 @@ Außerdem:
   Deutsch und Englisch + Originalsprache“. Der Bot zeigt, was er verstanden hat, und legt es nach
   Bestätigung in Radarr und Sonarr an (Sprachen als Custom Formats „Sprache: Deutsch“ usw., braucht
   Sonarr v4). 2K wird als 1080p angelegt, weil Radarr/Sonarr kein 1440p kennen.
+- **Neu in Plex:** Jeden Abend um 18 Uhr bekommt jeder mit verknüpftem Plex, was seit gestern dazukam
+  – Folgen pro Serie zusammengefasst, Lieblingsgenres zuerst (⭐), gemiedene Genres fehlen, mit
+  „▶️ In Plex öffnen“. Abschalten per Button oder in /plex.
+- **Webseiten beobachten:** „Überwache https://… nach neuen Filmen“. Alle `SITE_CHECK_HOURS` Stunden
+  schaut der Bot nach. Hat sich nichts geändert, kostet das nichts. Sonst gehen nur die **neuen** Zeilen
+  (max. 4.000 Zeichen) an die KI, die nur Titel herausschreiben darf. Was schon da ist, abgelehnt wurde
+  oder ein gemiedenes Genre hat, fällt weg; der Rest kommt als Buttons, sortiert nach Geschmack.
+  „🙅 Nichts davon“ lernt mit. Max. 5 Seiten pro Nutzer. Seiten, die nur per JavaScript laden, gehen nicht.
+- **Aufräumregeln (Admin):** „Lösch Filme, die alle gesehen haben, nach 30 Tagen“, „Serien, die keiner
+  nach einem Jahr angeschaut hat, nur wenn weniger als 100 GB frei sind“. Täglich um 11 Uhr kommt eine
+  Liste mit „🗑 Alle löschen“ und „🛡 Behalten“ (wird nie wieder vorgeschlagen). Nur wenn du ausdrücklich
+  „automatisch“ sagst, löscht der Bot selbst und meldet es. /regeln zeigt und löscht Regeln.
+- **Freigaben (Admin):** „Wünsche von Anna erst freigeben“, „… wenn es Horrorfilme sind“, „Wünsche
+  von allen erst freigeben, wenn der Download größer als 20 GB ist“. Ohne Größe wird nichts hinzugefügt,
+  bis du „✅ Freigeben“ tippst. Mit Größe (nur Filme) legt der Bot den Film ohne Download an, schaut, welches
+  Release Radarr nehmen würde, und fragt nur, wenn es größer ist – bis dahin ist der Film
+  „nicht überwacht“, Radarr lädt ihn also nicht von selbst. Ablehnen entfernt ihn wieder. Der Nutzer
+  bekommt in beiden Fällen Bescheid. Admins brauchen nie eine Freigabe. /freigaben zeigt Regeln und
+  offene Wünsche.
+- **Aktivität (Admin):** /aktivitaet oder „Was haben die Nutzer gefragt?“ – Anfragen der letzten Tage
+  mit Ergebnis (✅ geklappt, 🤷 nichts gefunden, ⚠️ Problem, ❌ Fehler), Erfolgsquote, meistgenutzte
+  Funktionen, pro Nutzer und die letzten Probleme mit Fehlertext. Bei echten Fehlern (Absturz, KI antwortet
+  nicht) bekommst du sofort eine Nachricht. Wird 90 Tage aufbewahrt; Nutzer sehen in /hilfe, dass du das
+  siehst.
+- **Überwachung (Admin):** Alle `MONITOR_MINUTES` Minuten prüft der Bot Radarr, Sonarr, SABnzbd, TMDB
+  und Plex (ohne KI, kostet nichts). Fällt einer zweimal hintereinander aus, kommt „🚨 Sonarr ist nicht
+  erreichbar“, wenn er zurück ist „✅ läuft wieder (war 12 Min. weg)“.
+- **Version:** /version zeigt die laufende Version und ob auf GitHub eine neuere liegt; einmal am Tag
+  sagt der Bot dir von selbst Bescheid. Nach einem Update meldet er „🆕 Bot aktualisiert: 1.6.0 → 1.7.0“
+  mit den Neuerungen.
+- **Buttons nach Neustart:** Offene Auswahlen (Treffer, Staffeln, Qualität) werden gespeichert
+  (`data/buttons.json`) und funktionieren auch nach einem Update des Containers.
 - **Wenig Nerv:** Wird nichts gefunden, kommt **eine** Nachricht (nach 30 Minuten) mit Buttons
   „⏸ In 3 Tagen nochmal“, „⏸ In 7 Tagen nochmal“, „🗑 Löschen“, „👍 Okay“. Danach sucht
   Radarr/Sonarr still weiter, die nächste Nachricht kommt erst, wenn ein Download startet.
@@ -134,6 +176,7 @@ Für alle:
 - `/downloads` (auch `/status`) – deine Downloads mit Fortschritt
 - `/verbrauch` – deine Anfragen, Tokens und Kosten, mit Balken bis zum Limit
 - `/neu` – Gespräch zurücksetzen
+- `/version` – laufende Version
 - `/hilfe` – Beispiele
 
 Nur für den Admin:
@@ -144,6 +187,10 @@ Nur für den Admin:
 - `/check` – prüft Telegram, KI, Radarr, Sonarr, SABnzbd und TMDB: ✅/❌ mit Version, Antwortzeit und
   verständlichem Fehler („API-Key falsch (401)“, „nicht erreichbar – URL/Netzwerk prüfen“). Die KI-Prüfung
   kostet einen Mini-Aufruf (~60 Tokens).
+- `/aktivitaet [Name]` – was Nutzer fragen, was geklappt hat, wo es Probleme gab
+- `/freigaben` – Freigabe-Regeln und offene Wünsche
+- `/regeln` – Aufräumregeln
+- `/version` – Version, Update verfügbar?, Neuerungen
 - `/limit WER ART WERT` – Limits setzen
   - WER: Name, Telegram-ID, `standard` (alle Nutzer ohne eigenes Limit) oder `gesamt` (ganzer Bot)
   - ART: `tag` (Anfragen/Tag), `monat` (Anfragen/Monat), `tokens` (pro Monat), `kosten` (Dollar/Monat)
@@ -175,6 +222,9 @@ Warum so wenig:
   die Download-Übersicht und alle Benachrichtigungen laufen im Code, ohne weitere KI-Aufrufe.
 - Nach einer Aktion endet der Durchgang ohne Abschluss-Antwort der KI, das Gespräch wird geleert.
 - System-Prompt und Werkzeugliste sind kurz und immer gleich, OpenAI rechnet sie als Cache günstiger ab.
+- Die KI bekommt nur die Werkzeuge, die zur Nachricht passen (ausgewählt per Stichwort, ohne KI):
+  „lad Dune 2“ schickt rund 690 statt 1.900 Tokens Werkzeugbeschreibung. Fehlt doch eins, holt die KI
+  sich mit `more_tools` alle.
 
 `gpt-4o-mini` ist für diesen Umfang die richtige Wahl. `gpt-4.1-mini` versteht etwas besser, kostet
 aber etwa das Dreifache. Lohnt sich nur, wenn der Bot oft falsch versteht.

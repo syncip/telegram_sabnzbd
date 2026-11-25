@@ -11,6 +11,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/data
+      # Optional für 🎧 „Reinhören“ (prüft die gesprochene Sprache): deine Medien-Ordner, nur lesend.
+      # Unraid z. B.:
+      # - /mnt/user/media:/media:ro
     environment:
       # Benutzer/Gruppe, dem der Daten-Ordner gehört. Unraid: 99 / 100 (nobody:users).
       # Andere Linux-Server meist 1000 / 1000 (Ausgabe von "id" auf dem Server).
@@ -75,6 +78,20 @@ services:
       DISK_WARN_GB: "50"
       # /mediathek: "lange da, nie geschaut" ab so vielen Tagen
       UNWATCHED_DAYS: "180"
+      # 🎧 Reinhören: Pfade, wie Sonarr/Radarr sie sehen = Pfade im Bot-Container (oben eingebunden).
+      # Z. B. "/tv=/media/tv;/movies=/media/movies". Leer = gleiche Pfade.
+      MEDIA_PATHS: ""
+      # 🎧 Reinhören: OpenAI-Key für die Spracherkennung (ca. 0,2 Cent pro 20-s-Ausschnitt).
+      # Leer = der KI-Key, falls LLM_PROVIDER openai ist.
+      LISTEN_API_KEY: ""
+
+      # --- Überwachung & Updates ---
+      # Radarr, Sonarr, SABnzbd, TMDB und Plex so oft prüfen; Admins hören bei Ausfall und Rückkehr ("0" = aus)
+      MONITOR_MINUTES: "5"
+      # Einmal täglich nachsehen, ob es eine neue Bot-Version auf GitHub gibt ("" = aus)
+      UPDATE_REPO: "syncip/telegram_sabnzbd"
+      # Beobachtete Webseiten so oft prüfen (Stunden, "0" = aus)
+      SITE_CHECK_HOURS: "6"
 
       # Zeitzone für "fertig ca. 21:45 Uhr"
       TZ: "Europe/Berlin"

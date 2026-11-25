@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -38,7 +40,7 @@ from .state import Store, Tracked
 from .tmdb import TMDB
 from .tools import Flow, Offer, ToolRunner, View, release_languages
 from .tracker import Tracker
-from . import extras, health, media, plex, profiles, stats, watch
+from . import activity, approval, cleanup, sitewatch, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from .profiles import ProfileStore
 from .agent import PRICES
 from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text
@@ -57,6 +59,7 @@ HELP = (
     "• „Merk dir, ich mag keine Horrorfilme“ / „Was weißt du über mich?“\n"
     "• „Sag mir, wenn Dune 3 auf Deutsch kommt“ / „Wo war ich bei Dark?“\n"
     "• „Schick mir jeden Sonntag einen Wochenrückblick“\n"
+    "• „Überwache https://… nach neuen Filmen“ – ich melde, was neu auf der Seite ist\n"
     "• einen Link von IMDb, TMDB, Trakt, Letterboxd, JustWatch …\n\n"
     "Ich sage Bescheid, wenn ein Download startet, wann er fertig ist und ob es Probleme gibt.\n\n"
     "/downloads – deine Downloads mit Fortschritt\n"
@@ -64,13 +67,19 @@ HELP = (
     "/profil – was ich über deinen Geschmack weiß\n"
     "/kalender – was diese Woche kommt\n"
     "/plex – Plex verbinden (gesehen, weiterschauen)\n"
-    "/neu – Gespräch zurücksetzen"
+    "/neu – Gespräch zurücksetzen\n"
+    "/version – welche Version läuft\n\n"
+    "Hinweis: Der Admin sieht, was du fragst und ob es geklappt hat – so kann er Probleme beheben."
 )
 ADMIN_HELP = (
     "\n\n<b>Admin</b>\n"
     "/nutzer – Nutzer freigeben, sperren, entfernen\n"
     "/statistik – Nutzer, Anfragen, Tokens, Kosten\n"
     "/mediathek – was fehlt, was nicht in Plex ist, was gesehen oder lange ungesehen ist (aufräumen)\n"
+    "/freigaben – Wünsche erst freigeben, z. B. „Wünsche von Anna erst freigeben, wenn es Horrorfilme sind“\n"
+    "/regeln – Aufräumregeln, z. B. „Lösch Filme, die alle gesehen haben, nach 30 Tagen“\n"
+    "/version – Versionsnummer, ob es ein Update gibt und was neu ist\n"
+    "/aktivitaet – was Nutzer fragen, was geklappt hat und wo es Probleme gab (<code>/aktivitaet Anna</code>)\n"
     "/check – alle APIs prüfen\n"
     "/limit – Limits setzen, z. B.\n"
     "<code>/limit standard tag 10</code>\n"
@@ -103,7 +112,23 @@ def build_app(cfg: Config) -> Application:
     tmdb = TMDB(cfg.tmdb_api_key) if cfg.tmdb_api_key else None
     tools = ToolRunner(radarr, sonarr, store, cfg.minimum_availability, cfg.quality_prompt_seconds, tmdb, tz)
     agent = Agent(make_provider(cfg.llm), tools, cfg.history_idle_minutes, cfg.max_history_messages)
-    agent.on_usage = users.add_usage
+    turn_tokens: dict[int, int] = {}  # tokens of the message being answered (activity log)
+
+    def on_usage(uid: int, tokens: int, cost: float | None) -> None:
+        users.add_usage(uid, tokens, cost)
+        turn_tokens[uid] = turn_tokens.get(uid, 0) + tokens
+
+    agent.on_usage = on_usage
+    activity_db = activity.ActivityStore(cfg.data_dir)
+    german.confirmed.load(cfg.data_dir)
+    rules = cleanup.RuleStore(cfg.data_dir)
+    tools.cleanup = rules
+    approvals = approval.ApprovalStore(cfg.data_dir)
+    tools.approvals = approvals
+    sites = sitewatch.SiteStore(cfg.data_dir)
+    tools.sites, tools.site_hours = sites, cfg.site_hours
+    listener = listen.Listener(cfg.listen_api_key, cfg.media_paths)
+    answering: set[int] = set()  # chats in an AI turn: their additions are already logged with the question
     profile_db = ProfileStore(cfg.data_dir)
     tools.profiles = profile_db
     plex_store = plex.PlexStore(cfg.data_dir)
@@ -113,6 +138,9 @@ def build_app(cfg: Config) -> Application:
     def on_user_removed(uid: int) -> None:
         profile_db.forget_all(uid)
         plex_store.remove(uid)
+        activity_db.forget(uid)
+        approvals.forget(uid)
+        sites.forget(uid)
 
     users.on_remove = on_user_removed
     background: set[asyncio.Task] = set()  # keeps running Plex links alive
@@ -167,6 +195,8 @@ def build_app(cfg: Config) -> Application:
                 log.warning("Admin %s nicht erreichbar: %s", admin, e)
 
     async def on_added(chat_id: int, text: str) -> None:
+        if chat_id not in answering:
+            activity_db.record(chat_id, text, [], activity.ACTION)
         if not users.is_admin(chat_id):
             await tell_admins(f"📣 {users.name(chat_id)}: {text}")
 
@@ -216,27 +246,47 @@ def build_app(cfg: Config) -> Application:
     async def respond(chat_id: int, user_id: int, text: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("chat %s: %r", chat_id, text[:200])
         if reason := users.blocked_by_limit(user_id):
+            activity_db.record(user_id, text, [], activity.LIMIT, reason)
             await app.bot.send_message(chat_id, f"⛔ {reason}\nButtons und /downloads gehen weiterhin.")
             return
         users.count_request(user_id)
         typing = asyncio.create_task(keep_typing(chat_id))
+        tools.take_trace(chat_id)
+        turn_tokens.pop(user_id, None)
+        answering.add(chat_id)
+        failed = None
         try:
             reply = await asyncio.wait_for(agent.handle(chat_id, text, user_id), RESPONSE_TIMEOUT)
         except asyncio.TimeoutError:
             log.error("chat %s: keine Antwort nach %ss", chat_id, RESPONSE_TIMEOUT)
+            failed = f"Keine Antwort der KI nach {RESPONSE_TIMEOUT} s"
             reply = (
                 f"⚠️ Ich habe nach {RESPONSE_TIMEOUT // 60} Minuten keine Antwort von der KI bekommen. "
                 "Meist ist das Kontingent kurz erschöpft. Versuch es gleich nochmal."
             )
         except Exception as e:  # noqa: BLE001
             log.exception("Fehler bei Nachricht")
+            failed = f"{type(e).__name__}: {e}"
             reply = f"⚠️ Da ist intern etwas schiefgelaufen ({type(e).__name__}: {e})."
         finally:
             typing.cancel()
+            answering.discard(chat_id)
+        await log_activity(chat_id, user_id, text, reply, failed)
 
         if reply.strip():
             await send_formatted(chat_id, reply)
         await deliver_outbox(chat_id, user_id, ctx)
+
+    async def log_activity(chat_id: int, user_id: int, text: str, reply: str, failed: str | None) -> None:
+        """Remember what was asked and how it went; tell the admins about real errors right away."""
+        trace = tools.take_trace(chat_id)
+        names = [t for t, _, _ in trace]
+        finals = "\n".join(f for _, _, f in trace if f)
+        outcome, detail = activity.classify(names, [e for _, e, _ in trace if e], (reply or "") + finals, failed)
+        activity_db.record(user_id, text, names, outcome, detail, turn_tokens.pop(user_id, 0))
+        if outcome == activity.ERROR and not users.is_admin(user_id):
+            await tell_admins(f"❌ Fehler bei {users.name(user_id)}: „{text[:120]}“\n{detail[:300]}\n\n"
+                              "Alles dazu: /aktivitaet")
 
     async def deliver_outbox(chat_id: int, user_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for item in tools.take_outbox(chat_id):
@@ -252,6 +302,30 @@ def build_app(cfg: Config) -> Application:
         await respond(update.effective_chat.id, update.effective_user.id, update.effective_message.text, ctx)
 
     # ---- button flows (no AI involved) ---------------------------------------
+    buttons_file = Path(cfg.data_dir) / "buttons.json"
+
+    def save_buttons() -> None:
+        """Open choices (titles, seasons, quality) survive a restart or an update of the container."""
+        try:
+            tmp = buttons_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(tools.dump_buttons(), ensure_ascii=False), encoding="utf-8")
+            tmp.replace(buttons_file)
+        except (OSError, TypeError, ValueError) as e:
+            log.warning("Buttons nicht gespeichert: %s", e)
+
+    def load_buttons() -> None:
+        try:
+            n = tools.load_buttons(json.loads(buttons_file.read_text(encoding="utf-8")))
+            if n:
+                log.info("%d offene Auswahlen nach dem Neustart wieder aktiv", n)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            log.warning("Buttons nicht geladen: %s", e)
+
+    async def save_buttons_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        save_buttons()
+
     def markup_for(buttons: list[tuple[str, str]], prefix: str) -> InlineKeyboardMarkup | None:
         if not buttons:
             return None
@@ -294,6 +368,7 @@ def build_app(cfg: Config) -> Application:
         flow = await tools.choose(flow_id, value)
         if flow is None:
             await query.edit_message_reply_markup(None)
+            await app.bot.send_message(query.message.chat_id, "⌛ Diese Auswahl ist abgelaufen. Schreib mir einfach nochmal.")
             return
         await show_flow(flow, ctx)
 
@@ -464,10 +539,49 @@ def build_app(cfg: Config) -> Application:
             if "not modified" not in str(e).lower():
                 raise
 
+    async def plex_check() -> str:
+        acc = next((a for a in plex_store.all() if users.is_admin(a.user_id)), None) or next(iter(plex_store.all()))
+        info = await plex_client._srv(acc, "/identity")
+        return f"Server {acc.server_name} antwortet (Version {(info.get('MediaContainer') or info).get('version', '?')})"
+
+    def plex_probe():
+        return plex_check if plex_store.all() else None
+
+    monitor = health.Monitor()
+    update_state: dict = {"latest": None, "told": None}
+
     async def check_text() -> str:
         checks = await health.run_checks(bot=app.bot, provider=agent.provider, model=cfg.llm.model,
-                                         radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb)
-        return health.render(checks)
+                                         radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb, plex=plex_probe())
+        update_state["latest"] = await version.latest(cfg.update_repo) or update_state["latest"]
+        extra = [version.line(update_state["latest"])]
+        if cfg.monitor_minutes > 0:
+            extra.append(monitor.status() + f" (alle {cfg.monitor_minutes} Min.)")
+        return health.render(checks) + "\n\n" + "\n".join(html.escape(x) for x in extra)
+
+    async def monitor_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        checks = await health.run_checks(bot=None, provider=None, model="", radarr=radarr, sonarr=sonarr,
+                                         sab=sab, tmdb=tmdb, plex=plex_probe(), light=True)
+        for msg in monitor.update(checks):
+            log.warning("Überwachung: %s", msg)
+            await tell_admins(msg)
+
+    async def update_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        latest = await version.latest(cfg.update_repo)
+        if not latest:
+            return
+        update_state["latest"] = latest
+        if version.newer(latest, version.__version__) and update_state["told"] != latest:
+            update_state["told"] = latest
+            await tell_admins(f"⬆️ Neue Bot-Version {latest} verfügbar (läuft: {version.__version__}).\n"
+                              "Container neu bauen bzw. Image ziehen und neu starten. Details: /version")
+
+    async def on_version(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        if users.is_admin(update.effective_user.id):
+            update_state["latest"] = await version.latest(cfg.update_repo) or update_state["latest"]
+            await update.effective_message.reply_text(version.text(update_state["latest"]))
+        else:
+            await update.effective_message.reply_text(version.line(None))
 
     async def send_check(chat_id: int) -> None:
         msg = await app.bot.send_message(chat_id, "🩺 Prüfe alle APIs …")
@@ -496,11 +610,227 @@ def build_app(cfg: Config) -> Application:
             await send_plex(view.chat_id, view.arg or {})
         elif view.kind == "plex_link":
             await start_plex_link(view.chat_id, viewer)
+        elif view.kind == "approvals" and users.is_admin(viewer):
+            await send_approvals(view.chat_id)
+        elif view.kind == "cleanup" and users.is_admin(viewer):
+            if view.arg:
+                n = await run_cleanup(view.chat_id)
+                if not n:
+                    await app.bot.send_message(view.chat_id, "🧹 Keine Regel trifft gerade etwas. 👍")
+            else:
+                await send_cleanup(view.chat_id)
+        elif view.kind == "activity" and users.is_admin(viewer):
+            mode, days, who = view.arg or ("all", 7, None)
+            await send_activity(view.chat_id, mode or "all", days or 7, who)
         elif view.kind == "media" and users.is_admin(viewer):
             section, days = view.arg or ("overview", None)
             if days:
                 media_state["days"] = int(days)
             await send_media(view.chat_id, section or "overview")
+
+    # ---- approvals (admin) ------------------------------------------------------------------------
+    def approval_buttons(pid: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Freigeben", callback_data=f"r:ok:{pid}"),
+                                      InlineKeyboardButton("🙅 Ablehnen", callback_data=f"r:no:{pid}")]])
+
+    async def ask_approval(p: approval.Pending) -> None:
+        await tell_admins(f"✋ {users.name(p.user_id)} wünscht sich: {p.title}\nGrund für die Nachfrage: {p.reason}",
+                          approval_buttons(p.id))
+
+    tools.on_approval = ask_approval
+
+    async def send_approvals(chat_id: int) -> None:
+        rs, pending = approvals.rules(), approvals.pending()
+        rows = [[InlineKeyboardButton(f"❌ Regel {r.id} löschen", callback_data=f"r:del:{r.id}")] for r in rs]
+        await app.bot.send_message(chat_id, approval.render_rules(rs, pending, users.name),
+                                   reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+        for p in pending[:10]:  # each open wish with its own buttons
+            await app.bot.send_message(chat_id, f"⏳ {users.name(p.user_id)}: {p.title} – {p.reason}",
+                                       reply_markup=approval_buttons(p.id))
+
+    async def on_approval_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not (update.effective_user and users.is_admin(update.effective_user.id)):
+            await query.answer("Nur für Admins.", show_alert=True)
+            return
+        _, action, arg = query.data.split(":", 2)
+        if action == "del":
+            approvals.remove(int(arg))
+            await query.answer("Regel gelöscht")
+            await query.edit_message_text(approval.render_rules(approvals.rules(), approvals.pending(), users.name))
+            return
+        await query.answer("Moment …")
+        p, text = await tools.decide(arg, action == "ok")
+        if p and action == "ok" and not text.startswith("❌"):
+            activity_db.record(p.user_id, f"Freigabe: {p.title}", [], activity.ACTION)
+        try:
+            await query.edit_message_text(f"{query.message.text}\n\n{text}" if query.message else text)
+        except BadRequest:
+            pass
+
+    async def on_approvals(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_approvals(update.effective_chat.id)
+
+    # ---- cleanup rules (admin) --------------------------------------------------------------------
+    def cleanup_markup() -> InlineKeyboardMarkup | None:
+        rows = [[InlineKeyboardButton(f"❌ Regel {r.id} löschen", callback_data=f"c:del:{r.id}")] for r in rules.rules()]
+        if rows:
+            rows.append([InlineKeyboardButton("▶️ Jetzt prüfen", callback_data="c:run")])
+        return InlineKeyboardMarkup(rows) if rows else None
+
+    async def send_cleanup(chat_id: int) -> None:
+        await app.bot.send_message(chat_id, cleanup.render_rules(rules.rules()), parse_mode=ParseMode.HTML,
+                                   reply_markup=cleanup_markup())
+
+    async def cleanup_hits(rule: cleanup.Rule, fresh: bool = False) -> list[media.Title]:
+        if rule.low_space_gb:
+            ds = await extras.disks(radarr, sonarr)
+            if not extras.low_disks(ds, rule.low_space_gb):
+                return []
+        return cleanup.matches(rule, await media_report(fresh=fresh), rules.kept())
+
+    async def delete_titles(hits: list[media.Title]) -> list[str]:
+        failed = []
+        for t in hits:
+            svc = radarr if t.kind == "movie" else sonarr
+            try:
+                await svc.delete(t.arr_id, delete_files=True)
+            except ArrError as e:
+                failed.append(f"{t.name}: {e}")
+        media_state["report"] = None
+        return failed
+
+    async def run_cleanup(chat_id: int | None = None) -> int:
+        """Apply every rule. chat_id: only to this admin (manual run), else to all admins. Returns hits."""
+        total = 0
+        for rule in rules.rules():
+            try:
+                hits = await cleanup_hits(rule, fresh=True)
+            except Exception as e:  # noqa: BLE001
+                log.exception("Aufräumregel %s", rule.id)
+                await tell_admins(f"⚠️ Aufräumregel {rule.id} ging nicht: {e}")
+                continue
+            if not hits:
+                continue
+            total += len(hits)
+            if rule.auto and chat_id is None:
+                failed = await delete_titles(hits)
+                text, _ = cleanup.render_hits(rule, hits, deleted=True)
+                if failed:
+                    text += "\n⚠️ Nicht gelöscht: " + "; ".join(failed[:5])
+                await tell_admins(text)
+                continue
+            text, buttons = cleanup.render_hits(rule, hits)
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(lbl, callback_data=d)] for lbl, d in buttons])
+            for admin in ([chat_id] if chat_id else users.admins()):
+                try:
+                    await app.bot.send_message(admin, text, reply_markup=markup)
+                except (BadRequest, Forbidden) as e:
+                    log.info("Aufräumen an %s: %s", admin, e)
+        return total
+
+    async def sites_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Look at every watched page; only changed pages cost tokens."""
+        for site in sites.sites():
+            if not users.is_allowed(site.user_id) or users.blocked_by_limit(site.user_id):
+                continue
+            try:
+                usage = await tools.check_site(site, agent.provider)
+            except Exception as e:  # noqa: BLE001 - one broken page must not stop the others
+                log.info("Seite %s: %s", site.url, e)
+                continue
+            if usage:
+                tokens = (usage.get("input", 0) or 0) + (usage.get("output", 0) or 0)
+                users.add_usage(site.user_id, tokens, agent.cost_of(usage))
+                agent.usage.add(usage)
+            try:
+                await deliver_outbox(site.user_id, site.user_id, ctx)
+            except (BadRequest, Forbidden) as e:
+                log.info("Seiten-Treffer an %s nicht zugestellt: %s", site.user_id, e)
+
+    async def cleanup_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        if rules.rules():
+            await run_cleanup()
+
+    async def on_cleanup_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not (update.effective_user and users.is_admin(update.effective_user.id)):
+            await query.answer("Nur für Admins.", show_alert=True)
+            return
+        parts = query.data.split(":")
+        action = parts[1]
+        if action == "del":
+            rules.remove(int(parts[2]))
+            await query.answer("Regel gelöscht")
+            await query.edit_message_text(cleanup.render_rules(rules.rules()), parse_mode=ParseMode.HTML,
+                                          reply_markup=cleanup_markup())
+        elif action == "run":
+            await query.answer("Prüfe …")
+            if not await run_cleanup(query.message.chat_id):
+                await app.bot.send_message(query.message.chat_id, "🧹 Keine Regel trifft gerade etwas. 👍")
+        elif action == "keep":
+            rules.keep(parts[2], int(parts[3]))
+            await query.answer("🛡 Wird nie automatisch gelöscht.")
+        elif action == "all":
+            rule = next((r for r in rules.rules() if r.id == int(parts[2])), None)
+            if not rule:
+                await query.answer("Die Regel gibt es nicht mehr.", show_alert=True)
+                return
+            await query.answer("Lösche …")
+            hits = await cleanup_hits(rule, fresh=True)  # again: something may have changed meanwhile
+            failed = await delete_titles(hits)
+            text, _ = cleanup.render_hits(rule, hits, deleted=True)
+            if failed:
+                text += "\n⚠️ Nicht gelöscht: " + "; ".join(failed[:5])
+            await query.edit_message_text(text)
+        else:
+            await query.answer()
+
+    async def on_cleanup(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_cleanup(update.effective_chat.id)
+
+    # ---- activity (admin) -------------------------------------------------------------------------
+    def activity_view(mode: str = "all", days: int = 7, who: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
+        entries = activity_db.entries(days, who)
+        text = activity.render(entries, days, tz, users.name, mode, users.name(who) if who else None)
+        w = who or ""
+
+        def mark(m: str, label: str) -> str:
+            return ("• " + label) if m == mode else label
+
+        rows = [[InlineKeyboardButton(mark("all", "📋 Alles"), callback_data=f"a:all:{days}:{w}"),
+                 InlineKeyboardButton(mark("problems", "⚠️ Probleme"), callback_data=f"a:problems:{days}:{w}"),
+                 InlineKeyboardButton(mark("users", "👥 Nutzer"), callback_data=f"a:users:{days}:{w}")],
+                [InlineKeyboardButton(("• " if d == days else "") + label, callback_data=f"a:{mode}:{d}:{w}")
+                 for d, label in ((1, "Heute"), (7, "7 Tage"), (30, "30 Tage"))]]
+        if who:
+            rows.append([InlineKeyboardButton("👥 Alle Nutzer", callback_data=f"a:{mode}:{days}:")])
+        return text, InlineKeyboardMarkup(rows)
+
+    async def send_activity(chat_id: int, mode: str = "all", days: int = 7, who: int | None = None) -> None:
+        text, markup = activity_view(mode, days, who)
+        await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def on_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        who = users.find(" ".join(ctx.args)) if ctx.args else None
+        if ctx.args and who is None:
+            await update.effective_message.reply_text(f"Nutzer „{' '.join(ctx.args)}“ kenne ich nicht.")
+            return
+        await send_activity(update.effective_chat.id, who=who)
+
+    async def on_activity_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not (update.effective_user and users.is_admin(update.effective_user.id)):
+            await query.answer("Nur für Admins.", show_alert=True)
+            return
+        _, mode, days, who = (query.data.split(":") + ["", "", ""])[:4]
+        await query.answer()
+        text, markup = activity_view(mode or "all", int(days or 7), int(who) if who else None)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
 
     # ---- media check (admin) -------------------------------------------------------------------
     media_state: dict = {"report": None, "days": cfg.unwatched_days}
@@ -515,7 +845,7 @@ def build_app(cfg: Config) -> Application:
     def media_view(r: media.Report, section: str) -> tuple[str, InlineKeyboardMarkup]:
         days = media_state["days"]
         if section in media.SECTIONS:
-            text, buttons = media.render_section(r, section, days, users.name)
+            text, buttons = media.render_section(r, section, days, users.name, listener.ready)
         else:
             text, buttons = media.render_overview(r, days, users.name)
         rows = [[InlineKeyboardButton(label, callback_data=data)] for label, data in buttons]
@@ -531,6 +861,37 @@ def build_app(cfg: Config) -> Application:
             return
         text, markup = media_view(r, section)
         await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def hear_title(chat_id: int, kind: str, arr_id: int) -> None:
+        """🎧 Listen to the files of one title that don't look German (background task)."""
+        try:
+            if kind == "m":
+                movie = await radarr.get(arr_id)
+                title = f"{movie.get('title')} ({movie.get('year')})"
+                mfile = movie.get("movieFile") or {}
+                text, bad = await listen.hear_files(listener, "m", arr_id, [mfile] if mfile else [], title, False)
+                ext = movie.get("tmdbId")
+            else:
+                series = await sonarr.get(arr_id)
+                title, ext = series.get("title", "?"), series.get("tvdbId")
+                files = await sonarr.episode_files(arr_id)
+                eps = {e.get("episodeFileId"): f"S{e['seasonNumber']:02d}E{e['episodeNumber']:02d}"
+                       for e in await sonarr.episodes(arr_id) if e.get("episodeFileId")}
+                checks = {f["id"]: german.file_check(f) for f in files}
+                todo = [{**f, "_eps": eps.get(f["id"], "")} for f in files if checks[f["id"]] != "german"]
+                todo.sort(key=lambda f: f["_eps"])
+                suspect = bool(todo) and all(checks[f["id"]] == "mislabelled" for f in todo) \
+                    and "german" not in checks.values()
+                text, bad = await listen.hear_files(listener, "s", arr_id, todo, title, suspect)
+        except (ArrError, KeyError) as e:
+            await app.bot.send_message(chat_id, f"⚠️ Reinhören ging nicht: {e}")
+            return
+        media_state["report"] = None  # results changed
+        markup = None
+        if bad and ext:
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🇩🇪 Deutsch suchen und ersetzen", callback_data=f"m:gf:{kind}:{ext}")]])
+        await app.bot.send_message(chat_id, text, reply_markup=markup)
 
     async def on_media(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await send_media(update.effective_chat.id)
@@ -552,6 +913,29 @@ def build_app(cfg: Config) -> Application:
             elif res.is_error:
                 await app.bot.send_message(query.message.chat_id, f"⚠️ {res.content}")
             await deliver_outbox(query.message.chat_id, uid, ctx)
+            return
+        if action == "hear" and len(parts) == 4:
+            if not listener.ready:
+                await query.answer(listener.why_not()[:190], show_alert=True)
+                return
+            await query.answer("🎧 Ich höre rein – das dauert etwas, ich melde mich.")
+            task = asyncio.create_task(hear_title(query.message.chat_id, parts[2], int(parts[3])))
+            background.add(task)
+            task.add_done_callback(background.discard)
+            return
+        if action == "ok" and len(parts) == 4:  # admin listened: it is German, only the tags are wrong
+            german.confirmed.add(parts[2], int(parts[3]))
+            r = media_state["report"]
+            for t in (r.titles if r else []):
+                if t.kind[0] == parts[2] and t.arr_id == int(parts[3]):
+                    t.not_german = t.mislabelled = 0
+            await query.answer("👍 Gemerkt – wird nicht mehr gemeldet.")
+            if r:
+                text, markup = media_view(r, "not_german")
+                try:
+                    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+                except BadRequest:
+                    pass
             return
         if action == "search":
             started = []
@@ -637,9 +1021,13 @@ def build_app(cfg: Config) -> Application:
         else:
             await app.bot.send_message(chat_id, arg.get("text") or "", reply_markup=markup)
 
-    def plex_markup() -> InlineKeyboardMarkup:
+    def plex_markup(uid: int) -> InlineKeyboardMarkup:
+        off = plex_store.get_meta(f"new_off:{uid}") is not None
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Jetzt abgleichen", callback_data="x:s"),
-                                      InlineKeyboardButton("🔌 Trennen", callback_data="x:u")]])
+                                      InlineKeyboardButton("🔌 Trennen", callback_data="x:u")],
+                                     [InlineKeyboardButton("🔔 „Neu in Plex“ einschalten" if off else
+                                                           "🔕 „Neu in Plex“ ausschalten",
+                                                           callback_data="x:non" if off else "x:noff")]])
 
     def plex_status_text(a: plex.Account) -> str:
         when = f", zuletzt abgeglichen {a.synced[:16].replace('T', ' ')} UTC" if a.synced else ""
@@ -659,7 +1047,7 @@ def build_app(cfg: Config) -> Application:
         acc = plex_store.get(uid)
         if acc:
             await app.bot.send_message(chat_id, plex_status_text(acc), parse_mode=ParseMode.HTML,
-                                       reply_markup=plex_markup())
+                                       reply_markup=plex_markup(uid))
             return
         try:
             pin_id, code = await plex_client.create_pin()
@@ -713,6 +1101,15 @@ def build_app(cfg: Config) -> Application:
         if not acc:
             await query.answer("Nicht verbunden.")
             await query.edit_message_reply_markup(None)
+            return
+        if action in ("noff", "non"):
+            plex_store.set_meta(f"new_off:{uid}", "1" if action == "noff" else None)
+            await query.answer("🔕 Keine „Neu in Plex“-Nachrichten mehr" if action == "noff" else
+                               "🔔 Ich sage dir jeden Abend, was neu in Plex ist")
+            if query.message.text and query.message.text.startswith("✅ Plex verbunden"):
+                await query.edit_message_reply_markup(plex_markup(uid))
+            else:
+                await query.edit_message_reply_markup(None)
             return
         if action == "u":
             plex_store.remove(uid)
@@ -771,6 +1168,32 @@ def build_app(cfg: Config) -> Application:
                 await plex_sync(a)
             except plex.PlexError:
                 pass
+
+    async def new_in_plex_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        """Every evening: what came into Plex since yesterday, per user (their taste first)."""
+        now = int(datetime.now(timezone.utc).timestamp())
+        for a in plex_store.all():
+            if not users.is_allowed(a.user_id) or plex_store.get_meta(f"new_off:{a.user_id}"):
+                continue
+            since = int(plex_store.get_meta(f"new_since:{a.user_id}") or now - 24 * 3600)
+            try:
+                items = await plex_client.recently_added(a, since)
+            except plex.PlexError as e:
+                log.info("Neu in Plex für %s: %s", a.username, e)
+                continue
+            plex_store.set_meta(f"new_since:{a.user_id}", str(now))
+            prefs = profile_db.profile(a.user_id).prefs
+            text, shown = plex.new_text(items, prefs.like, prefs.avoid, norm=profiles.genre_de)
+            if not text:
+                continue
+            rows = [[InlineKeyboardButton(f"▶️ {n.title[:30]}", url=plex_client.web_link(a, n.rating_key))]
+                    for n in shown[:4]]
+            rows.append([InlineKeyboardButton("🔕 Nicht mehr melden", callback_data="x:noff")])
+            try:
+                await app.bot.send_message(a.user_id, text, parse_mode=ParseMode.HTML,
+                                           reply_markup=InlineKeyboardMarkup(rows))
+            except (BadRequest, Forbidden) as e:
+                log.info("Neu in Plex an %s nicht zugestellt: %s", a.user_id, e)
 
     # ---- user profile ---------------------------------------------------------------------
     def profile_markup() -> InlineKeyboardMarkup:
@@ -922,7 +1345,8 @@ def build_app(cfg: Config) -> Application:
         text = html.escape(HELP)
         if users.is_admin(uid):
             text += ADMIN_HELP
-        return text, ParseMode.HTML
+        return text + "\n\n" + html.escape(version.line(update_state["latest"] if users.is_admin(uid) else None)), \
+            ParseMode.HTML
 
     async def on_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         users.touch_name(update.effective_user.id, _display_name(update))
@@ -1009,7 +1433,11 @@ def build_app(cfg: Config) -> Application:
                 await application.bot.set_my_commands(
                     base + [BotCommand("nutzer", "Nutzer verwalten"), BotCommand("statistik", "Statistik"),
                             BotCommand("check", "APIs prüfen"), BotCommand("limit", "Limits setzen"),
-                            BotCommand("mediathek", "Mediathek prüfen und aufräumen")],
+                            BotCommand("mediathek", "Mediathek prüfen und aufräumen"),
+                            BotCommand("aktivitaet", "Was Nutzer fragen, was klappte, wo es hakte"),
+                            BotCommand("regeln", "Aufräumregeln"),
+                            BotCommand("freigaben", "Wünsche erst freigeben"),
+                            BotCommand("version", "Version und Updates")],
                     scope=BotCommandScopeChat(admin),
                 )
             except BadRequest as e:  # admin never wrote to the bot yet
@@ -1018,8 +1446,22 @@ def build_app(cfg: Config) -> Application:
         application.job_queue.run_daily(watch_job, time(9, 0, tzinfo=tz), name="deutsch")
         application.job_queue.run_daily(digest_job, time(10, 0, tzinfo=tz), name="wochenrueckblick")
         application.job_queue.run_repeating(plex_sync_job, interval=6 * 3600, first=600, name="plex")
+        application.job_queue.run_daily(new_in_plex_job, time(18, 0, tzinfo=tz), name="neu_in_plex")
+        application.job_queue.run_daily(cleanup_job, time(11, 0, tzinfo=tz), name="aufraeumen")
+        application.job_queue.run_repeating(save_buttons_job, interval=300, first=300, name="buttons")
+        if cfg.site_hours > 0:
+            application.job_queue.run_repeating(sites_job, interval=cfg.site_hours * 3600, first=900, name="seiten")
+        load_buttons()
         if cfg.disk_warn_gb > 0:
             application.job_queue.run_repeating(disk_job, interval=3600, first=120, name="speicher")
+        if cfg.monitor_minutes > 0:
+            application.job_queue.run_repeating(monitor_job, interval=cfg.monitor_minutes * 60, first=60,
+                                                name="ueberwachung")
+        if cfg.update_repo:
+            application.job_queue.run_repeating(update_job, interval=24 * 3600, first=300, name="update")
+        if (old := version.first_start_of_version(cfg.data_dir)) and old != "neu":
+            what = version.CHANGES.get(version.__version__, "")
+            await tell_admins(f"🆕 Bot aktualisiert: {old} → {version.__version__}" + (f"\n{what}" if what else ""))
         try:
             n = await tools.import_history()
             if n:
@@ -1027,10 +1469,11 @@ def build_app(cfg: Config) -> Application:
         except Exception:  # noqa: BLE001 - never block the start
             log.exception("Nutzerprofile: Import der Anfragen fehlgeschlagen")
         extras = [x for x, on in (("SABnzbd", sab), ("TMDB", tmdb)) if on]
-        log.info("Bot läuft mit %s / %s%s, Admin %s", cfg.llm.provider, cfg.llm.model,
+        log.info("Bot %s läuft mit %s / %s%s, Admin %s", version.__version__, cfg.llm.provider, cfg.llm.model,
                  f" + {', '.join(extras)}" if extras else "", cfg.admin_id)
 
     async def post_shutdown(_: Application) -> None:
+        save_buttons()
         for svc in (radarr, sonarr, sab, tmdb):
             if svc:
                 await svc.close()
@@ -1058,7 +1501,11 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("limit", on_limit, filters=is_admin))
     app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
     app.add_handler(CommandHandler(["check", "apis"], on_check, filters=is_admin))
+    app.add_handler(CommandHandler("version", on_version, filters=allowed))
     app.add_handler(CommandHandler(["mediathek", "medien", "aufraeumen"], on_media, filters=is_admin))
+    app.add_handler(CommandHandler(["aktivitaet", "anfragen", "probleme"], on_activity, filters=is_admin))
+    app.add_handler(CommandHandler(["regeln", "aufraeumregeln"], on_cleanup, filters=is_admin))
+    app.add_handler(CommandHandler(["freigaben", "freigabe"], on_approvals, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))
@@ -1069,6 +1516,9 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(on_profile_button, pattern=r"^p:"))
     app.add_handler(CallbackQueryHandler(on_plex_button, pattern=r"^x:"))
     app.add_handler(CallbackQueryHandler(on_media_button, pattern=r"^m:"))
+    app.add_handler(CallbackQueryHandler(on_activity_button, pattern=r"^a:"))
+    app.add_handler(CallbackQueryHandler(on_cleanup_button, pattern=r"^c:"))
+    app.add_handler(CallbackQueryHandler(on_approval_button, pattern=r"^r:"))
     app.add_handler(MessageHandler(~allowed, on_unknown))
     app.add_handler(MessageHandler(allowed & filters.COMMAND, on_start))  # unknown command: show help
     app.add_error_handler(on_error)
