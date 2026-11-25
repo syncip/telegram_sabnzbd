@@ -187,6 +187,36 @@ class Sonarr(_ArrBase):
     async def library(self) -> list[dict]:
         return await self._req("GET", "/series") or []
 
+    async def grab(self, release: dict) -> None:
+        """Download one release from an interactive search (like the download button in Sonarr)."""
+        await self._req("POST", "/release", json={"guid": release["guid"], "indexerId": release["indexerId"]})
+        log.info("Sonarr: Release geholt: %s", release.get("title"))
+
+    async def delete_episode_files(self, file_ids: list[int]) -> None:
+        if not file_ids:
+            return
+        try:
+            await self._req("DELETE", "/episodefile/bulk", json={"episodeFileIds": file_ids})
+        except ArrError:
+            for fid in file_ids:  # older Sonarr without the bulk endpoint
+                await self._req("DELETE", f"/episodefile/{fid}")
+        log.info("Sonarr: %d Folgen-Dateien gelöscht", len(file_ids))
+
+    async def set_episodes_monitored(self, episode_ids: list[int], monitored: bool) -> None:
+        if episode_ids:
+            await self._req("PUT", "/episode/monitor", json={"episodeIds": episode_ids, "monitored": monitored})
+
+    async def search_episodes(self, episode_ids: list[int]) -> None:
+        if episode_ids:
+            await self.command("EpisodeSearch", episodeIds=episode_ids)
+
+    async def episodes(self, series_id: int, season: int | None = None) -> list[dict]:
+        """Episodes incl. their file (with audio languages) if downloaded."""
+        params: dict[str, Any] = {"seriesId": series_id, "includeEpisodeFile": "true"}
+        if season is not None:
+            params["seasonNumber"] = season
+        return await self._req("GET", "/episode", params=params) or []
+
     async def _language_profile_id(self) -> int | None:
         # Only Sonarr v3 has language profiles; v4 removed them.
         try:

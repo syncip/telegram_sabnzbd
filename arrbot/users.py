@@ -27,6 +27,9 @@ def _period() -> tuple[str, str]:
     return now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
 
 
+MONTHS_KEEP = 12
+
+
 @dataclass
 class Usage:
     day: str = ""
@@ -35,13 +38,27 @@ class Usage:
     month_requests: int = 0
     month_tokens: int = 0
     month_cost: float = 0.0
+    month_calls: int = 0
+    total_requests: int = 0
+    total_tokens: int = 0
+    total_cost: float = 0.0
+    total_calls: int = 0
+    last_active: str = ""
+    # finished months: {"2026-10": {"requests": 80, "tokens": 250000, "cost": 0.05, "calls": 170}}
+    months: dict = field(default_factory=dict)
 
     def roll(self) -> None:
         day, month = _period()
         if self.day != day:
             self.day, self.day_requests = day, 0
         if self.month != month:
+            if self.month and (self.month_requests or self.month_tokens):
+                self.months[self.month] = {"requests": self.month_requests, "tokens": self.month_tokens,
+                                           "cost": round(self.month_cost, 6), "calls": self.month_calls}
+                for old in sorted(self.months)[:-MONTHS_KEEP]:
+                    del self.months[old]
             self.month, self.month_requests, self.month_tokens, self.month_cost = month, 0, 0, 0.0
+            self.month_calls = 0
 
     def value(self, key: str) -> float:
         self.roll()
@@ -196,17 +213,25 @@ class UserStore:
         return None
 
     def count_request(self, uid: int) -> None:
+        now = utcnow().isoformat()
         for usage in self._usages(uid):
             usage.roll()
             usage.day_requests += 1
             usage.month_requests += 1
+            usage.total_requests += 1
+            usage.last_active = now
         self.save()
 
     def add_usage(self, uid: int, tokens: int, cost: float | None) -> None:
+        """One AI call."""
         for usage in self._usages(uid):
             usage.roll()
             usage.month_tokens += tokens
             usage.month_cost += cost or 0.0
+            usage.month_calls += 1
+            usage.total_tokens += tokens
+            usage.total_cost += cost or 0.0
+            usage.total_calls += 1
         self.save()
 
     def _usages(self, uid: int) -> list[Usage]:
@@ -231,6 +256,53 @@ class UserStore:
         else:
             d[key] = value
         self.save()
+
+    def apply_limit(self, who: str, key: str, raw: str | float | None) -> str:
+        """Shared by /limit and the admin AI tool. Returns the confirmation; ValueError with a readable text."""
+        key = (key or "").lower().strip()
+        if key not in LIMIT_KEYS:
+            raise ValueError(f"Unbekannte Art {key!r}. Möglich: {', '.join(LIMIT_KEYS)}.")
+        who_l = str(who).lower().strip()
+        if who_l in ("standard", "alle", "default"):
+            target: str | int = "standard"
+            label = "alle Nutzer (Standard)"
+        elif who_l in (TOTAL, "bot", "gesamtbudget"):
+            target, label = TOTAL, "den ganzen Bot"
+        else:
+            found = self.find(str(who))
+            if found is None or found not in self.users:
+                raise ValueError(f"Nutzer „{who}“ nicht eindeutig gefunden. Nimm die ID aus /nutzer.")
+            target, label = found, self.name(found)
+        if raw is None or str(raw).lower().strip() in ("aus", "off", "0", "-", "none", "kein", "keins"):
+            value = None
+        else:
+            try:
+                value = float(str(raw).replace(",", ".").replace("$", "").strip())
+            except ValueError:
+                raise ValueError(f"„{raw}“ ist keine Zahl. Beispiel: /limit standard tag 10") from None
+            if value < 0:
+                raise ValueError("Limits müssen positiv sein.")
+        self.set_limit(target, key, value)
+        txt = f"{LIMIT_KEYS[key]} aus" if value is None else limit_text(key, value)
+        return f"👍 Für {label}: {txt}."
+
+    def apply_role(self, who: str, action: str) -> tuple[int, str]:
+        """freigeben / sperren / entfernen by name or id. Returns (user id, confirmation)."""
+        uid = self.find(str(who))
+        if uid is None or uid not in self.users:
+            raise ValueError(f"Nutzer „{who}“ nicht eindeutig gefunden.")
+        name = self.name(uid)
+        action = action.lower()
+        if action in ("freigeben", "allow", "ok"):
+            self.set_role(uid, USER)
+            return uid, f"✅ {name} ist freigegeben."
+        if action in ("sperren", "block"):
+            self.set_role(uid, BLOCKED)
+            return uid, f"🚫 {name} ist gesperrt."
+        if action in ("entfernen", "remove", "löschen"):
+            self.remove(uid)
+            return uid, f"🗑 {name} wurde entfernt (kann neu anfragen)."
+        raise ValueError("Aktion muss freigeben, sperren oder entfernen sein.")
 
     def find(self, text: str) -> int | None:
         """User by id or (part of the) name."""

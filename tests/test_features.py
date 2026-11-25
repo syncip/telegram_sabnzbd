@@ -14,7 +14,7 @@ from arrbot.llm import ToolCall
 from arrbot.sabnzbd import SABnzbd, SabSlot, eta_text, parse_timeleft
 from arrbot.state import Store, utcnow
 from arrbot.tmdb import TMDB, GermanInfo, german_summary
-from arrbot.tools import DownloadsView, Flow, Offer, ToolRunner, _season_overview, _seasons_text, release_languages
+from arrbot.tools import Flow, Offer, ToolRunner, View, _season_overview, _seasons_text, release_languages
 from arrbot.tracker import Tracker
 from arrbot.users import BLOCKED, PENDING, USER, UserStore
 
@@ -92,7 +92,7 @@ def test_sab_queue_parsing():
     q = asyncio.run(sab_with([SLOT]).queue())
     s = q.slots["SABnzbd_nzo_abc"]
     assert (s.percent, s.mb_total, s.status) == (62, 5120.0, "Downloading")
-    assert q.speed_text == "12.5 MB/s" and not q.paused
+    assert q.speed_text == "12,5 MB/s" and not q.paused
 
 
 # ---- tracker with SABnzbd --------------------------------------------------------
@@ -145,7 +145,7 @@ def test_downloads_view_with_progress_bar_and_owner_filter(tmp_path):
 
     mine = downloads.render(snap, 42, False, str, TZ)
     assert "Deine Downloads" in mine and "Dune: Part Two" in mine and "Severance" not in mine
-    assert f"<code>{downloads.bar(62)}</code> 62 %" in mine and "⚡ 12.5 MB/s" in mine
+    assert f"<code>{downloads.bar(62)}</code> 62 %" in mine and "⚡ 12,5 MB/s" in mine
     assert "⏱ fertig ca." in mine and "✅ Fertig" in mine and "Dune (2021)" in mine
 
     everything = downloads.render(snap, 42, True, lambda uid: {99: "Anna"}.get(uid, str(uid)), TZ)
@@ -163,7 +163,8 @@ def test_download_status_tool_shows_view_without_ai_text(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
     tools = ToolRunner(radarr, sonarr, store, "released")
     res = asyncio.run(tools.run(ToolCall("1", "download_status", {}), 5))
-    assert res.final == "" and isinstance(tools.take_outbox(5)[0], DownloadsView)
+    view = tools.take_outbox(5)[0]
+    assert res.final == "" and isinstance(view, View) and view.kind == "downloads" and not view.finished
 
 
 # ---- users and limits ---------------------------------------------------------------
@@ -334,10 +335,15 @@ def test_suggestions_from_history_skip_owned(tmp_path):
 
 def test_german_info_and_summary(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
+    from arrbot import german
+
     tools = ToolRunner(radarr, sonarr, store, "released", tmdb=fake_tmdb())
     res = asyncio.run(tools.run(ToolCall("1", "german_info", {"kind": "movie", "id": 5}), 5))
-    data = json.loads(res.content)
-    assert data["de_title"] == "Der Film" and data["kino_de"] == "2026-10-01" and data["digital_de"] == "2027-01-15"
+    assert res.final.startswith("🇩🇪 **Der Film (2024)** auf Deutsch")  # shown as is, no AI wording
+    text = asyncio.run(german.movie_report(radarr, fake_tmdb(), 5, False, date(2026, 11, 25)))
+    assert "⏳ Noch nicht – zu Hause auf Deutsch ab 15.01.2027." in text
+    assert "🎬 Kino: 01.10.2026 ✅" in text and "💾 Digital: 15.01.2027 ⏳" in text and "📀 Disc: kein Termin" in text
+    assert "🛒 Kaufen/Leihen: Apple TV" in text
     info = GermanInfo("movie", 5, "Der Film", "The Movie", "en", True, cinema=date(2026, 10, 1), digital=date(2027, 1, 15))
     assert german_summary(info, date(2026, 11, 25)) == (
         "🇩🇪 Auf Deutsch zu Hause erst ab 15.01.2027 (digital), im Kino seit 01.10.2026."
@@ -453,3 +459,19 @@ def test_pause_without_date_and_resume(tmp_path):
     res = asyncio.run(tools.run(ToolCall("2", "resume_title", {"kind": "movie", "lib_id": 7}), 5))
     assert res.final.startswith("▶️ Suche nach Dune: Part Two (2024) läuft wieder")
     assert fr.movies[7]["monitored"] is True and fr.commands[-1] == {"name": "MoviesSearch", "movieIds": [7]}
+
+
+def test_suggestions_only_newer_than(tmp_path):
+    """'Bitte nur Filme neuer als 2000': old titles never show up, too few matches fill up from the best of those years."""
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    store.record_request(5, "movie", "Arrival (2016)", 329865)
+    calls = []
+    tools = ToolRunner(radarr, sonarr, store, "released", tmdb=fake_tmdb(calls))
+    res = asyncio.run(tools.run(ToolCall("1", "suggest", {"kind": "movie", "from_year": 2018}), 5))
+    assert res.final == ""
+    offer = tools.take_outbox(5)[0]
+    assert "(ab 2018)" in offer.text
+    assert offer.cands and all(c.year >= 2018 for c in offer.cands)
+    assert "Blade Runner 2049" not in [c.title for c in offer.cands]
+    disc = [q for p, q in calls if p == "/discover/movie"][0]
+    assert disc["primary_release_date.gte"] == "2018-01-01" and disc["sort_by"] == "vote_average.desc"

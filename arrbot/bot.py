@@ -35,9 +35,11 @@ from .llm import make_provider
 from .sabnzbd import SABnzbd, SabError
 from .state import Store, Tracked
 from .tmdb import TMDB
-from .tools import DownloadsView, Flow, Offer, ToolRunner, release_languages
+from .tools import Flow, Offer, ToolRunner, View, release_languages
 from .tracker import Tracker
-from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, TOTAL, USER, UserStore, limit_text
+from . import health, stats
+from .agent import PRICES
+from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text
 
 log = logging.getLogger(__name__)
 
@@ -59,11 +61,15 @@ HELP = (
 ADMIN_HELP = (
     "\n\n<b>Admin</b>\n"
     "/nutzer – Nutzer freigeben, sperren, entfernen\n"
+    "/statistik – Nutzer, Anfragen, Tokens, Kosten\n"
+    "/check – alle APIs prüfen\n"
     "/limit – Limits setzen, z. B.\n"
     "<code>/limit standard tag 10</code>\n"
     "<code>/limit Anna monat 50</code>\n"
     "<code>/limit gesamt kosten 1</code>\n"
-    "<code>/limit 123456 tokens aus</code>"
+    "<code>/limit 123456 tokens aus</code>\n\n"
+    "Oder einfach schreiben: „Zeig mir die Statistik“, „Setz Annas Tageslimit auf 5“, "
+    "„Sperr Bob“, „Prüf die APIs“."
 )
 
 RESPONSE_TIMEOUT = 180  # seconds for one whole answer, including all AI steps
@@ -155,6 +161,15 @@ def build_app(cfg: Config) -> Application:
 
     tools.on_added = on_added
     tools.is_admin = users.is_admin
+    tools.users = users
+
+    async def notify_user(uid: int, text: str) -> None:
+        try:
+            await app.bot.send_message(uid, text)
+        except (BadRequest, Forbidden) as e:
+            log.info("Nachricht an %s nicht zugestellt: %s", uid, e)
+
+    tools.notify_user = notify_user
     tracker = Tracker(radarr, sonarr, store, send, cfg.no_release_minutes, cfg.track_days, sab=sab, tz=tz,
                       hint=no_release_hint)
 
@@ -194,8 +209,8 @@ def build_app(cfg: Config) -> Application:
         for item in tools.take_outbox(chat_id):
             if isinstance(item, Offer):
                 await send_offer(item)
-            elif isinstance(item, DownloadsView):
-                await send_downloads(chat_id, user_id)
+            elif isinstance(item, View):
+                await send_view(item, user_id)
             else:
                 await show_flow(item, ctx)
 
@@ -211,6 +226,8 @@ def build_app(cfg: Config) -> Application:
 
     async def send_offer(offer: Offer) -> None:
         buttons = [(c.label, str(i)) for i, c in enumerate(offer.cands)]
+        if offer.bulk and len(offer.cands) > 1:
+            buttons.append((f"⬇️ Alle {len(offer.cands)} hinzufügen", "all"))
         msg = await app.bot.send_message(offer.chat_id, offer.text, reply_markup=markup_for(buttons, f"o:{offer.id}"))
         offer.message_id = msg.message_id
 
@@ -257,6 +274,11 @@ def build_app(cfg: Config) -> Application:
             return
         _, offer_id, idx = query.data.split(":")
         await query.answer()
+        if idx == "all":
+            text = await tools.add_all(offer_id)
+            await query.edit_message_reply_markup(None)
+            await app.bot.send_message(query.message.chat_id, text or "Diese Auswahl ist abgelaufen. Schreib mir einfach nochmal.")
+            return
         res = await tools.choose_offer(offer_id, int(idx))
         if res is None:
             await query.edit_message_reply_markup(None)
@@ -303,7 +325,13 @@ def build_app(cfg: Config) -> Application:
             await query.answer(str(e)[:190], show_alert=True)
 
     # ---- downloads overview ---------------------------------------------------------
-    async def downloads_message(viewer: int, show_all: bool) -> tuple[str, InlineKeyboardMarkup]:
+    def _cb_query(q: str | None) -> str:
+        """The title filter rides along in the callback data (max 64 bytes in total)."""
+        raw = (q or "").replace(":", " ").encode("utf-8")[:40]
+        return raw.decode("utf-8", "ignore").strip()
+
+    async def downloads_message(viewer: int, show_all: bool, finished: bool = True,
+                                query: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
         sab_queue = None
         if sab:
             try:
@@ -311,17 +339,26 @@ def build_app(cfg: Config) -> Application:
             except SabError as e:
                 log.warning("%s", e)
         snap = await downloads.collect(radarr, sonarr, store, sab_queue, sab is not None, tz)
-        text = downloads.render(snap, viewer, show_all, users.name, tz)
-        mode = "a" if show_all else "m"
-        row = [InlineKeyboardButton("🔄 Aktualisieren", callback_data=f"d:{mode}")]
-        if users.is_admin(viewer):
-            row.append(InlineKeyboardButton("👤 Nur meine" if show_all else "👥 Alle",
-                                            callback_data="d:m" if show_all else "d:a"))
-        return text, InlineKeyboardMarkup([row])
+        query = _cb_query(query) or None
+        text = downloads.render(snap, viewer, show_all, users.name, tz, show_finished=finished, query=query)
+        # callback "d:<a|m>:<f|->[:<title filter>]": all/mine, with/without the finished list
+        mode, fin, q = ("a" if show_all else "m"), ("f" if finished else "-"), (f":{query}" if query else "")
+        row = [InlineKeyboardButton("🔄 Aktualisieren", callback_data=f"d:{mode}:{fin}{q}")]
+        if not query:
+            row.append(InlineKeyboardButton("🙈 Fertige aus" if finished else "✅ Fertige",
+                                            callback_data=f"d:{mode}:{'-' if finished else 'f'}"))
+        else:
+            row.append(InlineKeyboardButton("📥 Alle Downloads", callback_data=f"d:{mode}:-"))
+        rows = [row]
+        if users.is_admin(viewer) and not query:
+            rows.append([InlineKeyboardButton("👤 Nur meine" if show_all else "👥 Alle",
+                                              callback_data=f"d:{'m' if show_all else 'a'}:{fin}")])
+        return text, InlineKeyboardMarkup(rows)
 
-    async def send_downloads(chat_id: int, viewer: int) -> None:
+    async def send_downloads(chat_id: int, viewer: int, finished: bool = True, query: str | None = None) -> None:
         try:
-            text, markup = await downloads_message(viewer, users.is_admin(viewer))
+            # One title: show everybody's (the search may have been started by someone else) and its finished state.
+            text, markup = await downloads_message(viewer, users.is_admin(viewer), finished or bool(query), query)
         except Exception as e:  # noqa: BLE001
             log.exception("Downloads-Übersicht fehlgeschlagen")
             await app.bot.send_message(chat_id, f"⚠️ Konnte die Downloads nicht abrufen: {e}")
@@ -337,9 +374,12 @@ def build_app(cfg: Config) -> Application:
             await query.answer("Kein Zugriff.", show_alert=True)
             return
         viewer = update.effective_user.id
-        show_all = query.data == "d:a" and users.is_admin(viewer)
+        parts = query.data.split(":", 3)
+        show_all = parts[1] == "a" and users.is_admin(viewer)
+        finished = len(parts) < 3 or parts[2] == "f"
+        title = parts[3] if len(parts) > 3 else None
         try:
-            text, markup = await downloads_message(viewer, show_all)
+            text, markup = await downloads_message(viewer, show_all, finished, title)
         except Exception as e:  # noqa: BLE001
             await query.answer(f"Fehler: {e}"[:190], show_alert=True)
             return
@@ -349,6 +389,51 @@ def build_app(cfg: Config) -> Application:
         except BadRequest as e:
             if "not modified" not in str(e).lower():
                 raise
+
+    # ---- statistics and API check (admin) ----------------------------------------------
+    def stats_text() -> str:
+        return stats.render(users, store, cfg.llm.model, tz, price_known=cfg.llm.model in PRICES)
+
+    async def send_stats(chat_id: int) -> None:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Aktualisieren", callback_data="s:r")]])
+        await app.bot.send_message(chat_id, stats_text(), parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    async def on_stats(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_stats(update.effective_chat.id)
+
+    async def on_stats_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not (update.effective_user and users.is_admin(update.effective_user.id)):
+            await query.answer("Nur für Admins.", show_alert=True)
+            return
+        await query.answer("Aktualisiert")
+        try:
+            await query.edit_message_text(stats_text(), parse_mode=ParseMode.HTML, reply_markup=query.message.reply_markup)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    async def check_text() -> str:
+        checks = await health.run_checks(bot=app.bot, provider=agent.provider, model=cfg.llm.model,
+                                         radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb)
+        return health.render(checks)
+
+    async def send_check(chat_id: int) -> None:
+        msg = await app.bot.send_message(chat_id, "🩺 Prüfe alle APIs …")
+        await app.bot.edit_message_text(await check_text(), chat_id, msg.message_id, parse_mode=ParseMode.HTML)
+
+    async def on_check(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_check(update.effective_chat.id)
+
+    async def send_view(view: View, viewer: int) -> None:
+        if view.kind == "downloads":
+            await send_downloads(view.chat_id, viewer, view.finished, view.query)
+        elif view.kind == "stats" and users.is_admin(viewer):
+            await send_stats(view.chat_id)
+        elif view.kind == "users" and users.is_admin(viewer):
+            await app.bot.send_message(view.chat_id, users_text(), parse_mode=ParseMode.HTML, reply_markup=users_markup())
+        elif view.kind == "check" and users.is_admin(viewer):
+            await send_check(view.chat_id)
 
     # ---- access requests and user management ----------------------------------------
     async def on_unknown(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -461,25 +546,10 @@ def build_app(cfg: Config) -> Application:
         if len(args) != 3:
             await app.bot.send_message(update.effective_chat.id, usage, parse_mode=ParseMode.HTML)
             return
-        who, key, raw = args[0], args[1].lower(), args[2].lower()
-        if who.lower() in ("standard", TOTAL):
-            target: str | int = who.lower()
-        else:
-            found = users.find(who)
-            if found is None:
-                await update.effective_message.reply_text(f"Nutzer „{who}“ nicht eindeutig gefunden. Nimm die ID aus /nutzer.")
-                return
-            target = found
         try:
-            value = None if raw in ("aus", "off", "0", "-") else float(raw.replace(",", "."))
-            users.set_limit(target, key, value)
+            await update.effective_message.reply_text(users.apply_limit(args[0], args[1], args[2]))
         except ValueError as e:
-            await update.effective_message.reply_text(f"⚠️ {e}" if "Limit" in str(e) or "Nutzer" in str(e) else usage,
-                                                      parse_mode=ParseMode.HTML)
-            return
-        label = {"standard": "alle Nutzer", TOTAL: "den ganzen Bot"}.get(str(target), users.name(int(target)))
-        txt = f"{LIMIT_KEYS[key]} aus" if value is None else limit_text(key, value)
-        await update.effective_message.reply_text(f"👍 Für {label}: {txt}.")
+            await update.effective_message.reply_text(f"⚠️ {e}")
 
     # ---- commands -----------------------------------------------------------
     def help_for(uid: int) -> tuple[str, str | None]:
@@ -568,7 +638,8 @@ def build_app(cfg: Config) -> Application:
         for admin in users.admins():
             try:
                 await application.bot.set_my_commands(
-                    base + [BotCommand("nutzer", "Nutzer verwalten"), BotCommand("limit", "Limits setzen")],
+                    base + [BotCommand("nutzer", "Nutzer verwalten"), BotCommand("statistik", "Statistik"),
+                            BotCommand("check", "APIs prüfen"), BotCommand("limit", "Limits setzen")],
                     scope=BotCommandScopeChat(admin),
                 )
             except BadRequest as e:  # admin never wrote to the bot yet
@@ -597,12 +668,15 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("verbrauch", on_usage, filters=allowed))
     app.add_handler(CommandHandler("nutzer", on_users, filters=is_admin))
     app.add_handler(CommandHandler("limit", on_limit, filters=is_admin))
+    app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
+    app.add_handler(CommandHandler(["check", "apis"], on_check, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))
     app.add_handler(CallbackQueryHandler(on_downloads_button, pattern=r"^d:"))
     app.add_handler(CallbackQueryHandler(on_user_button, pattern=r"^u:"))
     app.add_handler(CallbackQueryHandler(on_notice_button, pattern=r"^n:"))
+    app.add_handler(CallbackQueryHandler(on_stats_button, pattern=r"^s:"))
     app.add_handler(MessageHandler(~allowed, on_unknown))
     app.add_handler(MessageHandler(allowed & filters.COMMAND, on_start))  # unknown command: show help
     app.add_error_handler(on_error)

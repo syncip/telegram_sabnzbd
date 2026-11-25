@@ -108,7 +108,10 @@ def test_agent_adds_movie_and_tracks(tmp_path):
     # The add ends the turn: no third AI call just to say "done", and the history is cleared.
     assert len(llm.seen) == 2 and llm.script == []
     assert reply.startswith("✅ Dune: Part Two (2024) hinzugefügt")
-    assert agent.convs[42].history == []
+    # Only the question and a short answer stay, for follow-ups like "und der Status?".
+    h = agent.convs[42].history
+    assert [t.role for t in h] == ["user", "assistant"] and h[0].text == "lad dune 2"
+    assert h[1].text.startswith("✅ Dune: Part Two") and not h[1].tool_calls
     search_result = json.loads(llm.seen[1][-1].tool_results[0].content)
     assert search_result == [{"tmdb": 693134, "title": "Dune: Part Two", "year": 2024}]  # compact, year filter
     added = fr.movies[7]

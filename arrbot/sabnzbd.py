@@ -39,7 +39,7 @@ class SabQueue:
     @property
     def speed_text(self) -> str:
         mb = self.speed_kbps / 1024
-        return f"{mb:.1f} MB/s" if mb >= 0.1 else "steht"
+        return f"{mb:.1f} MB/s".replace(".", ",") if mb >= 0.1 else "steht"
 
 
 def parse_timeleft(raw: str | None) -> timedelta | None:

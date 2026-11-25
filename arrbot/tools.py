@@ -16,7 +16,7 @@ from datetime import date, timedelta, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import urlinfo
+from . import german, manage, urlinfo
 from .arr import ArrError, Radarr, Sonarr
 from .llm import ToolCall, ToolResult, ToolSpec
 from .state import Store, utcnow
@@ -28,6 +28,7 @@ MAX_RESULTS = 5
 MAX_SEASON_BUTTONS = 10
 MAX_SUGGESTIONS = 6
 MAX_TOP = 10
+NO_TMDB = 'ℹ️ Dafür brauche ich einen kostenlosen TMDB-Key. Der Admin trägt ihn in der docker-compose.yml als TMDB_API_KEY ein (themoviedb.org → Einstellungen → API).'
 MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September",
           "Oktober", "November", "Dezember"]
 
@@ -95,6 +96,17 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             ),
         ),
         ToolSpec(
+            "german_fix",
+            "Prüft die Folgen einer Serie in der Bibliothek auf Deutsch und bietet deutsche Downloads per Button an.",
+            obj({"tvdb_id": {"type": "integer"}, "season": {"type": "integer"}}, ["tvdb_id"]),
+        ),
+        ToolSpec(
+            "clean_episodes",
+            "Folgen einer Serie löschen; Bot fragt per Button. which: not_german | season | all.",
+            obj({"tvdb_id": {"type": "integer"}, "which": {"type": "string", "enum": ["not_german", "season", "all"]},
+                 "season": {"type": "integer"}}, ["tvdb_id", "which"]),
+        ),
+        ToolSpec(
             "remove_title",
             "Titel aus der Bibliothek löschen; der Bot fragt per Button nach. lib_id aus der Suche.",
             obj({"kind": {"type": "string", "enum": ["movie", "series"]}, "lib_id": {"type": "integer"}},
@@ -117,11 +129,18 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             "Qualitätsprofile auflisten.",
             obj({"kind": {"type": "string", "enum": ["movie", "series"]}}, ["kind"]),
         ),
-        ToolSpec("download_status", "Zeigt dem Nutzer seine laufenden und fertigen Downloads.", obj({})),
+        ToolSpec(
+            "download_status",
+            "Zeigt dem Nutzer seine Downloads. title: nur dieser Titel (z. B. die letzte Suche). "
+            "finished=true nur, wenn nach fertigen gefragt.",
+            obj({"title": {"type": "string"}, "finished": {"type": "boolean"}}),
+        ),
         ToolSpec(
             "suggest",
-            "Vorschläge passend zu dem, was der Nutzer bisher geladen hat; zeigt Buttons.",
-            obj({"kind": {"type": "string", "enum": ["movie", "series"]}}),
+            "Vorschläge passend zu dem, was der Nutzer bisher geladen hat; zeigt Buttons. "
+            "from_year/to_year: Erscheinungsjahr (\"neuer als 2000\" = from_year 2001), min_rating 0-10.",
+            obj({"kind": {"type": "string", "enum": ["movie", "series"]}, "from_year": {"type": "integer"},
+                 "to_year": {"type": "integer"}, "min_rating": {"type": "number"}}),
         ),
         ToolSpec(
             "open_url",
@@ -129,7 +148,7 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             obj({"url": {"type": "string"}}, ["url"]),
         ),
     ]
-    if has_tmdb:
+    if True:  # also without TMDB: the tool then says what is missing instead of the AI guessing
         specs.append(ToolSpec(
             "top_titles",
             "Top-Filme/-Serien eines Jahres oder Monats. download=true nur, wenn der Nutzer sie laden will; "
@@ -146,12 +165,45 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
         ))
         specs.append(ToolSpec(
             "german_info",
-            "Deutsche Fassung/Termine: Kino, digital, Disc, Streaming in DE. id: tmdb (Film) bzw. tvdb (Serie). "
-            "indexer=true nur wenn nach vorhandenen Releases gefragt (langsam).",
+            "Ob/wann es auf Deutsch gibt; zeigt dem Nutzer selbst eine Übersicht (Serie: pro Folge). "
+            "id: tmdb (Film) bzw. tvdb (Serie). season nur wenn genannt. indexer=false nur bei Filmen ohne "
+            "Frage nach Downloads.",
             obj({"kind": {"type": "string", "enum": ["movie", "series"]}, "id": {"type": "integer"},
-                 "indexer": {"type": "boolean"}}, ["kind", "id"]),
+                 "season": {"type": "integer"}, "indexer": {"type": "boolean"}}, ["kind", "id"]),
         ))
     return specs
+
+
+def build_admin_specs() -> list[ToolSpec]:
+    """Only offered to admins."""
+    obj = lambda props, req=(): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
+    return [
+        ToolSpec("admin_stats", "Statistik: Nutzer, Anfragen, Tokens, Kosten gesamt und pro Nutzer.", obj({})),
+        ToolSpec("admin_users", "Nutzerliste mit Buttons zum Freigeben/Sperren.", obj({})),
+        ToolSpec("admin_check", "Prüft alle APIs (KI, Radarr, Sonarr, SABnzbd, TMDB, Telegram).", obj({})),
+        ToolSpec(
+            "admin_set_limit",
+            "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot). value: Zahl oder 'aus'.",
+            obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": ["tag", "monat", "tokens", "kosten"]},
+                 "value": {"type": "string"}}, ["who", "kind", "value"]),
+        ),
+        ToolSpec(
+            "admin_user",
+            "Nutzer freigeben, sperren oder entfernen.",
+            obj({"who": {"type": "string"},
+                 "action": {"type": "string", "enum": ["freigeben", "sperren", "entfernen"]}}, ["who", "action"]),
+        ),
+    ]
+
+
+@dataclass
+class View:
+    """A message the bot renders in code (downloads, statistics, users, API check)."""
+
+    chat_id: int
+    kind: str  # downloads | stats | users | check
+    finished: bool = False
+    query: str | None = None  # downloads: only titles containing this
 
 
 def _compact(d: dict) -> dict:
@@ -211,6 +263,7 @@ class Flow:
     message_id: int | None = None
     step: Step | None = None
     missing: list[int] = field(default_factory=list)  # extend stage: seasons not (fully) downloaded
+    data: Any = None  # gfix / clean stage: the plan to run on confirmation
 
 
 @dataclass
@@ -220,13 +273,11 @@ class Offer:
     cands: list[Candidate]
     message_id: int | None = None
     text: str = "🔎 Welchen meinst du?"
+    bulk: bool = False  # top lists: extra button "add all"
 
 
-@dataclass
-class DownloadsView:
-    """Ask the bot to show the downloads overview (rendered in code, no AI)."""
-
-    chat_id: int
+def DownloadsView(chat_id: int, finished: bool = False) -> "View":  # noqa: N802 - kept for readability
+    return View(chat_id, "downloads", finished)
 
 
 class ToolRunner:
@@ -245,6 +296,7 @@ class ToolRunner:
         # Called after something was added/searched: (chat_id, text). The bot tells the admin.
         self.on_added: Callable[[int, str], Awaitable[None]] | None = None
         self.is_admin: Callable[[int], bool] = lambda _uid: False  # set by the bot
+        self.notify_user: Callable[[int, str], Awaitable[None]] | None = None
         self.radarr = radarr
         self.sonarr = sonarr
         self.store = store
@@ -253,22 +305,33 @@ class ToolRunner:
         self.specs = build_specs(radarr is not None, sonarr is not None, tmdb is not None)
         self.flows: dict[str, Flow] = {}
         self.offers: dict[str, Offer] = {}
-        self._outbox: dict[int, list[Flow | Offer | DownloadsView]] = {}
+        self._outbox: dict[int, list[Flow | Offer | View]] = {}
+        self.users: Any = None  # UserStore, set by the bot (admin tools)
+        self.admin_specs = build_admin_specs()
         self._seen: dict[int, dict[tuple[str, int], Candidate]] = {}
         self.url_options: dict = {}  # tests inject a fake transport here
 
     # ---- plumbing -------------------------------------------------------
-    def take_outbox(self, chat_id: int) -> list[Flow | Offer | DownloadsView]:
+    def take_outbox(self, chat_id: int) -> list[Flow | Offer | View]:
         """Button messages created during the last AI turn; the bot sends them."""
         return self._outbox.pop(chat_id, [])
+
+    def specs_for(self, user_id: int) -> list[ToolSpec]:
+        return self.specs + self.admin_specs if self.users is not None and self.is_admin(user_id) else self.specs
 
     async def run(self, call: ToolCall, chat_id: int) -> ToolResult:
         fn = getattr(self, f"_t_{call.name}", None)
         if fn is None:
             return ToolResult(call.id, call.name, f"Unbekanntes Werkzeug {call.name}", is_error=True)
+        if call.name.startswith("admin_") and not (self.users is not None and self.is_admin(chat_id)):
+            return ToolResult(call.id, call.name, "Nur für Admins.", is_error=True)
         try:
             result = await fn(chat_id=chat_id, **call.args)
-        except (ArrError, TmdbError) as e:
+        except TmdbError as e:
+            # Shown as is: the AI would only paraphrase it into "keine Daten gefunden".
+            log.warning("TMDB bei %s: %s", call.name, e)
+            return ToolResult(call.id, call.name, "ok", final=f"⚠️ {e}")
+        except ArrError as e:
             return ToolResult(call.id, call.name, str(e), is_error=True)
         except TypeError as e:
             return ToolResult(call.id, call.name, f"Ungültige Parameter: {e}", is_error=True)
@@ -424,6 +487,10 @@ class ToolRunner:
             self.flows.pop(flow.id, None)
             flow.step = await self._do_remove(flow, value)
             return flow
+        if flow.stage in ("gfix", "clean"):
+            self.flows.pop(flow.id, None)
+            flow.step = await self._run_series_job(flow, value)
+            return flow
         if flow.stage == "extend":
             if value == "rest":
                 flow.seasons = flow.missing
@@ -450,6 +517,22 @@ class ToolRunner:
         if flow is None or flow.stage != "quality":
             return None
         return await self.choose(flow_id, f"p{flow.profiles.index(flow.default_profile)}")
+
+    async def add_all(self, offer_id: str) -> str | None:
+        """'Alle hinzufügen' under a top list: add every offered title with the default quality."""
+        offer = self.offers.pop(offer_id, None)
+        if offer is None:
+            return None
+        lines = []
+        for c in offer.cands:
+            name = c.title + (f" ({c.year})" if c.year else "")
+            try:
+                await self._add(Flow(uuid.uuid4().hex[:10], offer.chat_id, c, monitor="all"))
+                lines.append(f"✅ {name}")
+            except ArrError as e:
+                lines.append(f"❌ {name} – {e}")
+        lines.append("\nQualität: Standardprofil. Ich melde mich, wenn Downloads starten.")
+        return "\n".join(lines)
 
     async def choose_offer(self, offer_id: str, idx: int) -> tuple[Offer, Flow | Step] | None:
         """A candidate button was pressed: start its flow (or re-search a library title)."""
@@ -560,8 +643,8 @@ class ToolRunner:
         self._offer(chat_id, cands)
         return Final("")
 
-    def _offer(self, chat_id: int, cands: list[Candidate], text: str | None = None) -> Offer:
-        offer = Offer(uuid.uuid4().hex[:10], chat_id, cands)
+    def _offer(self, chat_id: int, cands: list[Candidate], text: str | None = None, bulk: bool = False) -> Offer:
+        offer = Offer(uuid.uuid4().hex[:10], chat_id, cands, bulk=bulk)
         if text:
             offer.text = text
         self.offers[offer.id] = offer
@@ -684,9 +767,89 @@ class ToolRunner:
     async def _t_list_quality_profiles(self, chat_id: int, kind: str) -> list[str]:
         return [p["name"] for p in await self._svc(kind).quality_profiles()]
 
-    async def _t_download_status(self, chat_id: int) -> Final:
-        self._outbox.setdefault(chat_id, []).append(DownloadsView(chat_id))
+    async def _t_download_status(self, chat_id: int, finished: bool = False, title: str | None = None) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "downloads", bool(finished), title or None))
         return Final("")
+
+    # ---- series housekeeping (German episodes, deleting episodes) ----------------------------
+    async def _series_job(self, chat_id: int, tvdb_id: int, stage: str, text: str,
+                          buttons: list[tuple[str, str]], plan: Any) -> Final:
+        if not buttons:
+            return Final(text)
+        cand = await self._candidate(chat_id, "series", int(tvdb_id))
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, cand, stage=stage, data=plan)
+        flow.step = Step(text, buttons)
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
+    async def _library_series(self, chat_id: int, tvdb_id: int, delete: bool) -> int:
+        cand = await self._candidate(chat_id, "series", int(tvdb_id))
+        if not cand.lib_id:
+            raise ArrError(f"{cand.title} ist nicht in der Bibliothek. Erst hinzufügen (add_series).")
+        await self._managed(chat_id, "series", cand.lib_id, delete=delete)
+        return cand.lib_id
+
+    async def _t_german_fix(self, chat_id: int, tvdb_id: int, season: int | None = None) -> Final:
+        lib_id = await self._library_series(chat_id, tvdb_id, delete=False)
+        sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
+        plan = await manage.plan_german(sonarr, lib_id, int(season) if season else None, date.today())
+        text, buttons = manage.render_plan(plan)
+        return await self._series_job(chat_id, tvdb_id, "gfix", text, buttons, plan)
+
+    async def _t_clean_episodes(self, chat_id: int, tvdb_id: int, which: str, season: int | None = None) -> Final:
+        if which == "season" and not season:
+            raise ArrError("Welche Staffel? season angeben.")
+        lib_id = await self._library_series(chat_id, tvdb_id, delete=True)
+        sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
+        plan = await manage.plan_clean(sonarr, lib_id, which, int(season) if season else None)
+        text, buttons = manage.render_clean(plan)
+        return await self._series_job(chat_id, tvdb_id, "clean", text, buttons, plan)
+
+    async def _run_series_job(self, flow: Flow, value: str) -> Step:
+        plan, title = flow.data, flow.cand.title
+        if value not in ("all", "missing", "research", "drop"):
+            return Step(f"👍 Okay, bei {title} bleibt alles, wie es ist.", done=True)
+        sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
+        try:
+            if flow.stage == "gfix":
+                text = await manage.run_fix(sonarr, plan, only_missing=value == "missing")
+                await self._added(flow.chat_id, f"🇩🇪 {title}: deutsche Folgen geladen")
+            else:
+                text = await manage.run_clean(sonarr, plan, research=value == "research")
+                await self._added(flow.chat_id, f"🗑 {title}: {len(plan.episodes)} Folgen gelöscht")
+        except ArrError as e:
+            return Step(f"❌ Hat nicht geklappt: {e}", done=True)
+        self.store.track("sonarr", plan.series_id, title, flow.chat_id)  # report the new downloads
+        return Step(text, done=True)
+
+    # ---- admin ------------------------------------------------------------------------
+    async def _t_admin_stats(self, chat_id: int) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "stats"))
+        return Final("")
+
+    async def _t_admin_users(self, chat_id: int) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "users"))
+        return Final("")
+
+    async def _t_admin_check(self, chat_id: int) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "check"))
+        return Final("")
+
+    async def _t_admin_set_limit(self, chat_id: int, who: str, kind: str, value: str | float | None = None) -> Final:
+        try:
+            return Final(self.users.apply_limit(who, kind, value))
+        except ValueError as e:
+            raise ArrError(str(e)) from e
+
+    async def _t_admin_user(self, chat_id: int, who: str, action: str) -> Final:
+        try:
+            uid, text = self.users.apply_role(who, action)
+        except ValueError as e:
+            raise ArrError(str(e)) from e
+        if self.notify_user and action == "freigeben":
+            await self.notify_user(uid, "🎉 Du bist freigeschaltet! Schreib mir einfach, was du sehen willst.")
+        return Final(text)
 
     async def _german_titles(self, kind: str, tmdb_ids: list[int | None]) -> dict[int, str]:
         ids = [i for i in tmdb_ids if i]
@@ -694,37 +857,42 @@ class ToolRunner:
             return {}
         return await self.tmdb.german_titles(kind, ids)
 
-    async def _t_german_info(self, chat_id: int, kind: str, id: int, indexer: bool = False) -> dict:  # noqa: A002
-        if not self.tmdb:
-            raise ArrError("TMDB ist nicht eingerichtet (TMDB_API_KEY).")
-        tid = await self._tmdb_id(kind, int(id))
-        if not tid:
-            raise ArrError("Titel bei TMDB nicht gefunden.")
-        out = (await self.tmdb.german_info(kind, tid)).to_dict()
-        out["heute"] = date.today().isoformat()
-        if indexer:
-            cand = await self._candidate(chat_id, kind, int(id))
-            if not cand.lib_id:
-                out["indexer"] = "nur für Titel in der Bibliothek möglich"
-            elif kind == "movie":
-                rel = await self._need(self.radarr, "Radarr").releases(movieId=cand.lib_id)
-                out["indexer"] = release_languages(rel)
-            else:
-                sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
-                have, missing = _season_overview(await sonarr.get(cand.lib_id))
-                season = (missing or have or [1])[0]
-                rel = await sonarr.releases(seriesId=cand.lib_id, seasonNumber=season)
-                out["indexer"] = {"staffel": season, **release_languages(rel)}
-        return out
+    async def _t_german_info(self, chat_id: int, kind: str, id: int, season: int | None = None,  # noqa: A002
+                             indexer: bool | None = None) -> Final:
+        """Rendered in code: the AI only picks the title, it never paraphrases dates (that went wrong)."""
+        today = date.today()
+        if kind == "movie":
+            if not self.tmdb:
+                return Final(NO_TMDB)
+            text = await german.movie_report(self._need(self.radarr, "Radarr"), self.tmdb, int(id),
+                                             bool(indexer), today)
+        else:
+            # Series: checking the indexers is the only real proof of German episodes, so it is on by default.
+            text = await german.series_report(self._need(self.sonarr, "Sonarr"), self.tmdb, int(id),
+                                              int(season) if season else None, indexer is not False, today)
+        return Final(text)
 
-    async def _t_suggest(self, chat_id: int, kind: str | None = None) -> Final | dict:
+    async def _t_suggest(self, chat_id: int, kind: str | None = None, from_year: int | None = None,
+                         to_year: int | None = None, min_rating: float | None = None) -> Final | dict:
+        def fits(r: Any) -> bool:
+            if (from_year or to_year) and not r.year:
+                return False
+            return ((not from_year or r.year >= int(from_year)) and (not to_year or r.year <= int(to_year))
+                    and (not min_rating or r.rating >= float(min_rating)))
+
+        wish = " ".join(x for x in (
+            f"ab {from_year}" if from_year and not to_year else "",
+            f"bis {to_year}" if to_year and not from_year else "",
+            f"{from_year}–{to_year}" if from_year and to_year else "",
+            f"ab ⭐ {float(min_rating):.1f}".replace(".", ",") if min_rating else "") if x)
         kinds = [kind] if kind else [k for k, svc in (("movie", self.radarr), ("series", self.sonarr)) if svc]
         history = [r for r in reversed(self.store.state.requests) if r["chat_id"] == chat_id and r["kind"] in kinds]
         if not self.tmdb:
             # Without TMDB the model suggests from its own knowledge, then searches as usual.
             return {
                 "bisher": [r["title"] for r in history[:15]] or "nichts",
-                "hinweis": "Nenne 3-5 passende Titel (deutsche Titel), suche sie und biete sie per offer_titles an.",
+                "hinweis": "Nenne 3-5 passende Titel (deutsche Titel), suche sie und biete sie per offer_titles an."
+                + (f" Nur: {wish}." if wish else ""),
             }
         owned = await self._library_ids(kinds)
         seeds = [(r["kind"], r.get("tmdb"), r["title"]) for r in history if r.get("tmdb")][:8]
@@ -739,21 +907,32 @@ class ToolRunner:
             if isinstance(res, BaseException):
                 continue
             for rank, r in enumerate(res[:20]):
-                if (k, r.tmdb_id) in owned["tmdb"]:
+                if (k, r.tmdb_id) in owned["tmdb"] or not fits(r):
                     continue
                 cur = pool.setdefault((k, r.tmdb_id), r)
                 cur.score += (20 - rank) / 20
                 if title not in cur.because:
                     cur.because.append(title)
-        if pool:
+        if pool and (len(pool) >= 3 or not (from_year or to_year)):
             reasons = list(dict.fromkeys(t for _, _, t in seeds))[:3]
             intro = f"💡 Das könnte dir gefallen – weil du {', '.join(reasons)} hast:"
+        elif from_year or to_year:
+            # Too few matches in the recommendations: the best rated titles of the wanted years.
+            start = date(int(from_year or 1900), 1, 1)
+            end = date(int(to_year), 12, 31) if to_year else date.today()
+            for k in kinds:
+                for r in (await self.tmdb.top(k, start, end, "rating"))[:20]:
+                    if (k, r.tmdb_id) not in owned["tmdb"] and fits(r):
+                        pool.setdefault((k, r.tmdb_id), r)
+            intro = "🏆 Gut bewertet aus der Zeit:"
         else:
             for k in kinds:
                 for r in (await self.tmdb.trending(k))[:10]:
-                    if (k, r.tmdb_id) not in owned["tmdb"]:
-                        pool[(k, r.tmdb_id)] = r
+                    if (k, r.tmdb_id) not in owned["tmdb"] and fits(r):
+                        pool.setdefault((k, r.tmdb_id), r)
             intro = "🔥 Gerade beliebt in Deutschland:"
+        if wish:
+            intro = intro.rstrip(":") + f" ({wish}):"
         ranked = sorted(
             pool.values(),
             key=lambda r: r.score + r.rating / 10 * min(1.0, math.log10(r.votes + 1) / 3),
@@ -786,7 +965,7 @@ class ToolRunner:
         sort: str = "popular", download: bool = False,
     ) -> Final:
         if not self.tmdb:
-            raise ArrError("Für Top-Listen braucht der Bot einen TMDB_API_KEY.")
+            return Final(NO_TMDB)
         self._svc(kind)
         count = max(1, min(int(count or 5), MAX_TOP))
         year = int(year)
@@ -830,7 +1009,10 @@ class ToolRunner:
             new = [c for c, have in cands if not have]
             if not new:
                 return Final("\n".join([head, *lines, "", "👍 Die habt ihr schon alle."]))
-            self._offer(chat_id, new, "\n".join([head, *lines, "", "Tippe einen Titel an, um ihn hinzuzufügen."]))
+            hint = "Tippe einen Titel an, um ihn hinzuzufügen."
+            if len(new) < len(cands):
+                hint += " Was schon da ist, hat keinen Button."
+            self._offer(chat_id, new, "\n".join([head, *lines, "", hint]), bulk=True)
             return Final("")
 
         lines = [head]

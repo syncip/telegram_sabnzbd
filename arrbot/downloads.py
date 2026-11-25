@@ -7,6 +7,7 @@ showing it costs no AI tokens.
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from typing import Callable
@@ -171,30 +172,76 @@ def _eps(it: Item) -> str:
     return f" · {txt}"
 
 
+
+
+# Common Radarr/Sonarr import messages in plain German (the original text follows in italics).
+PROBLEM_TEXT = [
+    ("matched to series by id", "Release passt nur per ID, nicht per Name"),
+    ("matched to movie by id", "Release passt nur per ID, nicht per Name"),
+    ("automatic import is not possible", "Automatischer Import nicht möglich"),
+    ("no files found are eligible for import", "Keine importierbaren Dateien gefunden"),
+    ("not an upgrade", "Keine Verbesserung zur vorhandenen Datei"),
+    ("sample", "Nur ein Sample heruntergeladen"),
+    ("unknown series", "Serie nicht erkannt"),
+    ("unknown movie", "Film nicht erkannt"),
+    ("unable to parse", "Dateiname nicht erkannt"),
+    ("episode was not found", "Folge nicht gefunden"),
+    ("download client", "Problem mit dem Download-Programm"),
+    ("password", "Archiv ist passwortgeschützt"),
+]
+
+
+def problem_text(msg: str) -> str:
+    low = msg.lower()
+    for needle, text in PROBLEM_TEXT:
+        if needle in low:
+            return text
+    return "Problem beim Download"
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^0-9a-zäöüß]+", " ", s.lower()).strip()
+
+
+def title_matches(query: str | None, title: str) -> bool:
+    """Every word of the query appears in the title ('married children' ~ 'Married... with Children (1987)')."""
+    if not query:
+        return True
+    t = _norm(title)
+    return all(w in t for w in _norm(query).split())
+
+
 def render(snap: Snapshot, viewer: int, show_all: bool, name_of: Callable[[int], str],
-           tz: tzinfo, now: datetime | None = None) -> str:
-    """HTML for Telegram. show_all: admin view with everybody's downloads and who asked for them."""
+           tz: tzinfo, now: datetime | None = None, show_finished: bool = True, query: str | None = None) -> str:
+    """HTML for Telegram. show_all: everybody's downloads (admin). show_finished: include the done list.
+    query: only titles matching it (status of one search)."""
     now = now or utcnow()
     e = lambda s: html.escape(str(s), quote=False)  # noqa: E731
 
-    def mine(owners: list[int]) -> bool:
-        return show_all or viewer in owners
+    def mine(owners: list[int], title: str = "") -> bool:
+        return (show_all or viewer in owners) and title_matches(query, title)
 
-    def who(owners: list[int]) -> str:
+    def who(owners: list[int], inline: bool = False) -> str:
         if not show_all:
             return ""
         others = [name_of(o) for o in owners if o != viewer]
-        return f"\n👤 {e(', '.join(others))}" if others else ("" if owners else "\n👤 <i>außerhalb des Bots</i>")
+        if not others:
+            return ""
+        return (" " if inline else "\n") + f"👤 {e(', '.join(others))}"
 
-    items = [i for i in snap.items if mine(i.owners)]
-    active = [i for i in items if i.state in (DOWNLOADING, IMPORTING, PROBLEM)]
-    waiting = [i for i in items if i.state in (QUEUED, PAUSED)]
-    waiting.sort(key=lambda i: i.position if i.position is not None else 999)
-    searching = [(t, o) for t, o in snap.searching if mine(o)]
-    finished = [f for f in snap.finished if mine(f.get("chat_ids") or [])]
-    paused = [(t, o, u) for t, o, u in snap.paused if mine(o)]
+    items = [i for i in snap.items if mine(i.owners, i.title)]
+    running = [i for i in items if i.state in (DOWNLOADING, IMPORTING)]
+    problems = [i for i in items if i.state == PROBLEM]
+    waiting = sorted((i for i in items if i.state in (QUEUED, PAUSED)),
+                     key=lambda i: i.position if i.position is not None else 999)
+    searching = [(t, o) for t, o in snap.searching if mine(o, t)]
+    finished = [f for f in snap.finished if mine(f.get("chat_ids") or [], f.get("title") or "")]
+    paused = [(t, o, u) for t, o, u in snap.paused if mine(o, t)]
 
-    out = [f"<b>📥 {'Alle Downloads' if show_all else 'Deine Downloads'}</b>"]
+    if query:
+        out = [f"<b>📥 Status: {e(query)}</b>"]
+    else:
+        out = [f"<b>📥 {'Alle Downloads' if show_all else 'Deine Downloads'}</b>"]
     if snap.sab_ok is False:
         out.append("<i>⚠️ SABnzbd gerade nicht erreichbar – Angaben aus Radarr/Sonarr.</i>")
     elif snap.sab_paused:
@@ -202,27 +249,43 @@ def render(snap: Snapshot, viewer: int, show_all: bool, name_of: Callable[[int],
     elif snap.sab_speed and any(i.state == DOWNLOADING for i in items):
         out.append(f"⚡ {e(snap.sab_speed)} gesamt")
 
-    if active:
+    if running:
         out.append("\n<b>⬇️ Läuft gerade</b>")
-        for it in active[:MAX_ACTIVE]:
+        for it in running[:MAX_ACTIVE]:
             lines = [f"{_icon(it)} <b>{e(it.title)}</b>{e(_eps(it))}"]
             if it.state == IMPORTING:
-                lines.append(f"<code>{bar(100)}</code> 100 %")
-                lines.append("📦 Wird importiert …")
+                lines.append("📦 Fertig geladen, wird importiert …")
             else:
                 pct = f"{it.pct:.0f} %" if it.pct is not None else "? %"
                 lines.append(f"<code>{bar(it.pct)}</code> {pct}")
                 if it.mb_total:
-                    done = size_text(it.mb_total - it.mb_left)
                     speed = f" · ⚡ {e(it.speed)}" if it.speed else ""
-                    lines.append(f"{done} von {size_text(it.mb_total)}{speed}")
+                    lines.append(f"{size_text(it.mb_total - it.mb_left)} von {size_text(it.mb_total)}{speed}")
                 if it.eta:
                     lines.append(f"⏱ {e(it.eta)}")
-            if it.state == PROBLEM:
-                lines.append("⚠️ " + e(it.problems[0] if it.problems else "Problem beim Download"))
             out.append("\n".join(lines) + who(it.owners))
-        if len(active) > MAX_ACTIVE:
-            out.append(f"<i>… und {len(active) - MAX_ACTIVE} weitere</i>")
+        if len(running) > MAX_ACTIVE:
+            out.append(f"<i>… und {len(running) - MAX_ACTIVE} weitere</i>")
+
+    if problems:
+        # One entry per title and problem, not one per episode.
+        groups: dict[tuple[str, str], list[Item]] = {}
+        for it in problems:
+            raw = it.problems[0] if it.problems else ""
+            groups.setdefault((it.title, problem_text(raw)), []).append(it)
+        out.append("\n<b>⚠️ Braucht Eingriff</b>")
+        for (title, text), its in list(groups.items())[:MAX_ACTIVE]:
+            eps = sorted({ep for i in its for ep in i.episodes})
+            ep_txt = (" · " + ", ".join(eps[:4]) + (f" +{len(eps) - 4}" if len(eps) > 4 else "")) if eps else ""
+            tool = "Radarr" if its[0].kind == "movie" else "Sonarr"
+            raw = its[0].problems[0] if its[0].problems else ""
+            detail = f"\n   <i>{e(raw[:110] + ('…' if len(raw) > 110 else ''))}</i>" if raw and text == "Problem beim Download" else ""
+            owners = sorted({o for i in its for o in i.owners})
+            out.append(
+                f"{_icon(its[0])} <b>{e(title)}</b>{e(ep_txt)}\n"
+                f"   {e(text)}{detail}\n"
+                f"   👉 {tool} → Aktivität → Warteschlange → manuell importieren" + who(owners)
+            )
 
     if waiting:
         out.append("\n<b>⏳ Warteschlange</b>")
@@ -235,20 +298,30 @@ def render(snap: Snapshot, viewer: int, show_all: bool, name_of: Callable[[int],
 
     if searching:
         out.append("\n<b>🔍 Gesucht, noch kein Release</b>")
-        out += [f"• {e(t)}" + who(o).replace("\n", " ") for t, o in searching[:MAX_WAITING]]
+        out += [f"• {e(t)}" + who(o, inline=True) for t, o in searching[:MAX_WAITING]]
+        if len(searching) > MAX_WAITING:
+            out.append(f"<i>… und {len(searching) - MAX_WAITING} weitere</i>")
 
     if paused:
         out.append("\n<b>⏸ Pausiert</b>")
         for t, o, until in paused[:MAX_WAITING]:
             when = f"sucht wieder ab {datetime.fromisoformat(until).astimezone(tz):%d.%m.}" if until else "bis du „weiter“ sagst"
-            out.append(f"• {e(t)} <i>– {when}</i>" + who(o).replace("\n", " "))
+            out.append(f"• {e(t)} <i>– {when}</i>" + who(o, inline=True))
 
-    if finished:
+    if show_finished and finished:
         out.append("\n<b>✅ Fertig</b>")
         for f in finished[:MAX_FINISHED]:
-            out.append(f"• {e(f['title'])} <i>– {_when(f['at'], now, tz)}</i>" + who(f.get("chat_ids") or []).replace("\n", " "))
+            out.append(f"• {e(f['title'])} <i>– {_when(f['at'], now, tz)}</i>" + who(f.get("chat_ids") or [], inline=True))
 
-    if not (active or waiting or searching or paused or finished):
-        out.append("\nGerade läuft nichts und es ist noch nichts fertig geworden. Schreib mir einfach, was du sehen willst. 🎬")
+    if query and not (running or problems or waiting or searching or paused or finished):
+        out.append(f"\nZu „{e(query)}“ läuft gerade nichts – weder Download noch Suche."
+                   "\nSchon fertig oder noch nicht hinzugefügt? Frag mich einfach. 🎬")
+    elif not (running or problems or waiting or searching or paused):
+        if show_finished and finished:
+            pass
+        elif finished:
+            out.append("\nGerade läuft nichts. ✅ Fertige Downloads zeigt der Button unten.")
+        else:
+            out.append("\nGerade läuft nichts. Schreib mir einfach, was du sehen willst. 🎬")
     out.append(f"\n<i>Stand {now.astimezone(tz):%H:%M} Uhr</i>")
     return "\n".join(out)[:4096]

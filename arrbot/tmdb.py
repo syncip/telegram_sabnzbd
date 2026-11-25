@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -18,6 +19,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 LANG, REGION = "de-DE", "DE"
+_GENERIC_TITLE = re.compile(r"^(folge|episode|episodio|épisode)\s*\d+$", re.I)
 CACHE_SECONDS = 6 * 3600
 # TMDB release types
 PREMIERE, THEATRICAL_LIMITED, THEATRICAL, DIGITAL, PHYSICAL, TV = 1, 2, 3, 4, 5, 6
@@ -188,6 +190,24 @@ class TMDB:
         info.streaming = [p["provider_name"] for p in prov.get("flatrate") or []]
         info.buy_rent = list(dict.fromkeys(p["provider_name"] for p in (prov.get("rent") or []) + (prov.get("buy") or [])))
         return info
+
+    async def season_titles(self, tmdb_id: int, season: int) -> dict[int, dict]:
+        """{episode: {"de": German title or None, "en": title, "air": date}} for one season."""
+        de = await self._get(f"/tv/{tmdb_id}/season/{season}", language=LANG)
+        en = await self._get(f"/tv/{tmdb_id}/season/{season}", language="en-US")
+        en_names = {e.get("episode_number"): e.get("name") or "" for e in en.get("episodes") or []}
+        out = {}
+        for e in de.get("episodes") or []:
+            n = e.get("episode_number")
+            name, english = (e.get("name") or "").strip(), en_names.get(n, "")
+            generic = not name or bool(_GENERIC_TITLE.match(name))
+            out[n] = {
+                # A real German title (not "Folge 5", not just the English one) hints at a German broadcast.
+                "de": None if generic or name == english else name,
+                "en": english,
+                "air": _date(e.get("air_date")),
+            }
+        return out
 
     # ---- suggestions ----------------------------------------------------------------
     async def recommendations(self, kind: str, tmdb_id: int) -> list[Recommendation]:

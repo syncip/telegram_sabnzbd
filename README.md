@@ -16,16 +16,36 @@ Außerdem:
 
 - **/downloads** – laufende, wartende und fertige Downloads mit Fortschrittsbalken, Größe, Tempo und
   Fertig-Uhrzeit, gebaut fürs Handy, mit 🔄-Button zum Aktualisieren. Jeder sieht nur seine eigenen,
-  der Admin auf Wunsch alle (mit Namen, wer es angefragt hat).
+  der Admin auf Wunsch alle (mit Namen, wer es angefragt hat). Hängt ein Import in Radarr/Sonarr,
+  steht er zusammengefasst unter „⚠️ Braucht Eingriff“, mit deutscher Erklärung und wo man klickt.
+  „Was läuft gerade?“ zeigt nur Aktuelles, fertige Downloads per Button „✅ Fertige“.
+  „Wie ist der Status bei der Suche?“ direkt nach einer Anfrage zeigt nur diesen Titel: Der Bot
+  behält nach jeder Aktion die letzte Frage und Antwort (~50 Tokens) für solche Rückfragen.
 - **Vorschläge:** „Was soll ich als Nächstes schauen?“ – passend zu dem, was du bisher geladen hast
-  (TMDB-Empfehlungen, ohne was ihr schon habt). Antippen = hinzufügen.
+  (TMDB-Empfehlungen, ohne was ihr schon habt). Antippen = hinzufügen. Wünsche wie „nur Filme
+  neuer als 2000“ oder „ab 7 Sterne“ werden beachtet; gibt es zu wenig Passendes, füllt der Bot mit
+  den bestbewerteten Titeln dieser Jahre auf.
 - **Top-Listen:** „Welche Filme waren die Top 5 2024?“ zeigt die Liste mit Buttons, „Lade die Top 3
   Filme vom Oktober 2025“ lädt sie direkt (Standard-Qualität). Auch „bestbewertet“ oder „nach
-  Einspielergebnis“.
+  Einspielergebnis“. Was ihr schon habt, ist mit ✅ markiert und hat keinen Button; „⬇️ Alle
+  hinzufügen“ holt den Rest auf einmal. Braucht `TMDB_API_KEY` – ohne sagt der Bot das direkt.
 - **Serien erweitern:** Fragst du eine Serie an, die schon da ist, sagt der Bot, welche Staffeln du
   hast und welche fehlen, und bietet „Alle fehlenden laden“ oder einzelne Staffeln an.
-- **Deutsche Fassung:** „Gibt es Severance schon auf Deutsch?“, „Wann kommt Dune 3 auf Deutsch?“ –
-  deutscher Kinostart, Digital- und Disc-Termin, Streaming in Deutschland.
+- **Deutsche Fassung:** „Gibt es die aktuelle Staffel South Park schon auf Deutsch?“ zeigt **pro Folge**:
+  ✅ bei dir auf Deutsch, ⬇️ deutscher Download auf deinen Indexern, 📁 bei dir nur Englisch,
+  🇺🇸 nur Originalfassung gefunden, 🔤 deutscher Folgentitel bekannt, ⏳ noch nicht ausgestrahlt.
+  Bei Filmen („Wann kommt Dune 3 auf Deutsch?“) deutscher Kinostart, Digital- und Disc-Termin,
+  Streaming und ob du ihn schon auf Deutsch hast. Die Antwort baut der Bot selbst aus den Quellen
+  zusammen, die KI formuliert hier nichts um (sie hatte vorher Termine erfunden).
+- **Deutsche Folgen nachladen:** „Prüf, ob die Folgen von Dark auf Deutsch da sind“ prüft alle
+  ausgestrahlten Folgen in der Bibliothek, sucht auf den Indexern deutsche Releases (bei vielen
+  Folgen bevorzugt Staffelpakete, max. 6 Staffeln pro Anfrage) und bietet per Button „Alle auf
+  Deutsch laden“ oder „Nur fehlende“ an. Dateien in anderer Sprache werden dabei durch die
+  deutschen ersetzt.
+- **Folgen löschen:** „Lösch die Folgen von Dark, die nicht auf Deutsch sind“ (oder „Staffel 2“,
+  „alle Folgen“) zeigt, was mit wie viel GB weg würde, und fragt per Button: löschen und auf Deutsch
+  neu suchen, nur löschen (nicht mehr automatisch laden) oder abbrechen. Die KI erkennt nur die
+  Serie – Prüfen, Auswählen und Löschen läuft im Code, ohne weitere Tokens.
 - **Löschen und Pausieren:** „Lösch The Office“ fragt per Button nach (inkl. Dateien, nur aus
   Sonarr entfernen, oder abbrechen) und bricht laufende Downloads ab. „Such in 3 Tagen nochmal nach
   Dune 3“ pausiert die Suche in Radarr/Sonarr und startet sie dann automatisch neu. „Weiter mit Dune
@@ -84,6 +104,11 @@ Für alle:
 Nur für den Admin:
 
 - `/nutzer` – alle Nutzer mit Rolle, Verbrauch und Limits; Buttons zum Freigeben, Sperren, Entfernen
+- `/statistik` – Nutzerzahl, aktive Nutzer, Anfragen, KI-Aufrufe, Tokens und Kosten (heute, Monat,
+  gesamt, Ø pro Anfrage), Budget-Balken, die letzten Monate und alles pro Nutzer
+- `/check` – prüft Telegram, KI, Radarr, Sonarr, SABnzbd und TMDB: ✅/❌ mit Version, Antwortzeit und
+  verständlichem Fehler („API-Key falsch (401)“, „nicht erreichbar – URL/Netzwerk prüfen“). Die KI-Prüfung
+  kostet einen Mini-Aufruf (~60 Tokens).
 - `/limit WER ART WERT` – Limits setzen
   - WER: Name, Telegram-ID, `standard` (alle Nutzer ohne eigenes Limit) oder `gesamt` (ganzer Bot)
   - ART: `tag` (Anfragen/Tag), `monat` (Anfragen/Monat), `tokens` (pro Monat), `kosten` (Dollar/Monat)
@@ -95,6 +120,10 @@ Nur für den Admin:
 /limit gesamt kosten 1
 /limit 123456 tokens aus
 ```
+
+Als Admin kannst du das alles auch einfach schreiben: „Zeig mir die Statistik“, „Setz Annas
+Tageslimit auf 5“, „Gesamtbudget 1 Dollar“, „Sperr Bob“, „Gib Anna frei“, „Prüf die APIs“. Diese
+Werkzeuge bekommt die KI nur in deinem Chat.
 
 Ist ein Limit erreicht, antwortet der Bot ohne KI-Aufruf mit einem Hinweis. Buttons und `/downloads`
 gehen weiter, die kosten nichts. Standard-Limits gelten nie für den Admin; das Gesamtbudget schon.
