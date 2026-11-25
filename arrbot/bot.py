@@ -553,7 +553,7 @@ def build_app(cfg: Config) -> Application:
     async def check_text() -> str:
         checks = await health.run_checks(bot=app.bot, provider=agent.provider, model=cfg.llm.model,
                                          radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb, plex=plex_probe())
-        update_state["latest"] = await version.latest(cfg.update_repo) or update_state["latest"]
+        update_state["latest"] = await version.latest(cfg.update_repo, token=cfg.update_token) or update_state["latest"]
         extra = [version.line(update_state["latest"])]
         if cfg.monitor_minutes > 0:
             extra.append(monitor.status() + f" (alle {cfg.monitor_minutes} Min.)")
@@ -567,7 +567,7 @@ def build_app(cfg: Config) -> Application:
             await tell_admins(msg)
 
     async def update_job(_: ContextTypes.DEFAULT_TYPE) -> None:
-        latest = await version.latest(cfg.update_repo)
+        latest = await version.latest(cfg.update_repo, token=cfg.update_token)
         if not latest:
             return
         update_state["latest"] = latest
@@ -578,7 +578,7 @@ def build_app(cfg: Config) -> Application:
 
     async def on_version(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if users.is_admin(update.effective_user.id):
-            update_state["latest"] = await version.latest(cfg.update_repo) or update_state["latest"]
+            update_state["latest"] = await version.latest(cfg.update_repo, token=cfg.update_token) or update_state["latest"]
             await update.effective_message.reply_text(version.text(update_state["latest"]))
         else:
             await update.effective_message.reply_text(version.line(None))

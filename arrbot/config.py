@@ -65,6 +65,7 @@ class Config:
     site_hours: int = 6  # watched websites: look this often; 0 = off
     monitor_minutes: int = 5  # check Radarr/Sonarr/SABnzbd/TMDB/Plex this often, tell admins on outage; 0 = off
     update_repo: str = "syncip/telegram_sabnzbd"  # GitHub repo for the update check; empty = off
+    update_token: str | None = None  # read-only GitHub token, only for a private repo
     extra: dict = field(default_factory=dict)
 
 
@@ -147,6 +148,7 @@ def load_config() -> Config:
         site_hours=int(_env("SITE_CHECK_HOURS", "6")),  # type: ignore[arg-type]
         monitor_minutes=int(_env("MONITOR_MINUTES", "5")),  # type: ignore[arg-type]
         update_repo=_env("UPDATE_REPO", "syncip/telegram_sabnzbd") or "",  # type: ignore[arg-type]
+        update_token=_env("UPDATE_TOKEN"),
         llm=llm,
         radarr=radarr,
         sonarr=sonarr,

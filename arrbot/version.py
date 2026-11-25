@@ -37,16 +37,24 @@ def newer(a: str, b: str) -> bool:
     return parse(a) > parse(b)
 
 
-async def latest(repo: str, branch: str = "main", transport: httpx.AsyncBaseTransport | None = None) -> str | None:
-    """Version on GitHub, None if unknown (no network, repo private, ...)."""
+async def latest(repo: str, branch: str = "main", transport: httpx.AsyncBaseTransport | None = None,
+                 token: str | None = None) -> str | None:
+    """Version on GitHub, None if unknown (no network, private repo without token, ...).
+    token: read-only GitHub token, needed for a private repository."""
     if not repo:
         return None
-    url = f"https://raw.githubusercontent.com/{repo}/{branch}/arrbot/version.py"
+    if token:
+        url = f"https://api.github.com/repos/{repo}/contents/arrbot/version.py?ref={branch}"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"}
+    else:
+        url = f"https://raw.githubusercontent.com/{repo}/{branch}/arrbot/version.py"
+        headers = {}
     try:
         async with httpx.AsyncClient(timeout=15, transport=transport) as http:
-            r = await http.get(url)
+            r = await http.get(url, headers=headers)
         if r.status_code != 200:
-            log.info("Update-Check: %s antwortet %s", url, r.status_code)
+            log.info("Update-Check: GitHub antwortet %s%s", r.status_code,
+                     " (privates Repo? UPDATE_TOKEN setzen)" if r.status_code == 404 and not token else "")
             return None
         m = re.search(r'__version__\s*=\s*"([^"]+)"', r.text)
         return m.group(1) if m else None

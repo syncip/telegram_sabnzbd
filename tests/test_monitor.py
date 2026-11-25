@@ -35,3 +35,12 @@ def test_version_compare_and_github_check(tmp_path):
     assert version.first_start_of_version(str(tmp_path)) is None
     (tmp_path / "version.txt").write_text("1.0.0")
     assert version.first_start_of_version(str(tmp_path)) == "1.0.0"
+
+
+def test_private_repo_uses_token():
+    def handler(req):
+        assert req.url.host == "api.github.com" and req.headers["Authorization"] == "Bearer t"
+        assert req.url.path == "/repos/me/bot/contents/arrbot/version.py"
+        return httpx.Response(200, text='__version__ = "2.0.0"')
+
+    assert asyncio.run(version.latest("me/bot", transport=httpx.MockTransport(handler), token="t")) == "2.0.0"

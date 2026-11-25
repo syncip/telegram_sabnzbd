@@ -124,7 +124,8 @@ Außerdem:
   und Plex (ohne KI, kostet nichts). Fällt einer zweimal hintereinander aus, kommt „🚨 Sonarr ist nicht
   erreichbar“, wenn er zurück ist „✅ läuft wieder (war 12 Min. weg)“.
 - **Version:** /version zeigt die laufende Version und ob auf GitHub eine neuere liegt; einmal am Tag
-  sagt der Bot dir von selbst Bescheid. Nach einem Update meldet er „🆕 Bot aktualisiert: 1.6.0 → 1.7.0“
+  sagt der Bot dir von selbst Bescheid. Bei einem privaten Repo braucht er dafür `UPDATE_TOKEN`
+  (GitHub → Settings → Developer settings → Fine-grained token, nur dieses Repo, „Contents: Read-only“). Nach einem Update meldet er „🆕 Bot aktualisiert: 1.6.0 → 1.7.0“
   mit den Neuerungen.
 - **Buttons nach Neustart:** Offene Auswahlen (Treffer, Staffeln, Qualität) werden gespeichert
   (`data/buttons.json`) und funktionieren auch nach einem Update des Containers.

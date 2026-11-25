@@ -90,6 +90,8 @@ services:
       MONITOR_MINUTES: "5"
       # Einmal täglich nachsehen, ob es eine neue Bot-Version auf GitHub gibt ("" = aus)
       UPDATE_REPO: "syncip/telegram_sabnzbd"
+      # Nur bei privatem Repo: GitHub-Token mit Leserecht ("Fine-grained", Repository -> Contents: Read-only)
+      UPDATE_TOKEN: ""
       # Beobachtete Webseiten so oft prüfen (Stunden, "0" = aus)
       SITE_CHECK_HOURS: "6"
 
