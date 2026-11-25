@@ -218,8 +218,17 @@ class TMDB:
         data = await self._get(path, language=LANG)
         return [_rec(kind, r) for r in data.get("results") or []]
 
-    async def top(self, kind: str, start: date, end: date, sort: str = "popular") -> list[Recommendation]:
-        """Top titles released between start and end. sort: popular (most votes) | rating | revenue."""
+    async def companies(self, name: str) -> list[int]:
+        """Studio ids for a name ("Marvel" -> Marvel Studios, Marvel Entertainment ...)."""
+        data = await self._get("/search/company", query=name)
+        want = name.lower().strip()
+        hits = [r for r in data.get("results") or [] if want in (r.get("name") or "").lower()]
+        return [r["id"] for r in (hits or data.get("results") or [])[:4]]
+
+    async def top(self, kind: str, start: date | None, end: date | None, sort: str = "popular",
+                  companies: list[int] | None = None) -> list[Recommendation]:
+        """Top titles released between start and end (None: all time), optionally of some studios.
+        sort: popular (most votes) | rating | revenue."""
         field_from, field_to = (
             ("primary_release_date.gte", "primary_release_date.lte") if kind == "movie"
             else ("first_air_date.gte", "first_air_date.lte")
@@ -227,12 +236,18 @@ class TMDB:
         order = {"rating": "vote_average.desc", "revenue": "revenue.desc"}.get(sort, "vote_count.desc")
         if kind != "movie" and order == "revenue.desc":
             order = "vote_count.desc"
-        params = {
-            field_from: start.isoformat(), field_to: end.isoformat(), "sort_by": order,
+        params: dict[str, Any] = {
+            "sort_by": order,
             "language": LANG, "include_adult": "false",
             # Ratings need enough votes, otherwise obscure titles with 3 votes of 10/10 win.
             "vote_count.gte": 200 if order == "vote_average.desc" else 10,
         }
+        if start:
+            params[field_from] = start.isoformat()
+        if end:
+            params[field_to] = end.isoformat()
+        if companies:
+            params["with_companies"] = "|".join(map(str, companies))
         if kind != "movie":
             params["without_genres"] = "10763,10767"  # news, talk shows
         data = await self._get(f"/discover/{'movie' if kind == 'movie' else 'tv'}", **params)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import html
 import json
 import logging
@@ -36,13 +37,13 @@ from .arr import ArrError, Radarr, Sonarr
 from .config import Config
 from .llm import ToolCall, make_provider
 from .sabnzbd import SABnzbd, SabError
-from .state import Store, Tracked
+from .state import Store, Tracked, utcnow
 from .tmdb import TMDB
 from .tools import Flow, Offer, ToolRunner, View, release_languages
 from .tracker import Tracker
-from . import activity, approval, cleanup, sitewatch, extras, german, health, listen, media, plex, profiles, stats, version, watch
+from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from .profiles import ProfileStore
-from .agent import PRICES
+from .agent import PRICES, UsageStats
 from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text
 
 log = logging.getLogger(__name__)
@@ -55,11 +56,11 @@ HELP = (
     "• „Welche Filme waren die Top 5 2024?“\n"
     "• „Lade die Top 3 Filme vom Oktober 2025“\n"
     "• „Gibt es Severance schon auf Deutsch?“\n"
-    "• „Such in 3 Tagen nochmal nach Dune 3“ / „Lösch The Office“\n"
     "• „Merk dir, ich mag keine Horrorfilme“ / „Was weißt du über mich?“\n"
     "• „Sag mir, wenn Dune 3 auf Deutsch kommt“ / „Wo war ich bei Dark?“\n"
+    "• „Merk dir Avatar 4“ – ich lege es an, sobald es einen Termin gibt\n"
+    "• „Was können Anna und ich zusammen schauen?“\n"
     "• „Schick mir jeden Sonntag einen Wochenrückblick“\n"
-    "• „Überwache https://… nach neuen Filmen“ – ich melde, was neu auf der Seite ist\n"
     "• einen Link von IMDb, TMDB, Trakt, Letterboxd, JustWatch …\n\n"
     "Ich sage Bescheid, wenn ein Download startet, wann er fertig ist und ob es Probleme gibt.\n\n"
     "/downloads – deine Downloads mit Fortschritt\n"
@@ -69,6 +70,7 @@ HELP = (
     "/plex – Plex verbinden (gesehen, weiterschauen)\n"
     "/neu – Gespräch zurücksetzen\n"
     "/version – welche Version läuft\n\n"
+    "Du kannst Filme und Serien suchen und hinzufügen. Löschen, Pausieren oder Austauschen macht der Admin.\n\n"
     "Hinweis: Der Admin sieht, was du fragst und ob es geklappt hat – so kann er Probleme beheben."
 )
 ADMIN_HELP = (
@@ -81,6 +83,16 @@ ADMIN_HELP = (
     "/version – Versionsnummer, ob es ein Update gibt und was neu ist\n"
     "/aktivitaet – was Nutzer fragen, was geklappt hat und wo es Probleme gab (<code>/aktivitaet Anna</code>)\n"
     "/check – alle APIs prüfen\n"
+    "/rezepte – Werkzeuge, die ich mir selbst gebaut habe\n"
+    "Plex-Sammlungen: „Mach eine Sammlung Marvel“, „Automatische Sammlungen pro Nutzer an“\n"
+    "/monatsbericht – Kosten, Nutzer, Erfolgsquote, Sperren (kommt am 1. von selbst; "
+    "<code>/monatsbericht jetzt</code> für den laufenden Monat)\n"
+    "🚨 Spam-Schutz: wer flutet, wird vorsorglich gesperrt – du bekommst eine Meldung mit „Entsperren“. "
+    "Bei Übertreibung (viele Titel, Limit fast voll, weit mehr als die anderen) warne ich dich.\n"
+    "Nur für dich: „Lösch The Office“, „Such in 3 Tagen nochmal nach Dune 3“, „Prüf ob Dark auf Deutsch ist und "
+    "tausch es aus“, „Überwache https://… nach neuen Filmen“, „Anna darf höchstens 1080p“ "
+    "(„Standard höchstens 1080p“ gilt für alle).\n"
+    "Neue Art Frage, für die mir ein Werkzeug fehlt? Ich biete an, mir eins zu bauen, und sage vorher, was es kostet.\n"
     "/limit – Limits setzen, z. B.\n"
     "<code>/limit standard tag 10</code>\n"
     "<code>/limit Anna monat 50</code>\n"
@@ -126,6 +138,24 @@ def build_app(cfg: Config) -> Application:
     approvals = approval.ApprovalStore(cfg.data_dir)
     tools.approvals = approvals
     sites = sitewatch.SiteStore(cfg.data_dir)
+    wishes = wishlist.WishStore(cfg.data_dir)
+    tools.wishes = wishes
+    tools.recipes = recipes.RecipeStore(cfg.data_dir)
+    try:
+        tools.builder = make_provider(dataclasses.replace(cfg.llm, model=cfg.recipe_model))
+        tools.builder_model = cfg.recipe_model
+    except Exception as e:  # noqa: BLE001 - the bot works without building tools
+        log.warning("Werkzeug-Modell %s nicht nutzbar: %s", cfg.recipe_model, e)
+
+    def builder_cost(u: dict) -> float | None:
+        return UsageStats.cost(cfg.recipe_model, u.get("input", 0) or 0, u.get("cached", 0) or 0,
+                               u.get("output", 0) or 0)
+
+    def on_llm_usage(uid: int, u: dict, cost: float | None) -> None:
+        on_usage(uid, (u.get("input", 0) or 0) + (u.get("output", 0) or 0), cost)
+
+    tools.builder_cost = builder_cost
+    tools.on_llm_usage = on_llm_usage
     tools.sites, tools.site_hours = sites, cfg.site_hours
     listener = listen.Listener(cfg.listen_api_key, cfg.media_paths)
     answering: set[int] = set()  # chats in an AI turn: their additions are already logged with the question
@@ -141,8 +171,18 @@ def build_app(cfg: Config) -> Application:
         activity_db.forget(uid)
         approvals.forget(uid)
         sites.forget(uid)
+        wishes.forget(uid)
+        shield.forget(uid)
 
     users.on_remove = on_user_removed
+    shield = guard.Guard(cfg.data_dir, cfg.spam_check)
+
+    def on_role(uid: int, old: str | None, new: str) -> None:
+        shield.forget(uid)  # a fresh start after unblocking
+        if old == BLOCKED and new == USER:
+            shield.log(uid, guard.UNBLOCK, "vom Admin freigegeben")
+
+    users.on_role = on_role
     background: set[asyncio.Task] = set()  # keeps running Plex links alive
     agent.context_for = lambda uid: profile_db.profile(uid).context_line()
 
@@ -199,6 +239,32 @@ def build_app(cfg: Config) -> Application:
             activity_db.record(chat_id, text, [], activity.ACTION)
         if not users.is_admin(chat_id):
             await tell_admins(f"📣 {users.name(chat_id)}: {text}")
+            if text.startswith("➕") and (v := shield.added(chat_id)):
+                await guard_verdict(chat_id, v)
+
+    async def guard_verdict(uid: int, v: guard.Verdict, tell_user: bool = True) -> None:
+        """Spam: block as a precaution. Overuse: warn. The admins hear about both."""
+        name = html.escape(users.name(uid))
+        shield.log(uid, v.kind, v.reason)
+        if v.kind == guard.BLOCK:
+            try:
+                users.set_role(uid, BLOCKED)
+            except ValueError:
+                return
+            log.warning("Vorsorglich gesperrt: %s (%s)", uid, v.reason)
+            await notify_user(uid, f"🚫 Du bist vorsorglich gesperrt: {v.reason}. Der Admin schaut es sich an "
+                                   "und kann dich wieder freigeben.")
+            await tell_admins(f"🚨 <b>{name}</b> ist vorsorglich gesperrt: {html.escape(v.reason)}.\n"
+                              "War das Absicht? Entsperren oder gesperrt lassen.",
+                              InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Entsperren", callback_data=f"u:ok:{uid}"),
+                                                     InlineKeyboardButton("🗑 Entfernen", callback_data=f"u:rm:{uid}")]]),
+                              html_text=True)
+            return
+        if tell_user:
+            await notify_user(uid, f"⚠️ Hinweis: {v.reason}. Bitte etwas sparsamer – der Admin ist informiert.")
+        await tell_admins(f"⚠️ <b>{name}</b> übertreibt es vielleicht: {html.escape(v.reason)}.",
+                          InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Sperren", callback_data=f"u:no:{uid}")]]),
+                          html_text=True)
 
     async def no_release_hint(t: Tracked) -> str | None:
         """Why nothing was found: no German version yet (TMDB) or only non-German releases (indexers)."""
@@ -232,6 +298,7 @@ def build_app(cfg: Config) -> Application:
     tools.notify_user = notify_user
     tracker = Tracker(radarr, sonarr, store, send, cfg.no_release_minutes, cfg.track_days, sab=sab, tz=tz,
                       hint=no_release_hint)
+    tracker.is_admin = users.is_admin
 
     # ---- conversation -----------------------------------------------------
     async def keep_typing(chat_id: int) -> None:
@@ -245,11 +312,19 @@ def build_app(cfg: Config) -> Application:
 
     async def respond(chat_id: int, user_id: int, text: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("chat %s: %r", chat_id, text[:200])
+        if not users.is_admin(user_id) and (v := shield.message(user_id, text)):
+            activity_db.record(user_id, text, [], activity.LIMIT, f"Spam: {v.reason}")
+            await guard_verdict(user_id, v)
+            return
         if reason := users.blocked_by_limit(user_id):
+            if (u := users.users.get(user_id)) and (v := shield.limits(user_id, u.usage, users.limits_for(user_id))):
+                await guard_verdict(user_id, v, tell_user=False)
             activity_db.record(user_id, text, [], activity.LIMIT, reason)
             await app.bot.send_message(chat_id, f"⛔ {reason}\nButtons und /downloads gehen weiterhin.")
             return
         users.count_request(user_id)
+        if (u := users.users.get(user_id)) and (v := shield.limits(user_id, u.usage, users.limits_for(user_id))):
+            await guard_verdict(user_id, v)
         typing = asyncio.create_task(keep_typing(chat_id))
         tools.take_trace(chat_id)
         turn_tokens.pop(user_id, None)
@@ -671,6 +746,9 @@ def build_app(cfg: Config) -> Application:
     async def on_approvals(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await send_approvals(update.effective_chat.id)
 
+    async def on_recipes(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.effective_message.reply_text(recipes.render_list(tools.recipes.all()), parse_mode=ParseMode.HTML)
+
     # ---- cleanup rules (admin) --------------------------------------------------------------------
     def cleanup_markup() -> InlineKeyboardMarkup | None:
         rows = [[InlineKeyboardButton(f"❌ Regel {r.id} löschen", callback_data=f"c:del:{r.id}")] for r in rules.rules()]
@@ -728,6 +806,42 @@ def build_app(cfg: Config) -> Application:
                 except (BadRequest, Forbidden) as e:
                     log.info("Aufräumen an %s: %s", admin, e)
         return total
+
+    def monthly_text(month: str) -> str:
+        start, _ = monthly.bounds(month, tz)
+        entries = activity_db.entries(days=(utcnow() - start).days + 2)
+        return monthly.render(month, users, store.state.requests, entries,
+                              shield.events(start - timedelta(days=1)), tools.recipes.all(), tz)
+
+    async def monthly_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        """1st of the month: the report for last month to every admin."""
+        today = datetime.now(tz).date()
+        if today.day == 1:
+            await tell_admins(monthly_text(monthly.previous_month(today)), html_text=True)
+
+    async def on_monthly(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        today = datetime.now(tz).date()
+        now = bool(ctx.args) and ctx.args[0].lower() in ("jetzt", "aktuell", "diesen")
+        month = today.strftime("%Y-%m") if now else monthly.previous_month(today)
+        await update.effective_message.reply_text(monthly_text(month), parse_mode=ParseMode.HTML)
+
+    async def unusual_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        """Evening: anyone with far more requests today than the others (admins only hear about it)."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        counts = {u.id: (u.usage.day_requests if u.usage.day == today else 0) for u in users.users.values()
+                  if u.role == USER}
+        for uid, v in shield.unusual(counts):
+            await guard_verdict(uid, v, tell_user=False)
+
+    async def wish_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        """Daily: wishes that got a release date are added (no AI)."""
+        for uid, text in await wishlist.check(tools, wishes):
+            if not users.is_allowed(uid):
+                continue
+            try:
+                await app.bot.send_message(uid, text)
+            except (BadRequest, Forbidden) as e:
+                log.info("Wunschliste an %s nicht zugestellt: %s", uid, e)
 
     async def sites_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Look at every watched page; only changed pages cost tokens."""
@@ -1168,6 +1282,11 @@ def build_app(cfg: Config) -> Application:
                 await plex_sync(a)
             except plex.PlexError:
                 pass
+        if plex_store.get_meta("auto_collections"):
+            try:
+                await tools.sync_wish_collections()
+            except plex.PlexError as e:
+                log.info("Wunsch-Sammlungen: %s", e)
 
     async def new_in_plex_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         """Every evening: what came into Plex since yesterday, per user (their taste first)."""
@@ -1448,6 +1567,9 @@ def build_app(cfg: Config) -> Application:
         application.job_queue.run_repeating(plex_sync_job, interval=6 * 3600, first=600, name="plex")
         application.job_queue.run_daily(new_in_plex_job, time(18, 0, tzinfo=tz), name="neu_in_plex")
         application.job_queue.run_daily(cleanup_job, time(11, 0, tzinfo=tz), name="aufraeumen")
+        application.job_queue.run_daily(wish_job, time(9, 30, tzinfo=tz), name="wunschliste")
+        application.job_queue.run_daily(monthly_job, time(9, 15, tzinfo=tz), name="monatsbericht")
+        application.job_queue.run_daily(unusual_job, time(20, 0, tzinfo=tz), name="auffaellig")
         application.job_queue.run_repeating(save_buttons_job, interval=300, first=300, name="buttons")
         if cfg.site_hours > 0:
             application.job_queue.run_repeating(sites_job, interval=cfg.site_hours * 3600, first=900, name="seiten")
@@ -1506,6 +1628,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["aktivitaet", "anfragen", "probleme"], on_activity, filters=is_admin))
     app.add_handler(CommandHandler(["regeln", "aufraeumregeln"], on_cleanup, filters=is_admin))
     app.add_handler(CommandHandler(["freigaben", "freigabe"], on_approvals, filters=is_admin))
+    app.add_handler(CommandHandler(["rezepte", "werkzeuge"], on_recipes, filters=is_admin))
+    app.add_handler(CommandHandler(["monatsbericht", "bericht"], on_monthly, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))

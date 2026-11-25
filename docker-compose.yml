@@ -94,6 +94,10 @@ services:
       UPDATE_TOKEN: ""
       # Beobachtete Webseiten so oft prüfen (Stunden, "0" = aus)
       SITE_CHECK_HOURS: "6"
+      # Spam-Schutz: Flut-Nachrichten -> vorsorglich sperren, Übertreibung -> Warnung ("0" = aus)
+      SPAM_CHECK: "1"
+      # Modell, das neue Werkzeuge (Rezepte) für den Admin baut ("" = gpt-4.1 bei OpenAI, sonst LLM_MODEL)
+      RECIPE_MODEL: ""
 
       # Zeitzone für "fertig ca. 21:45 Uhr"
       TZ: "Europe/Berlin"

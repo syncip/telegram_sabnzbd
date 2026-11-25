@@ -36,7 +36,14 @@ Außerdem:
 - **Top-Listen:** „Welche Filme waren die Top 5 2024?“ zeigt die Liste mit Buttons, „Lade die Top 3
   Filme vom Oktober 2025“ lädt sie direkt (Standard-Qualität). Auch „bestbewertet“ oder „nach
   Einspielergebnis“. Was ihr schon habt, ist mit ✅ markiert und hat keinen Button; „⬇️ Alle
-  hinzufügen“ holt den Rest auf einmal. Braucht `TMDB_API_KEY` – ohne sagt der Bot das direkt.
+  hinzufügen“ holt den Rest auf einmal. Auch pro Studio: „Top 3 Marvel-Filme“ (ohne Jahr = aller
+  Zeiten). Braucht `TMDB_API_KEY` – ohne sagt der Bot das direkt.
+- **Wunschliste:** „Merk dir Avatar 4“ – gibt es noch keinen Termin, legt der Bot den Titel nicht gleich in
+  Radarr an, sondern prüft täglich um 9:30 Uhr und fügt ihn hinzu, sobald ein Termin feststeht (du bekommst
+  Bescheid). „Was steht auf meiner Wunschliste?“ zeigt sie.
+- **Zusammen schauen:** „Was können Anna und ich zusammen schauen?“ – aus beiden Profilen und
+  Plex-Verläufen: was schon da ist und keiner von euch gesehen hat, plus neue Vorschläge als Buttons.
+  Genres, die einer von euch meidet, fallen weg.
 - **Serien erweitern:** Fragst du eine Serie an, die schon da ist, sagt der Bot, welche Staffeln du
   hast und welche fehlen, und bietet „Alle fehlenden laden“ oder einzelne Staffeln an.
 - **Deutsche Fassung:** „Gibt es die aktuelle Staffel South Park schon auf Deutsch?“ zeigt **pro Folge**:
@@ -45,20 +52,20 @@ Außerdem:
   Bei Filmen („Wann kommt Dune 3 auf Deutsch?“) deutscher Kinostart, Digital- und Disc-Termin,
   Streaming und ob du ihn schon auf Deutsch hast. Die Antwort baut der Bot selbst aus den Quellen
   zusammen, die KI formuliert hier nichts um (sie hatte vorher Termine erfunden).
-- **Deutsche Folgen nachladen:** „Prüf, ob die Folgen von Dark auf Deutsch da sind“ prüft alle
+- **Deutsche Folgen nachladen (Admin):** „Prüf, ob die Folgen von Dark auf Deutsch da sind“ prüft alle
   ausgestrahlten Folgen in der Bibliothek, sucht auf den Indexern deutsche Releases (bei vielen
-  Folgen bevorzugt Staffelpakete, max. 6 Staffeln pro Anfrage) und bietet per Button „Alle auf
+  Folgen bevorzugt Staffelpakete, alle Staffeln; dauert es über 2½ Minuten, macht „🔎 Weiter suchen“
+  beim Rest weiter) und bietet per Button „Alle auf
   Deutsch laden“ oder „Nur fehlende“ an. Dateien in anderer Sprache werden dabei durch die
   deutschen ersetzt.
-- **Folgen löschen:** „Lösch die Folgen von Dark, die nicht auf Deutsch sind“ (oder „Staffel 2“,
+- **Folgen löschen (Admin):** „Lösch die Folgen von Dark, die nicht auf Deutsch sind“ (oder „Staffel 2“,
   „alle Folgen“) zeigt, was mit wie viel GB weg würde, und fragt per Button: löschen und auf Deutsch
   neu suchen, nur löschen (nicht mehr automatisch laden) oder abbrechen. Die KI erkennt nur die
   Serie – Prüfen, Auswählen und Löschen läuft im Code, ohne weitere Tokens.
-- **Löschen und Pausieren:** „Lösch The Office“ fragt per Button nach (inkl. Dateien, nur aus
+- **Löschen und Pausieren (Admin):** „Lösch The Office“ fragt per Button nach (inkl. Dateien, nur aus
   Sonarr entfernen, oder abbrechen) und bricht laufende Downloads ab. „Such in 3 Tagen nochmal nach
   Dune 3“ pausiert die Suche in Radarr/Sonarr und startet sie dann automatisch neu. „Weiter mit Dune
-  3“ sofort. Nutzer können nur ändern, was sie selbst angefragt haben; was mehrere wollten, löscht
-  nur der Admin.
+  3“ sofort.
 - **Echt Deutsch?** Geprüft wird die **Tonspur**, die Radarr/Sonarr beim Import aus der Datei lesen
   – nicht der Release-Name. So fallen Folgen auf, die „GERMAN“ heißen, aber englisch sind („🏷 heißt
   Deutsch, Tonspur aber nicht“). „Ist Eine schrecklich nette Familie wirklich auf Deutsch?“ oder „Ist
@@ -99,7 +106,7 @@ Außerdem:
 - **Neu in Plex:** Jeden Abend um 18 Uhr bekommt jeder mit verknüpftem Plex, was seit gestern dazukam
   – Folgen pro Serie zusammengefasst, Lieblingsgenres zuerst (⭐), gemiedene Genres fehlen, mit
   „▶️ In Plex öffnen“. Abschalten per Button oder in /plex.
-- **Webseiten beobachten:** „Überwache https://… nach neuen Filmen“. Alle `SITE_CHECK_HOURS` Stunden
+- **Webseiten beobachten (Admin):** „Überwache https://… nach neuen Filmen“. Alle `SITE_CHECK_HOURS` Stunden
   schaut der Bot nach. Hat sich nichts geändert, kostet das nichts. Sonst gehen nur die **neuen** Zeilen
   (max. 4.000 Zeichen) an die KI, die nur Titel herausschreiben darf. Was schon da ist, abgelehnt wurde
   oder ein gemiedenes Genre hat, fällt weg; der Rest kommt als Buttons, sortiert nach Geschmack.
@@ -137,6 +144,34 @@ Außerdem:
   (✅ Freigeben / ❌ Ablehnen). Du bekommst eine Nachricht, wenn andere etwas hinzufügen.
 - **Limits:** pro Nutzer oder für alle Anfragen pro Tag/Monat, Tokens oder Kosten pro Monat, dazu ein
   Gesamtbudget für den ganzen Bot.
+- **Wer darf was:** Nutzer suchen und **fügen hinzu** (Filme, Serien, fehlende Staffeln), dazu alles, was
+  nur zeigt: Vorschläge, Top-Listen, Deutsch-Info, Kalender, eigene Downloads, Wunschliste, Plex.
+  Löschen, Pausieren, Folgen austauschen, Webseiten beobachten und selbstgebaute Werkzeuge gibt es nur
+  für Admins – die KI bekommt diese Werkzeuge bei Nutzern gar nicht erst, und der Code prüft es noch
+  einmal. Unter „Nichts gefunden“ sehen Nutzer nur „🔔 Bei Deutsch melden“ und „👍 Okay“.
+- **Höchstqualität:** „Anna darf höchstens 1080p“ oder „Standard höchstens 1080p“ (gilt für alle Nutzer
+  ohne eigene Grenze; SD, 720, 1080, 4K oder „aus“). Nutzer sehen dann nur Qualitätsprofile bis zu dieser
+  Auflösung; ist das Standardprofil höher, nimmt der Bot das beste erlaubte. Admins haben keine Grenze.
+- **Spam-Schutz:** Wer in einer Minute mehr als 8 Nachrichten schickt, 4× dasselbe in 10 Minuten schreibt
+  oder über 25 Titel in einer Stunde hinzufügt, wird **vorsorglich gesperrt**; du bekommst sofort eine
+  Meldung mit „🔓 Entsperren“. **Warnungen** (an Nutzer und dich, höchstens einmal am Tag): 10 Titel in einer
+  Stunde, 80 % eines Limits, Limit erreicht, oder abends: weit mehr Anfragen als die anderen (3× der Median).
+  Alles läuft im Code, ohne Tokens. `SPAM_CHECK: "0"` schaltet es ab. Admins werden nie geprüft.
+- **Monatsbericht (Admin):** Am 1. um 9:15 Uhr: Kosten und Anfragen (mit Vergleich zum Vormonat), Nutzer
+  nach Kosten, neue und gesperrte Nutzer, hinzugefügte Titel, Erfolgsquote und häufigste Probleme, Sperren
+  und Warnungen, neue Werkzeuge. `/monatsbericht` zeigt den letzten Monat, `/monatsbericht jetzt` den
+  laufenden.
+- **Plex-Sammlungen (Admin):** „Mach eine Sammlung Marvel“ legt in Plex eine Sammlung mit den passenden
+  Titeln an (pro Bibliothek). „Automatische Sammlungen pro Nutzer an“ pflegt täglich „Wünsche von Anna“
+  usw.; es wird nur ergänzt, nie entfernt. Braucht das Plex-Konto des Server-Besitzers.
+- **Selbstgebaute Werkzeuge (Admin):** Fragst du etwas, wofür es kein Werkzeug gibt („Welche Filme mit
+  Keanu Reeves habe ich noch nicht?“), bietet der Bot an, sich eins zu bauen – mit geschätzten Kosten
+  vorher (mit `gpt-4.1` etwa 1–3 Cent pro Bau). Ein stärkeres Modell (`RECIPE_MODEL`) schreibt ein
+  **Rezept**: keine Programmierung, sondern ein paar lesende Abfragen an TMDB, Radarr oder Sonarr plus
+  Filter, Sortierung und Textvorlage. Der Bot prüft es gegen eine feste Liste erlaubter Abfragen (nur
+  lesen), macht einen Probelauf und zeigt dir Ergebnis und echte Kosten: „✅ Behalten“ oder „🗑 Verwerfen“.
+  Behaltene Werkzeuge nutzt die normale KI ab dann direkt, das kostet nur die normale Frage. /rezepte
+  listet sie, „Lösch das Werkzeug …“ entfernt eins.
 
 Die Sprach-KI ist austauschbar: **OpenAI** (z. B. `gpt-4o-mini`), **Gemini**, **Claude** oder alles
 OpenAI-kompatible (OpenRouter, Groq, lokal mit Ollama/LM Studio).
@@ -192,6 +227,8 @@ Nur für den Admin:
 - `/freigaben` – Freigabe-Regeln und offene Wünsche
 - `/regeln` – Aufräumregeln
 - `/version` – Version, Update verfügbar?, Neuerungen
+- `/monatsbericht [jetzt]` – Monatsbericht (letzter oder laufender Monat)
+- `/rezepte` – selbstgebaute Werkzeuge
 - `/limit WER ART WERT` – Limits setzen
   - WER: Name, Telegram-ID, `standard` (alle Nutzer ohne eigenes Limit) oder `gesamt` (ganzer Bot)
   - ART: `tag` (Anfragen/Tag), `monat` (Anfragen/Monat), `tokens` (pro Monat), `kosten` (Dollar/Monat)

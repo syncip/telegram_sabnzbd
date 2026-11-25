@@ -35,7 +35,10 @@ class FakeArr:
         p, q = req.url.path.removeprefix("/api/v3"), req.url.params
         body = json.loads(req.content) if req.content else None
         if p == "/qualityprofile":
-            return httpx.Response(200, json=[{"id": 1, "name": "HD-1080p"}, {"id": 2, "name": "Ultra-HD"}])
+            def prof(res):
+                return {"quality": {"resolution": res}, "allowed": True}
+            return httpx.Response(200, json=[{"id": 1, "name": "HD-1080p", "items": [prof(720), prof(1080)]},
+                                             {"id": 2, "name": "Ultra-HD", "items": [prof(1080), prof(2160)]}])
         if p == "/rootfolder":
             return httpx.Response(200, json=[{"path": "/media"}])
         if p == "/languageprofile":
@@ -280,6 +283,23 @@ def test_quality_timeout_takes_configured_default(tmp_path):
     assert flow.default_profile == "Ultra-HD"
     flow = asyncio.run(tools.quality_timeout(flow.id))
     assert flow.step.done and fr.movies[7]["qualityProfileId"] == 2
+
+
+def test_quality_limit_for_users(tmp_path):
+    from arrbot.users import UserStore
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    radarr.cfg.quality_profile = "Ultra-HD"
+    tools = ToolRunner(radarr, sonarr, store, "released", quality_prompt_seconds=60)
+    tools.users = UserStore(str(tmp_path), admin_id=1, seed_users={5})
+    tools.is_admin = tools.users.is_admin
+    assert "höchstens Full HD" in tools.users.apply_quality("standard", "1080")
+    assert asyncio.run(tools.run(ToolCall("l", "list_quality_profiles", {"kind": "movie"}), 5)).content == '["HD-1080p"]'
+    res = asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134, "quality_profile": "Ultra-HD"}), 5))
+    assert res.is_error and "über deiner Grenze" in res.content and 7 not in fr.movies
+    asyncio.run(tools.run(ToolCall("x", "add_movie", {"tmdb_id": 693134}), 5))  # one profile left: no question
+    assert fr.movies[7]["qualityProfileId"] == 1
+    assert tools.users.max_quality(1) == 0  # admins have no limit
+    assert "keine Qualitätsgrenze" in tools.users.apply_quality("5", "aus")
 
 
 def test_series_season_then_quality_buttons(tmp_path):

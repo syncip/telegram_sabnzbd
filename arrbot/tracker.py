@@ -282,11 +282,15 @@ class Tracker:
         keep = now - self.track_for
         st.finished = [f for f in st.finished if _parse(f["at"]) > keep]
 
+    is_admin = staticmethod(lambda _uid: True)  # set by the bot: users get no pause/delete buttons
+    USER_BUTTONS = ("n:w:", "n:ok")
+
     async def _notify(self, t: Tracked, text: str, buttons: list[tuple[str, str]] | None = None) -> None:
         for chat_id in t.chat_ids:
+            mine = buttons if not buttons or self.is_admin(chat_id) else                 [b for b in buttons if b[1].startswith(self.USER_BUTTONS)]
             try:
-                if buttons:
-                    await self.send(chat_id, text, buttons)
+                if mine:
+                    await self.send(chat_id, text, mine)
                 else:
                     await self.send(chat_id, text)
             except Exception:  # noqa: BLE001

@@ -66,9 +66,12 @@ class Config:
     monitor_minutes: int = 5  # check Radarr/Sonarr/SABnzbd/TMDB/Plex this often, tell admins on outage; 0 = off
     update_repo: str = "syncip/telegram_sabnzbd"  # GitHub repo for the update check; empty = off
     update_token: str | None = None  # read-only GitHub token, only for a private repo
+    spam_check: bool = True  # block spammers as a precaution, warn on overuse
+    recipe_model: str = ""  # model that builds new tools for admins; empty = a stronger one of the same provider
     extra: dict = field(default_factory=dict)
 
 
+RECIPE_MODELS = {"openai": "gpt-4.1"}  # others: the configured model
 DEFAULT_MODELS = {
     "gemini": "gemini-flash-latest",
     "anthropic": "claude-opus-5-5",
@@ -149,6 +152,8 @@ def load_config() -> Config:
         monitor_minutes=int(_env("MONITOR_MINUTES", "5")),  # type: ignore[arg-type]
         update_repo=_env("UPDATE_REPO", "syncip/telegram_sabnzbd") or "",  # type: ignore[arg-type]
         update_token=_env("UPDATE_TOKEN"),
+        spam_check=(_env("SPAM_CHECK", "1") or "1").lower() not in ("0", "false", "nein", "aus", "off"),
+        recipe_model=_env("RECIPE_MODEL") or RECIPE_MODELS.get(llm.provider, llm.model),
         llm=llm,
         radarr=radarr,
         sonarr=sonarr,

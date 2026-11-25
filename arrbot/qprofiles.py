@@ -183,3 +183,20 @@ async def create(svc: Any, w: ProfileWish) -> str:
     svc._profiles = None  # reload the list next time
     extra = f" ({'; '.join(notes)})" if notes else ""
     return f"✅ {svc.kind}: Profil „{created.get('name', w.name)}“ angelegt{extra}."
+
+
+def max_resolution(profile: dict) -> int:
+    """Highest resolution a profile may download (0 = unknown)."""
+    best = 0
+
+    def walk(items: list[dict], allowed: bool) -> None:
+        nonlocal best
+        for i in items:
+            ok = allowed or bool(i.get("allowed"))
+            if i.get("items"):
+                walk(i["items"], ok)
+            elif ok:
+                best = max(best, _res(i))
+
+    walk(profile.get("items") or [], False)
+    return best

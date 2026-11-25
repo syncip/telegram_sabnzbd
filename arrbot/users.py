@@ -74,10 +74,12 @@ class User:
     since: str
     limits: dict = field(default_factory=dict)  # own limits; missing keys fall back to the defaults
     usage: Usage = field(default_factory=Usage)
+    quality: int = 0  # max resolution (720/1080/2160) for this user; 0 = the standard for all users
 
 
 class UserStore:
     on_remove = None  # (uid) -> None, set by the bot
+    on_role = None  # (uid, old role, new role) -> None, set by the bot
 
     def __init__(self, data_dir: str, admin_id: int, seed_users: set[int] = frozenset()):  # type: ignore[assignment]
         self.path = Path(data_dir) / "users.json"
@@ -85,6 +87,7 @@ class UserStore:
         self.defaults: dict = {}  # limits for users without own values (never applied to admins)
         self.total_limits: dict = {}  # whole bot, e.g. {"kosten": 1.0}
         self.total = Usage()
+        self.default_quality = 0  # max resolution for all users (0 = no limit)
         self.users: dict[int, User] = self._load()
         # The configured admin is always admin; IDs from ALLOWED_USER_IDS are plain users.
         self._ensure(admin_id, ADMIN)
@@ -103,6 +106,7 @@ class UserStore:
             self.defaults = raw.get("defaults") or {}
             self.total_limits = raw.get("total_limits") or {}
             self.total = Usage(**(raw.get("total") or {}))
+            self.default_quality = int(raw.get("default_quality") or 0)
             users = {}
             for k, v in raw["users"].items():
                 v = dict(v)
@@ -123,6 +127,7 @@ class UserStore:
                     "defaults": self.defaults,
                     "total_limits": self.total_limits,
                     "total": asdict(self.total),
+                    "default_quality": self.default_quality,
                 }, f, indent=2, ensure_ascii=False)
             os.replace(tmp, self.path)
         except OSError as e:
@@ -180,8 +185,11 @@ class UserStore:
     def set_role(self, uid: int, role: str, name: str = "") -> User:
         if uid == self.admin_id and role != ADMIN:
             raise ValueError("Der Haupt-Admin (ADMIN_USER_ID) kann nicht geändert werden.")
+        old = self.role(uid)
         u = self._ensure(uid, role, name)
         self.save()
+        if self.on_role and old != u.role:
+            self.on_role(uid, old, u.role)
         return u
 
     def remove(self, uid: int) -> User | None:
@@ -290,6 +298,30 @@ class UserStore:
         txt = f"{LIMIT_KEYS[key]} aus" if value is None else limit_text(key, value)
         return f"👍 Für {label}: {txt}."
 
+    def max_quality(self, uid: int) -> int:
+        """Highest resolution uid may request (0 = any). Admins have no limit."""
+        u = self.users.get(uid)
+        if u is None or u.role == ADMIN:
+            return 0
+        return u.quality or self.default_quality
+
+    def apply_quality(self, who: str, raw: str | int | None) -> str:
+        """Max quality for one user or 'standard' (all). raw: 480/720/1080/2160, SD/HD/FullHD/4K or 'aus'."""
+        value = parse_resolution(raw)
+        who_l = str(who).lower().strip()
+        if who_l in ("standard", "alle", "default", "gruppe"):
+            self.default_quality, label = value, "alle Nutzer (Standard)"
+        else:
+            uid = self.find(str(who))
+            if uid is None or uid not in self.users:
+                raise ValueError(f"Nutzer „{who}“ nicht eindeutig gefunden. Nimm die ID aus /nutzer.")
+            if self.users[uid].role == ADMIN:
+                raise ValueError("Admins haben keine Qualitätsgrenze.")
+            self.users[uid].quality, label = value, self.name(uid)
+        self.save()
+        return f"👍 Für {label}: " + (f"höchstens {quality_label(value)}." if value else "keine Qualitätsgrenze"
+                                      + (" (es gilt der Standard)." if label != "alle Nutzer (Standard)" else "."))
+
     def apply_role(self, who: str, action: str) -> tuple[int, str]:
         """freigeben / sperren / entfernen by name or id. Returns (user id, confirmation)."""
         uid = self.find(str(who))
@@ -326,3 +358,23 @@ def _fmt(key: str, value: float) -> str:
 
 def limit_text(key: str, value: float) -> str:
     return _fmt(key, value)
+
+
+QUALITY_NAMES = {480: "SD", 576: "SD", 720: "HD (720p)", 1080: "Full HD (1080p)", 2160: "4K (2160p)"}
+
+
+def quality_label(res: int) -> str:
+    return QUALITY_NAMES.get(res, f"{res}p")
+
+
+def parse_resolution(raw: str | int | None) -> int:
+    t = str(raw or "").lower().replace(" ", "").replace("-", "")
+    if t in ("", "aus", "off", "0", "keine", "kein", "none", "unbegrenzt"):
+        return 0
+    words = {"sd": 480, "dvd": 480, "hd": 720, "720p": 720, "fullhd": 1080, "fhd": 1080, "1080p": 1080,
+             "4k": 2160, "uhd": 2160, "2160p": 2160}
+    if t in words:
+        return words[t]
+    if t.isdigit() and int(t) in (480, 576, 720, 1080, 2160):
+        return int(t)
+    raise ValueError(f"„{raw}“ verstehe ich nicht als Qualität. Möglich: SD, 720, 1080, 4K oder aus.")

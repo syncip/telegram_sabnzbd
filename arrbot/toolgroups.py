@@ -16,10 +16,11 @@ CORE = {"search_movies", "search_series", "add_movie", "add_series", "offer_titl
         "download_status", "open_url", "list_quality_profiles", "more_tools"}
 
 GROUPS: dict[str, tuple[set[str], str]] = {
-    "discover": ({"suggest", "top_titles", "remember", "my_profile"},
-                 r"vorschl|empfiehl|empfehl|was soll ich|schau(en)?\b|tipp|top|chart|beste|liste|trend|beliebt|"
+    "discover": ({"suggest", "top_titles", "remember", "my_profile", "wishlist", "suggest_together"},
+                 r"vorschl|studio|marvel|pixar|empfiehl|empfehl|was soll ich|schau(en)?\b|tipp|top|chart|beste|liste|trend|beliebt|"
                  r"ähnlich|wie .* (film|serie)|mag\b|mögen|hasse|merk|vergiss|profil|über mich|weißt du|vorlieb|"
-                 r"genre|horror|komödie|action|thriller|doku|anime|neu(e|es|en)? (film|serie)"),
+                 r"genre|horror|komödie|action|thriller|doku|anime|neu(e|es|en)? (film|serie)|"
+                 r"wunschliste|vormerk|erschein|rauskomm|termin|zusammen|gemeinsam|mit (mir|uns|anna|\w+) schau"),
     "german": ({"german_info", "german_fix", "notify_german", "clean_episodes"},
                r"deutsch|synchro|german|sprache|tonspur|englisch|original|kino|stream|netflix|prime|disney|"
                r"sky|wow|joyn|rtl|bescheid|meld|benachrichtig"),
@@ -32,7 +33,7 @@ GROUPS: dict[str, tuple[set[str], str]] = {
     "sites": ({"watch_site"}, r"überwach|beobacht|webseite|website|im auge|seiten?\b"),
     "admin": (set(),  # all admin_* tools, only for admins
               r"statistik|nutzer|user|limit|check|api|mediathek|aufräum|qualität|profil|aktivit|anfrag|"
-              r"problem|fehler|freigab|kosten|tokens|sperr|erlaub|admin|gesehen|ungesehen|platz|speicher|lösch|regel|"
+              r"sammlung|collection|problem|fehler|freigab|kosten|tokens|sperr|erlaub|admin|gesehen|ungesehen|platz|speicher|lösch|regel|"
               r"untertitel|überwach|webseite|website"),
 }
 

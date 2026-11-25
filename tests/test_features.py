@@ -6,9 +6,10 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 
 from arrbot import downloads
-from arrbot.arr import Radarr, Sonarr
+from arrbot.arr import ArrError, Radarr, Sonarr
 from arrbot.config import ArrConfig
 from arrbot.llm import ToolCall
 from arrbot.sabnzbd import SABnzbd, SabSlot, eta_text, parse_timeleft
@@ -278,6 +279,10 @@ def fake_tmdb(calls=None):
                 {"id": 1, "title": "Alles steht Kopf 2", "release_date": "2024-06-11", "vote_average": 7.6, "vote_count": 5000},
                 {"id": 2, "title": "Deadpool & Wolverine", "release_date": "2024-07-24", "vote_average": 7.7, "vote_count": 7000},
             ]})
+        if p == "/search/company":
+            return httpx.Response(200, json={"results": [{"id": 420, "name": "Marvel Studios"},
+                                                         {"id": 7505, "name": "Marvel Entertainment"},
+                                                         {"id": 99, "name": "Something Else"}]})
         if p.endswith("/recommendations"):
             return httpx.Response(200, json={"results": [
                 {"id": 438631, "title": "Dune", "release_date": "2021-09-15", "vote_average": 7.8, "vote_count": 12000},
@@ -318,6 +323,17 @@ def test_top_titles_list_and_download(tmp_path):
     assert len([c for c in fr.commands if c["name"] == "MoviesSearch"]) == 2
     disc = [q for p, q in calls if p == "/discover/movie"][-1]
     assert disc["primary_release_date.gte"] == "2025-10-01" and disc["primary_release_date.lte"] == "2025-10-31"
+
+
+def test_top_titles_of_a_studio_all_time(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    calls = []
+    tools = ToolRunner(radarr, sonarr, store, "released", tmdb=fake_tmdb(calls))
+    asyncio.run(tools.run(ToolCall("1", "top_titles", {"kind": "movie", "studio": "Marvel", "count": 3}), 5))
+    offer = tools.take_outbox(5)[0]
+    assert offer.text.startswith("🏆 Top 3 Marvel-Filme (meistgesehen):")
+    disc = [q for p, q in calls if p == "/discover/movie"][0]
+    assert disc["with_companies"] == "420|7505" and "primary_release_date.gte" not in disc
 
 
 def test_suggestions_from_history_skip_owned(tmp_path):
@@ -408,14 +424,18 @@ def test_remove_asks_then_deletes_with_files_and_download(tmp_path):
 
 def test_remove_cancel_and_permissions(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
-    movie_in_library(fr, store, owner=5)
+    movie_in_library(fr, store, owner=6)
     tools = ToolRunner(radarr, sonarr, store, "released")
-    res = asyncio.run(tools.run(ToolCall("1", "remove_title", {"kind": "movie", "lib_id": 7}), 6))
-    assert res.is_error and "nicht angefragt" in res.content  # someone else's title
-    store.record_request(6, "movie", "Dune: Teil Zwei (2024)", 693134)
-    res = asyncio.run(tools.run(ToolCall("1", "remove_title", {"kind": "movie", "lib_id": 7}), 6))
-    assert res.is_error and "auch andere" in res.content  # shared: only the admin may delete
-    tools.is_admin = lambda uid: uid == 1
+    tools.users = UserStore(str(tmp_path), admin_id=1, seed_users={6})
+    tools.is_admin = tools.users.is_admin
+    names = {s.name for s in tools.specs_for(6)}
+    assert {"add_movie", "search_movies", "suggest"} <= names
+    assert not names & {"remove_title", "pause_title", "german_fix", "clean_episodes", "watch_site"}
+    for name in ("remove_title", "pause_title"):  # even their own request: only the admin changes the library
+        res = asyncio.run(tools.run(ToolCall("1", name, {"kind": "movie", "lib_id": 7}), 6))
+        assert res.is_error and "nur der Admin" in res.content
+    with pytest.raises(ArrError, match="nur der Admin"):
+        asyncio.run(tools.pause(6, "movie", 7, 3))  # the button under "nothing found yet"
     asyncio.run(tools.run(ToolCall("1", "remove_title", {"kind": "movie", "lib_id": 7}), 1))
     flow = tools.take_outbox(1)[0]
     flow = asyncio.run(tools.choose(flow.id, "no"))

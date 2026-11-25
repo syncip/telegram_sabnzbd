@@ -14,9 +14,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 CHANGES = {
+    "1.8.0": "Nutzer dürfen nur noch suchen und hinzufügen (Löschen, Pausieren, Austauschen nur Admin), "
+             "Höchstqualität pro Nutzer oder für alle, Spam-Schutz mit vorsorglicher Sperre und Warnungen, "
+             "Monatsbericht (/monatsbericht), selbstgebaute Werkzeuge für den Admin (/rezepte), "
+             "Wunschliste für Unveröffentlichtes, „Was können wir zusammen schauen?“, Plex-Sammlungen, "
+             "Top-Listen pro Studio, Deutsch-Prüfung über alle Staffeln",
     "1.7.0": "Aktivität (/aktivitaet), Überwachung der Dienste, Versionsnummer mit Update-Hinweis, "
              "🎧 Reinhören (echte Sprache statt Tonspur-Markierung), weniger Tokens (nur passende Werkzeuge), "
              "„Neu in Plex“, Aufräumregeln (/regeln), Freigaben (/freigaben), Buttons überleben Neustarts, "

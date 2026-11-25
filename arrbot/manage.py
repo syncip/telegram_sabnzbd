@@ -17,8 +17,8 @@ from .german import _air, _is_german_release, file_check, file_langs, langs_de
 
 log = logging.getLogger(__name__)
 
-MAX_SEASONS = 6  # indexer searches per run: each takes seconds and costs indexer API hits
-PARALLEL = 3
+SEARCH_BUDGET = 150.0  # seconds per run: seasons not started by then are searched on "Weiter suchen"
+PARALLEL = 4
 BAD_REJECTIONS = ("unknown", "sample", "blocklist", "wrong", "does not match")
 
 
@@ -54,7 +54,8 @@ class FixPlan:
     mislabelled: list[dict] = field(default_factory=list)  # part of other_lang: named German, audio isn't
     grabs: list[Grab] = field(default_factory=list)
     not_found: list[dict] = field(default_factory=list)  # needed, no German download found
-    skipped_seasons: list[int] = field(default_factory=list)
+    skipped_seasons: list[int] = field(default_factory=list)  # not searched yet (time budget)
+    bad: set[str] = field(default_factory=set)  # release names of files that are not really German
 
     def covered(self, only_missing: bool) -> list[Grab]:
         if not only_missing:
@@ -92,7 +93,7 @@ async def plan_german(sonarr: Any, series_id: int, season: int | None, today: da
     eps = [e for e in await sonarr.episodes(series_id, season)
            if e.get("seasonNumber", 0) > 0 and (_air(e) or date.max) <= today]
     plan.checked = len(eps)
-    bad: set[str] = set()  # release names of files that are not really German
+    bad = plan.bad
     for e in eps:
         check = file_check(e.get("episodeFile")) if e.get("hasFile") else None
         if check == "german":
@@ -107,26 +108,38 @@ async def plan_german(sonarr: Any, series_id: int, season: int | None, today: da
         else:
             plan.missing.append(e)
 
-    needed = plan.missing + plan.other_lang
-    seasons = sorted({e["seasonNumber"] for e in needed})
-    plan.skipped_seasons = seasons[MAX_SEASONS:]
-    seasons = seasons[:MAX_SEASONS]
-    sem = asyncio.Semaphore(PARALLEL)
+    plan.skipped_seasons = sorted({e["seasonNumber"] for e in plan.missing + plan.other_lang})
+    await search_more(sonarr, plan)
+    return plan
 
-    async def search(n: int) -> tuple[int, list[dict] | Exception]:
+
+async def search_more(sonarr: Any, plan: FixPlan, budget: float = SEARCH_BUDGET) -> None:
+    """Search the seasons not searched yet; whatever has not started when the time is up stays for later."""
+    needed = plan.missing + plan.other_lang
+    seasons, plan.skipped_seasons = plan.skipped_seasons, []
+    sem = asyncio.Semaphore(PARALLEL)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+
+    async def search(n: int) -> tuple[int, list[dict] | Exception | None]:
         async with sem:
+            if loop.time() > deadline:
+                return n, None
             try:
-                return n, await sonarr.releases(seriesId=series_id, seasonNumber=n)
+                return n, await sonarr.releases(seriesId=plan.series_id, seasonNumber=n)
             except ArrError as e:
                 return n, e
 
     for n, releases in await asyncio.gather(*(search(n) for n in seasons)):
+        if releases is None:
+            plan.skipped_seasons.append(n)
+            continue
         season_needed = {e["episodeNumber"]: e for e in needed if e["seasonNumber"] == n}
         if isinstance(releases, Exception):
             log.warning("Release-Suche Staffel %s: %s", n, releases)
             plan.not_found += season_needed.values()
             continue
-        german = [r for r in releases if _usable(r, bad)]
+        german = [r for r in releases if _usable(r, plan.bad)]
         packs = sorted((r for r in german if r.get("fullSeason")), key=_score, reverse=True)
         singles: dict[int, dict] = {}
         for r in german:
@@ -146,9 +159,6 @@ async def plan_german(sonarr: Any, series_id: int, season: int | None, today: da
             g.episodes.append(season_needed[num])
         plan.grabs += by_release.values()
         plan.not_found += [season_needed[num] for num in sorted(uncovered)]
-    for n in plan.skipped_seasons:
-        plan.not_found += [e for e in needed if e["seasonNumber"] == n]
-    return plan
 
 
 def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
@@ -178,11 +188,14 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
         lines.append(f"\n⬇️ Deutsche Downloads gefunden für {len(covered)} Folgen{how}")
     if plan.not_found:
         lines.append(f"🔍 Noch nichts Deutsches für: {_eps_text(plan.not_found)}")
+    more: list[tuple[str, str]] = []
     if plan.skipped_seasons:
-        lines.append(f"ℹ️ Staffel {', '.join(map(str, plan.skipped_seasons))} nicht durchsucht (max. {MAX_SEASONS} "
-                     "auf einmal) – frag einfach nochmal mit Staffel.")
+        lines.append(f"⏳ Staffel {', '.join(map(str, plan.skipped_seasons))} noch nicht durchsucht (Suche dauert) – "
+                     "tipp „Weiter suchen“.")
+        more = [(f"🔎 Weiter suchen ({len(plan.skipped_seasons)} Staffeln)", "more")]
     if not covered:
-        return "\n".join(lines), ok_button + ([("Abbrechen", "no")] if ok_button else [])
+        rest = more + ok_button
+        return "\n".join(lines), rest + ([("Abbrechen", "no")] if rest else [])
 
     replace = [e for g in plan.grabs for e in g.episodes if e.get("hasFile")]
     buttons = []
@@ -194,7 +207,7 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
             buttons.append((f"⬇️ Nur fehlende ({len(only_missing)})", "missing"))
     else:
         buttons.append((f"⬇️ {len(covered)} Folgen auf Deutsch laden", "all"))
-    buttons += ok_button
+    buttons += more + ok_button
     buttons.append(("Abbrechen", "no"))
     return "\n".join(lines), buttons
 

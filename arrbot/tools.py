@@ -16,7 +16,9 @@ from datetime import date, timedelta, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import approval, german, manage, plex, profiles, qprofiles, sitewatch, urlinfo, watch
+from . import approval, collections_plex, german, manage, plex, profiles, qprofiles, sitewatch, together, urlinfo, watch, wishlist
+from . import recipes
+from . import users as users_mod
 from .arr import ArrError, Radarr, Sonarr
 from .llm import ToolCall, ToolResult, ToolSpec
 from .state import Store, utcnow
@@ -182,6 +184,20 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             obj({"url": {"type": "string"}}, ["url"]),
         ),
         ToolSpec(
+            "suggest_together",
+            "Vorschläge für zwei Personen (\"was können Anna und ich zusammen schauen?\"). with_user: Name der anderen Person.",
+            obj({"with_user": {"type": "string"}, "kind": {"type": "string", "enum": ["movie", "series"]}},
+                ["with_user"]),
+        ),
+        ToolSpec(
+            "wishlist",
+            "Wunschliste für Titel, die noch nicht erschienen sind (\"merk dir Avatar 4\", \"vormerken\"): wird angelegt, "
+            "sobald es einen Termin gibt. add: kind + id (tmdb_id Film / tvdb_id Serie, vorher suchen). list, remove (wish_id).",
+            obj({"action": {"type": "string", "enum": ["add", "list", "remove"]},
+                 "kind": {"type": "string", "enum": ["movie", "series"]}, "id": {"type": "integer"},
+                 "wish_id": {"type": "integer"}}, ["action"]),
+        ),
+        ToolSpec(
             "watch_site",
             "Webseite beobachten und neue Filme/Serien darauf melden (\"überwache Seite X\"). action add (url, kind), "
             "list, remove (site_id).",
@@ -193,7 +209,8 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
     if True:  # also without TMDB: the tool then says what is missing instead of the AI guessing
         specs.append(ToolSpec(
             "top_titles",
-            "Top-Filme/-Serien eines Jahres oder Monats. download=true nur, wenn der Nutzer sie laden will; "
+            "Top-Filme/-Serien: eines Jahres/Monats und/oder eines Studios (studio=\"Marvel\", \"Pixar\"). "
+            "year nur wenn genannt (ohne = aller Zeiten). download=true nur, wenn der Nutzer sie laden will; "
             "sonst Liste mit Buttons.",
             obj({
                 "kind": {"type": "string", "enum": ["movie", "series"]},
@@ -202,8 +219,9 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
                 "count": {"type": "integer"},
                 "sort": {"type": "string", "enum": ["popular", "rating", "revenue"],
                          "description": "popular=meistgesehen (Standard), rating=bestbewertet, revenue=Kasse"},
+                "studio": {"type": "string"},
                 "download": {"type": "boolean"},
-            }, ["kind", "year"]),
+            }, ["kind"]),
         ))
         specs.append(ToolSpec(
             "german_info",
@@ -263,6 +281,15 @@ def build_admin_specs() -> list[ToolSpec]:
                  "rule_id": {"type": "integer"}}, ["action"]),
         ),
         ToolSpec(
+            "admin_plex_collection",
+            "Plex-Sammlung anlegen/ergänzen: action create mit name und titles (alle gemeinten Filme/Serien mit Jahr, "
+            "z. B. alle Marvel-Filme). auto_on/auto_off: automatische Sammlungen \"Wünsche von <Name>\" pro Nutzer.",
+            obj({"action": {"type": "string", "enum": ["create", "auto_on", "auto_off"]}, "name": {"type": "string"},
+                 "titles": {"type": "array", "items": {"type": "object", "properties": {
+                     "title": {"type": "string"}, "year": {"type": "integer"}}, "required": ["title"]}}},
+                ["action"]),
+        ),
+        ToolSpec(
             "admin_activity",
             "Was Nutzer gefragt haben, was geklappt hat, wo es Probleme gab. user: Name/ID (leer = alle).",
             obj({"user": {"type": "string"}, "problems_only": {"type": "boolean"}, "days": {"type": "integer"}}),
@@ -272,6 +299,24 @@ def build_admin_specs() -> list[ToolSpec]:
             "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot). value: Zahl oder 'aus'.",
             obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": ["tag", "monat", "tokens", "kosten"]},
                  "value": {"type": "string"}}, ["who", "kind", "value"]),
+        ),
+        ToolSpec(
+            "build_tool",
+            "Nur wenn KEIN Werkzeug die Frage genau beantwortet (auch nicht nach more_tools) und sie nur lesend ist "
+            "(Listen, Top-Listen mit Filtern, Auswertungen der Bibliothek): eigenes Werkzeug bauen lassen. "
+            "Der Admin sieht vorher die Kosten. request: die Frage in eigenen Worten.",
+            obj({"request": {"type": "string"}}, ["request"]),
+        ),
+        ToolSpec(
+            "admin_recipes",
+            "Selbstgebaute Werkzeuge auflisten oder löschen (name).",
+            obj({"action": {"type": "string", "enum": ["list", "delete"]}, "name": {"type": "string"}}, ["action"]),
+        ),
+        ToolSpec(
+            "admin_max_quality",
+            "Höchste Qualität, die Nutzer anfragen dürfen. who: Name/ID oder 'standard' (alle Nutzer). "
+            "quality: SD, 720, 1080, 4K oder 'aus'.",
+            obj({"who": {"type": "string"}, "quality": {"type": "string"}}, ["who", "quality"]),
         ),
         ToolSpec(
             "admin_user",
@@ -409,6 +454,12 @@ class ToolRunner:
         self.plex_store: plex.PlexStore | None = None
         self.cleanup: Any = None  # cleanup.RuleStore, set by the bot
         self.sites: sitewatch.SiteStore | None = None  # set by the bot
+        self.wishes: wishlist.WishStore | None = None  # set by the bot
+        self.recipes: recipes.RecipeStore | None = None  # set by the bot
+        self.builder: Any = None  # LLM provider that writes recipes (a stronger model)
+        self.builder_model = ""
+        self.builder_cost: Callable[[dict], float | None] = lambda _u: None
+        self.on_llm_usage: Callable[[int, dict, float | None], None] | None = None  # bot books it
         self.site_hours = 6
         self.approvals: approval.ApprovalStore | None = None  # set by the bot
         self.on_approval: Callable[[approval.Pending], Awaitable[None]] | None = None  # bot asks the admins
@@ -419,8 +470,59 @@ class ToolRunner:
         """Button messages created during the last AI turn; the bot sends them."""
         return self._outbox.pop(chat_id, [])
 
+    # Users only find and add titles; anything that changes or deletes what is there, costs extra or
+    # watches in the background is for admins.
+    ADMIN_ONLY = {"german_fix", "clean_episodes", "remove_title", "pause_title", "resume_title", "watch_site",
+                  "build_tool"}
+
+    def _admin(self, uid: int) -> bool:
+        """Without user management (single-user setup) whoever may use the bot is the admin."""
+        return self.users is None or self.is_admin(uid)
+
+    def _admin_only(self, name: str) -> bool:
+        return name in self.ADMIN_ONLY or name.startswith(("admin_", "recipe_"))
+
     def specs_for(self, user_id: int) -> list[ToolSpec]:
-        return self.specs + self.admin_specs if self.users is not None and self.is_admin(user_id) else self.specs
+        if self.users is not None and self.is_admin(user_id):
+            return self.specs + self.admin_specs + self.recipe_specs()
+        if self.users is None:
+            return self.specs
+        return [s for s in self.specs if not self._admin_only(s.name)]
+
+    def recipe_specs(self) -> list[ToolSpec]:
+        return [r.spec() for r in self.recipes.all()] if self.recipes else []
+
+    # ---- quality limit per user ----------------------------------------------------------------
+    def max_quality(self, uid: int) -> int:
+        return self.users.max_quality(uid) if self.users is not None else 0
+
+    async def allowed_profiles(self, kind: str, uid: int) -> list[dict]:
+        profiles = await self._svc(kind).quality_profiles()
+        cap = self.max_quality(uid)
+        return [p for p in profiles if not cap or 0 < qprofiles.max_resolution(p) <= cap]
+
+    async def _check_cap(self, kind: str, uid: int, profile: str) -> None:
+        cap = self.max_quality(uid)
+        if cap and profile not in [p["name"] for p in await self.allowed_profiles(kind, uid)]:
+            allowed = ", ".join(p["name"] for p in await self.allowed_profiles(kind, uid)) or "keins"
+            raise ArrError(f"„{profile}“ ist über deiner Grenze ({users_mod.quality_label(cap)}). Möglich: {allowed}")
+
+    async def _capped_profile(self, flow: Flow) -> str | None:
+        """The profile to add with: what was chosen, unless it is above the user's limit."""
+        cap = self.max_quality(flow.chat_id)
+        if not cap:
+            return flow.profile
+        svc = self._svc(flow.cand.kind)
+        chosen = await svc.resolve_profile(flow.profile)
+        if 0 < qprofiles.max_resolution(chosen) <= cap:
+            return chosen["name"]
+        allowed = await self.allowed_profiles(flow.cand.kind, flow.chat_id)
+        if not allowed:
+            raise ArrError(f"Es gibt kein Qualitätsprofil bis {users_mod.quality_label(cap)} – sag dem Admin Bescheid.")
+        if flow.profile:  # asked for more than allowed
+            raise ArrError(f"„{chosen['name']}“ ist über deiner Grenze ({users_mod.quality_label(cap)}). "
+                           f"Möglich: {', '.join(p['name'] for p in allowed)}")
+        return max(allowed, key=qprofiles.max_resolution)["name"]
 
     # ---- buttons that survive a restart ----------------------------------------------------------
     KEEP_STAGES = ("", "seasons", "quality", "extend")  # flows with a plan (gfix, clean ...) are rebuilt on demand
@@ -466,10 +568,18 @@ class ToolRunner:
 
     async def _run(self, call: ToolCall, chat_id: int) -> ToolResult:
         fn = getattr(self, f"_t_{call.name}", None)
+        if fn is None and call.name.startswith("recipe_") and self.recipes and self.recipes.get(call.name):
+            name = call.name
+
+            async def fn(chat_id: int, **args: Any) -> Final:
+                return await self.run_recipe(chat_id, name, args)
         if fn is None:
             return ToolResult(call.id, call.name, f"Unbekanntes Werkzeug {call.name}", is_error=True)
         if call.name.startswith("admin_") and not (self.users is not None and self.is_admin(chat_id)):
             return ToolResult(call.id, call.name, "Nur für Admins.", is_error=True)
+        if self._admin_only(call.name) and not self._admin(chat_id):
+            return ToolResult(call.id, call.name, "Das darf nur der Admin. Du kannst Filme und Serien suchen und "
+                              "hinzufügen – für alles andere frag den Admin.", is_error=True)
         try:
             result = await fn(chat_id=chat_id, **call.args)
         except TmdbError as e:
@@ -530,12 +640,14 @@ class ToolRunner:
             flow.monitor = "all"
 
         if flow.profile is None and self.quality_prompt_seconds > 0:
-            svc = self._svc(c.kind)
-            profiles = [p["name"] for p in await svc.quality_profiles()]
+            profiles = [p["name"] for p in await self.allowed_profiles(c.kind, flow.chat_id)]
             if len(profiles) > 1:
                 flow.stage = "quality"
                 flow.profiles = profiles
-                flow.default_profile = (await svc.resolve_profile(None))["name"]
+                flow.default_profile = (await self._capped_profile(flow)
+                                        or (await self._svc(c.kind).resolve_profile(None))["name"])
+                if flow.default_profile not in profiles:
+                    flow.default_profile = profiles[0]
                 return Step(
                     f"🎚 Welche Qualität für {_what(flow)}?\n"
                     f"Ohne Auswahl nehme ich in {self.quality_prompt_seconds} s „{flow.default_profile}“.",
@@ -632,6 +744,7 @@ class ToolRunner:
 
     async def _add(self, flow: Flow, approved: bool = False) -> None:
         c = flow.cand
+        flow.profile = await self._capped_profile(flow)
         rule = None if approved else await self._hold_rule(flow)
         if rule and not rule.min_gb:
             await self._hold(flow, f"Genre {' / '.join(rule.genres)}" if rule.genres else "Freigabe nötig")
@@ -709,6 +822,12 @@ class ToolRunner:
         if flow.stage == "remove":
             self.flows.pop(flow.id, None)
             flow.step = await self._do_remove(flow, value)
+            return flow
+        if flow.stage == "recipe":
+            self.flows.pop(flow.id, None)
+            flow.step = await self._recipe_step(flow, value)
+            if not flow.step.done:
+                self.flows[flow.id] = flow
             return flow
         if flow.stage == "qprof":
             self.flows.pop(flow.id, None)
@@ -823,6 +942,7 @@ class ToolRunner:
         radarr: Radarr = self._need(self.radarr, "Radarr")
         if quality_profile:
             quality_profile = (await radarr.resolve_profile(quality_profile))["name"]
+            await self._check_cap("movie", chat_id, quality_profile)
         cand = await self._candidate(chat_id, "movie", int(tmdb_id))
         if cand.lib_id:
             raise ArrError(f"'{cand.label}' ist schon in Radarr (lib_id {cand.lib_id}, Datei: {cand.has_file}).")
@@ -839,6 +959,7 @@ class ToolRunner:
         sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
         if quality_profile:
             quality_profile = (await sonarr.resolve_profile(quality_profile))["name"]
+            await self._check_cap("series", chat_id, quality_profile)
         cand = await self._candidate(chat_id, "series", int(tvdb_id))
         if cand.lib_id:
             if seasons:
@@ -916,12 +1037,8 @@ class ToolRunner:
         service = "radarr" if kind == "movie" else "sonarr"
         key = f"{service}:{item['id']}"
         title = f"{item.get('title')} ({item.get('year')})" if kind == "movie" and item.get("year") else item.get("title", "?")
-        if not self.is_admin(chat_id):
-            owners = self.store.owners(kind, item.get("tmdbId") if kind == "movie" else item.get("tvdbId"), key)
-            if chat_id not in owners:
-                raise ArrError(f"{title} hast du nicht angefragt – das kann nur der Admin ändern.")
-            if delete and owners - {chat_id}:
-                raise ArrError(f"{title} haben auch andere angefragt – löschen kann nur der Admin.")
+        if not self._admin(chat_id):
+            raise ArrError(f"{title} ändern oder löschen kann nur der Admin.")
         return item, key, title
 
     async def start_remove(self, chat_id: int, kind: str, lib_id: int) -> Flow:
@@ -1003,7 +1120,7 @@ class ToolRunner:
         return Final(await self.resume(chat_id, kind, int(lib_id)))
 
     async def _t_list_quality_profiles(self, chat_id: int, kind: str) -> list[str]:
-        return [p["name"] for p in await self._svc(kind).quality_profiles()]
+        return [p["name"] for p in await self.allowed_profiles(kind, chat_id)]
 
     async def _t_download_status(self, chat_id: int, finished: bool = False, title: str | None = None) -> Final:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "downloads", bool(finished), title or None))
@@ -1072,6 +1189,13 @@ class ToolRunner:
             german.confirmed.add(kind, arr_id)
             return Step(f"👍 Gemerkt: {title} ist Deutsch, nur die Tonspur ist falsch markiert. "
                         "Ich melde das nicht mehr.", done=True)
+        if value == "more" and flow.stage == "gfix":
+            try:
+                await manage.search_more(self._need(self.sonarr, "Sonarr"), plan)
+            except ArrError as e:
+                return Step(f"❌ Suche hat nicht geklappt: {e}", done=True)
+            text, buttons = manage.render_plan(plan)
+            return Step(text, buttons) if buttons else Step(text, done=True)
         if value not in ("all", "missing", "research", "drop"):
             return Step(f"👍 Okay, bei {title} bleibt alles, wie es ist.", done=True)
         if flow.stage == "mfix":
@@ -1130,6 +1254,100 @@ class ToolRunner:
     async def _t_admin_media(self, chat_id: int, section: str = "overview", days: int | None = None) -> Final:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "media", arg=(section, days)))
         return Final("")
+
+    async def _t_suggest_together(self, chat_id: int, with_user: str, kind: str | None = None) -> Final:
+        if self.profiles is None or self.users is None:
+            raise ArrError("Gemeinsame Vorschläge brauchen Nutzerprofile.")
+        other = self.users.find(with_user)
+        if other is None or not self.users.is_allowed(other):
+            raise ArrError(f"„{with_user}“ kenne ich nicht – der Name muss so heißen wie in der Nutzerliste.")
+        if other == chat_id:
+            raise ArrError("Das bist du selbst. 🙂 Mit wem willst du schauen?")
+        a, b = self.profiles.profile(chat_id), self.profiles.profile(other)
+        kinds = [kind] if kind else ["movie", "series"]
+
+        here: list[together.Pick] = []
+        acc_a = self.plex_store.get(chat_id) if self.plex_store else None
+        acc_b = self.plex_store.get(other) if self.plex_store else None
+        if self.plex and (acc_a or acc_b):
+            try:
+                main, extra = (acc_a, acc_b) if acc_a else (acc_b, None)
+                items_main = await self.plex.library(main)
+                items_extra = await self.plex.library(extra) if extra else None
+                here = [p for p in together.from_library(items_main, items_extra, a, b) if p.kind in kinds][:6]
+            except plex.PlexError as e:
+                log.info("Plex für gemeinsame Vorschläge: %s", e)
+
+        cands: list[Candidate] = []
+        if self.tmdb:
+            owned = await self._library_ids([k for k in kinds if (self.radarr if k == "movie" else self.sonarr)])
+            seeds = [s for s in self.profiles.recent(chat_id, 5) + self.profiles.recent(other, 5)
+                     if s.get("tmdb") and s.get("kind") in kinds]
+            pool: dict[tuple[str, int], tuple[float, Any]] = {}
+            results = await asyncio.gather(*(self.tmdb.recommendations(s["kind"], s["tmdb"]) for s in seeds),
+                                           return_exceptions=True)
+            for s, res in zip(seeds, results):
+                if isinstance(res, BaseException):
+                    continue
+                for rank, r in enumerate(res[:20]):
+                    key = (s["kind"], r.tmdb_id)
+                    if key in owned["tmdb"] or together.excluded(a, b, *key):
+                        continue
+                    score = together.fit(a, b, r.genres, r.rating)
+                    if score is None:
+                        continue
+                    old = pool.get(key, (0.0, r))[0]
+                    pool[key] = (old + score + (20 - rank) / 40, r)  # recommended for both: adds up
+            best = sorted(pool.items(), key=lambda kv: -kv[1][0])[:5]
+            for (k, tid), (_, r) in best:
+                if k == "movie":
+                    cands.append(Candidate("movie", r.tmdb_id, r.title, r.year, rating=r.rating, tmdb_id=r.tmdb_id,
+                                           genres=r.genres))
+                else:
+                    tvdb = await self.tmdb.tvdb_from_tv(r.tmdb_id)
+                    if tvdb:
+                        cands.append(Candidate("series", tvdb, r.title, r.year, rating=r.rating, tmdb_id=r.tmdb_id,
+                                               genres=r.genres))
+        text = together.render(self.users.name(chat_id), self.users.name(other), here, len(cands))
+        if cands:
+            self._offer(chat_id, cands, "➕ Neu für euch:", suggest=True)
+        return Final(text)
+
+    async def _t_wishlist(self, chat_id: int, action: str, kind: str | None = None, id: int | None = None,  # noqa: A002
+                          wish_id: int | None = None) -> Final:
+        if self.wishes is None:
+            raise ArrError("Die Wunschliste ist nicht eingerichtet.")
+        if action == "remove":
+            if wish_id is None or not self.wishes.remove(int(wish_id), chat_id):
+                raise ArrError(f"Wunsch {wish_id} gibt es nicht.")
+            return Final(f"🗑 Wunsch {wish_id} gestrichen.")
+        if action != "add":
+            return Final(wishlist.render(self.wishes.wishes(chat_id)))
+        if kind not in ("movie", "series") or not id:
+            raise ArrError("Erst den Titel suchen, dann mit seiner ID vormerken.")
+        svc = self._need(self.radarr if kind == "movie" else self.sonarr, "Radarr" if kind == "movie" else "Sonarr")
+        item = await (svc.lookup_tmdb(int(id)) if kind == "movie" else svc.lookup_tvdb(int(id)))
+        title = item.get("title") or "?"
+        name = f"{title} ({item['year']})" if item.get("year") else title
+        if item.get("id"):
+            return Final(f"👍 {name} ist schon da.")
+        when, what = wishlist.release_date(kind, item)
+        if when and when <= date.today():
+            cand = await self._candidate(chat_id, kind, int(id))
+            self._offer(chat_id, [cand], f"📅 {name} ist schon erschienen ({what} {when:%d.%m.%Y}). Gleich laden?")
+            return Final("")
+        if when:  # there is a date already: add it now, it loads on its own once released
+            flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate(kind, int(id), title, item.get("year")), monitor="all")
+            try:
+                await self._add(flow)
+            except Held:
+                return Final(f"📅 {name} kommt am {when:%d.%m.%Y} ({what}). Der Wunsch wartet auf die Freigabe.")
+            return Final(f"📅 {name} hat schon einen Termin ({what} {when:%d.%m.%Y}). Ich habe es angelegt – "
+                         "es lädt von selbst, sobald es verfügbar ist.")
+        if not self.wishes.add(chat_id, kind, int(id), name):
+            return Final(f"📌 {name} steht schon auf deiner Wunschliste.")
+        return Final(f"📌 {name} ist gemerkt. Noch gibt es keinen Termin – sobald es einen gibt, lege ich es an "
+                     "und sage dir Bescheid.")
 
     async def _t_watch_site(self, chat_id: int, action: str, url: str | None = None, kind: str = "all",
                             site_id: int | None = None) -> Final:
@@ -1194,6 +1412,55 @@ class ToolRunner:
                         suggest=True)
         return usage
 
+    def plex_admin(self) -> plex.Account | None:
+        """The Plex account of an admin (collections need the server owner)."""
+        if not self.plex_store or self.users is None:
+            return None
+        return next((a for a in self.plex_store.all() if self.is_admin(a.user_id)), None)
+
+    async def _t_admin_plex_collection(self, chat_id: int, action: str, name: str | None = None,
+                                       titles: list[dict] | None = None) -> Final:
+        acc = self.plex_admin()
+        if not (self.plex and acc):
+            raise ArrError("Dafür muss ein Admin sein Plex verbinden (/plex) – Sammlungen legt der Server-Besitzer an.")
+        if action in ("auto_on", "auto_off"):
+            self.plex_store.set_meta("auto_collections", "1" if action == "auto_on" else None)  # type: ignore[union-attr]
+            if action == "auto_off":
+                return Final("📚 Keine automatischen Wunsch-Sammlungen mehr (die vorhandenen bleiben in Plex).")
+            done = await self.sync_wish_collections()
+            return Final("📚 Ab jetzt hat jeder eine Sammlung „Wünsche von …“ in Plex, täglich aktualisiert."
+                         + (f"\n{done}" if done else ""))
+        if not name or not titles:
+            raise ArrError("Für eine Sammlung brauche ich einen Namen und die Titel.")
+        try:
+            library = await self.plex.library(acc)
+            items, missing = collections_plex.match(library, titles)
+            if not items:
+                return Final(f"📚 Von den {len(titles)} Titeln für „{name}“ ist keiner in Plex.")
+            res = await collections_plex.Collections(self.plex).put(acc, name.strip()[:60], items, missing)
+        except plex.PlexError as e:
+            raise ArrError(str(e)) from e
+        return Final(res.text())
+
+    async def sync_wish_collections(self) -> str:
+        """'Wünsche von <Name>' for every user with requests that are in Plex (daily when switched on)."""
+        acc = self.plex_admin()
+        if not (self.plex and acc and self.users is not None):
+            return ""
+        library = await self.plex.library(acc)
+        coll = collections_plex.Collections(self.plex)
+        lines = []
+        for uid in sorted({r["chat_id"] for r in self.store.state.requests}):
+            if not self.users.is_allowed(uid):
+                continue
+            items = collections_plex.wish_items(self.store.state.requests, uid, library)
+            if not items:
+                continue
+            res = await coll.put(acc, f"Wünsche von {self.users.name(uid)}", items)
+            if res.added:
+                lines.append(f"„Wünsche von {self.users.name(uid)}“: +{len(res.added)}")
+        return "\n".join(lines)
+
     async def _t_admin_approval(self, chat_id: int, action: str, user: str | None = None, kind: str = "all",
                                 genres: list[str] | None = None, min_gb: float | None = None,
                                 rule_id: int | None = None) -> Final:
@@ -1254,6 +1521,143 @@ class ToolRunner:
     async def _t_admin_set_limit(self, chat_id: int, who: str, kind: str, value: str | float | None = None) -> Final:
         try:
             return Final(self.users.apply_limit(who, kind, value))
+        except ValueError as e:
+            raise ArrError(str(e)) from e
+
+    # ---- recipes: tools the bot builds for itself (admins) -------------------------------------
+    @staticmethod
+    def _recipe_cost_text(cost: float | None, tokens: int) -> str:
+        money = f" ≈ {cost * 100:.2f} ct".replace(".", ",") if cost is not None else ""
+        return f"{tokens:,} Tokens".replace(",", ".") + money
+
+    async def _t_build_tool(self, chat_id: int, request: str) -> Final:
+        if self.recipes is None or self.builder is None:
+            raise ArrError("Werkzeuge bauen ist nicht eingerichtet.")
+        inp, out = recipes.estimate(request)
+        cost = self.builder_cost({"input": inp, "output": out})
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Werkzeug", None), stage="recipe",
+                    data={"request": request})
+        money = f" ≈ {cost * 100:.1f} ct".replace(".", ",") if cost is not None else ""
+        tokens = f"{inp + out:,}".replace(",", ".")
+        flow.step = Step(
+            f"🛠 Dafür habe ich noch kein Werkzeug:\n„{request}“\n\n"
+            f"Ich kann mir eins bauen lassen ({self.builder_model}): etwa {tokens} Tokens{money}, "
+            "mit Korrekturversuch bis doppelt so viel. Danach kostet jede Nutzung nur die normale Frage.\n"
+            "Das Werkzeug kann nur lesen (TMDB, Radarr, Sonarr). Du siehst einen Probelauf und entscheidest, "
+            "ob es bleibt.",
+            [(f"🛠 Bauen{money}", "build"), ("Abbrechen", "no")])
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
+    def _recipe_clients(self) -> dict:
+        return {k: v for k, v in (("tmdb", self.tmdb), ("radarr", self.radarr), ("sonarr", self.sonarr)) if v}
+
+    async def _recipe_step(self, flow: Flow, value: str) -> Step:
+        d = flow.data
+        if value == "keep" and d.get("recipe"):
+            r = d["recipe"]
+            r.created, r.tokens, r.cost = utcnow().isoformat(), d["tokens"], d["cost"] or 0.0
+            self.recipes.save(r)  # type: ignore[union-attr]
+            return Step(f"✅ Werkzeug „{r.title}“ gespeichert. Frag einfach wieder so, dann nehme ich es. "
+                        "/rezepte zeigt alle.", done=True)
+        if value != "build" or d.get("recipe"):
+            return Step("👍 Okay, kein neues Werkzeug.", done=True)
+        usage = {"input": 0, "cached": 0, "output": 0}
+        error, raw, recipe, outcome = None, None, None, None
+        for _ in range(2):  # one try to correct itself
+            try:
+                recipe, example, u = await recipes.build(self.builder, d["request"], error, raw)
+                for k in usage:
+                    usage[k] += u.get(k, 0) or 0
+                raw = asdict(recipe)
+                outcome = await recipes.run(recipe, example, self._recipe_clients())
+                if outcome.lines:
+                    break
+                error = "Der Probelauf hat nichts gefunden – Filter, Pfad oder items prüfen."
+            except recipes.RecipeError as e:
+                for k in usage:
+                    usage[k] += (getattr(e, "usage", None) or {}).get(k, 0) or 0
+                raw = getattr(e, "raw", raw)
+                error, recipe, outcome = str(e), None, None
+            except (ArrError, TmdbError) as e:
+                error, outcome = f"Abfrage fehlgeschlagen: {e}", None
+            except Exception as e:  # noqa: BLE001 - the model gave something odd
+                log.exception("Rezept bauen")
+                error, outcome = f"{type(e).__name__}: {e}", None
+        tokens = usage["input"] + usage["output"]
+        cost = self.builder_cost(usage)
+        if self.on_llm_usage and tokens:
+            self.on_llm_usage(flow.chat_id, usage, cost)
+        spent = self._recipe_cost_text(cost, tokens)
+        if recipe is None or outcome is None or not outcome.lines:
+            return Step(f"❌ Das Werkzeug hat nicht geklappt: {error}\n💰 Verbraucht: {spent}", done=True)
+        d.update(recipe=recipe, tokens=tokens, cost=cost)
+        preview = "\n".join(outcome.lines[:8]) + ("\n…" if len(outcome.lines) > 8 else "")
+        params = ", ".join(recipe.params) or "keine"
+        return Step(f"🛠 Neues Werkzeug: {recipe.title}\n{recipe.description}\nEinstellbar: {params}\n\n"
+                    f"Probelauf:\n{outcome.heading}\n{preview}\n\n💰 Bau: {spent}",
+                    [("✅ Behalten", "keep"), ("🗑 Verwerfen", "no")])
+
+    async def run_recipe(self, chat_id: int, name: str, args: dict) -> Final:
+        r = self.recipes.get(name) if self.recipes else None
+        if r is None:
+            raise ArrError("Dieses Werkzeug gibt es nicht mehr.")
+        try:
+            out = await recipes.run(r, args, self._recipe_clients())
+        except recipes.RecipeError as e:
+            raise ArrError(str(e)) from e
+        r.uses += 1
+        self.recipes.save(r)  # type: ignore[union-attr]
+        if not out.lines:
+            return Final(f"{out.heading}\n🤷 Nichts gefunden.")
+        text = "\n".join([out.heading, *[f"{i}. {ln}" for i, ln in enumerate(out.lines, 1)]])
+        cands = await self._recipe_cands(r, out.items) if r.offer else []
+        if cands:
+            self._offer(chat_id, cands, text + "\n\nTippe einen Titel an, um ihn hinzuzufügen.", bulk=True)
+            return Final("")
+        return Final(text)
+
+    async def _recipe_cands(self, r: recipes.Recipe, items: list) -> list[Candidate]:
+        svc = self.radarr if r.offer == "movie" else self.sonarr
+        owned = await self._library_ids([r.offer]) if svc else None
+        out = []
+        for i in items:
+            tid = recipes.dig(i, r.id_field)
+            if not isinstance(tid, int):
+                continue
+            title = recipes.dig(i, "title") or recipes.dig(i, "name") or "?"
+            day = str(recipes.dig(i, "release_date") or recipes.dig(i, "first_air_date") or "")
+            year = int(day[:4]) if day[:4].isdigit() else None
+            if r.offer == "movie":
+                if owned and ("movie", tid) in owned["library"]:
+                    continue
+                out.append(Candidate("movie", tid, title, year, tmdb_id=tid))
+            elif self.tmdb:
+                try:
+                    tvdb = await self.tmdb.tvdb_from_tv(tid)
+                except TmdbError:
+                    continue
+                if tvdb and not (owned and tvdb in owned["tvdb"]):
+                    out.append(Candidate("series", tvdb, title, year, tmdb_id=tid))
+        return out
+
+    async def _t_admin_recipes(self, chat_id: int, action: str = "list", name: str | None = None) -> Final:
+        if self.recipes is None:
+            raise ArrError("Werkzeuge bauen ist nicht eingerichtet.")
+        if action == "delete":
+            want = (name or "").lower().removeprefix("recipe_")
+            r = next((x for x in self.recipes.all() if want in (x.name, x.title.lower())), None)
+            if r is None or not self.recipes.remove(r.name):
+                raise ArrError(f"Werkzeug „{name}“ gibt es nicht.")
+            return Final(f"🗑 Werkzeug „{r.title}“ gelöscht.")
+        lines = [f"• {r.title} ({r.tool}) – {r.uses}× benutzt" for r in self.recipes.all()]
+        return Final("🛠 Selbstgebaute Werkzeuge:\n" + "\n".join(lines) if lines
+                     else "🛠 Noch keine selbstgebauten Werkzeuge.")
+
+    async def _t_admin_max_quality(self, chat_id: int, who: str, quality: str) -> Final:
+        try:
+            return Final(self.users.apply_quality(who, quality))
         except ValueError as e:
             raise ArrError(str(e)) from e
 
@@ -1516,22 +1920,29 @@ class ToolRunner:
         return len(self.store.state.requests)
 
     async def _t_top_titles(
-        self, chat_id: int, kind: str, year: int, month: int | None = None, count: int = 5,
-        sort: str = "popular", download: bool = False,
+        self, chat_id: int, kind: str, year: int | None = None, month: int | None = None, count: int = 5,
+        sort: str = "popular", download: bool = False, studio: str | None = None,
     ) -> Final:
         if not self.tmdb:
             return Final(NO_TMDB)
         self._svc(kind)
         count = max(1, min(int(count or 5), MAX_TOP))
-        year = int(year)
-        if month:
-            month = int(month)
+        start: date | None = None
+        end: date | None = None
+        period = ""
+        if year and month:
+            year, month = int(year), int(month)
             start = date(year, month, 1)
             end = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
             period = f"{MONTHS[month - 1]} {year}"
-        else:
-            start, end, period = date(year, 1, 1), date(year, 12, 31), str(year)
-        recs = await self.tmdb.top(kind, start, end, sort)
+        elif year:
+            start, end, period = date(int(year), 1, 1), date(int(year), 12, 31), str(year)
+        companies = None
+        if studio:
+            companies = await self.tmdb.companies(studio)
+            if not companies:
+                return Final(f"🤷 Ein Studio „{studio}“ kenne ich bei TMDB nicht.")
+        recs = await self.tmdb.top(kind, start, end, sort, companies)
         owned = await self._library_ids([kind])
 
         cands: list[tuple[Candidate, bool]] = []
@@ -1552,11 +1963,12 @@ class ToolRunner:
             self._remember(chat_id, c)
             cands.append((c, have))
         if not cands:
-            return Final(f"🤷 Für {period} habe ich bei TMDB keine Daten gefunden.")
+            return Final(f"🤷 Für {period or studio or 'diese Suche'} habe ich bei TMDB keine Daten gefunden.")
 
         what = "Filme" if kind == "movie" else "Serien"
         how = {"rating": "bestbewertet", "revenue": "nach Einspielergebnis"}.get(sort, "meistgesehen")
-        head = f"🏆 Top {len(cands)} {what} {period} ({how}):"
+        label = f"{studio}-{what}" if studio else what
+        head = f"🏆 Top {len(cands)} {label}{' ' + period if period else ''} ({how}):"
         if not download:
             lines = [f"{i}. {c.title}" + (f" ({c.year})" if c.year else "")
                      + (f" ⭐ {c.rating:.1f}".replace(".", ",") if c.rating else "") + (" ✅ schon da" if have else "")

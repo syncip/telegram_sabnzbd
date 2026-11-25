@@ -152,3 +152,16 @@ def test_status_of_one_title(tmp_path):
     assert "Naked Gun" not in text
     text = downloads.render(snap, 5, False, str, ZoneInfo("Europe/Berlin"), now=now, query="Simpsons")
     assert "Zu „Simpsons“ läuft gerade nichts" in text
+
+
+def test_german_search_goes_on_where_time_ran_out():
+    lib = SeriesLib()
+    plan = manage.FixPlan(4, "Show", missing=[{"id": n, "seasonNumber": n, "episodeNumber": 1} for n in (1, 2, 3)],
+                          skipped_seasons=[1, 2, 3])
+    asyncio.run(manage.search_more(sonarr(lib), plan, budget=-1))  # no time: nothing searched, nothing lost
+    assert plan.skipped_seasons == [1, 2, 3] and not plan.grabs
+    text, buttons = manage.render_plan(plan)
+    assert "noch nicht durchsucht" in text and ("🔎 Weiter suchen (3 Staffeln)", "more") in buttons
+    asyncio.run(manage.search_more(sonarr(lib), plan))
+    assert plan.skipped_seasons == [] and len(plan.grabs) == 3
+    assert all(b[1] != "more" for b in manage.render_plan(plan)[1])
