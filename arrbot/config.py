@@ -1,4 +1,4 @@
-"""Configuration loaded from environment variables (see .env.example)."""
+"""Configuration loaded from environment variables."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def _env(name: str, default: str | None = None, required: bool = False) -> str |
     if value is not None:
         value = value.strip()
     if required and not value:
-        raise SystemExit(f"Umgebungsvariable {name} fehlt (siehe .env.example).")
+        raise SystemExit(f"Umgebungsvariable {name} fehlt (in docker-compose.yml unter environment eintragen).")
     return value or None
 
 

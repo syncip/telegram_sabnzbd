@@ -1,13 +1,61 @@
+# Alle Einstellungen stehen hier direkt. Leere Werte ("") = Standard bzw. nicht genutzt.
+# ACHTUNG: Nach dem Eintragen der Keys diese Datei nicht mehr committen/pushen.
+
 services:
   arrbot:
     build: .
     container_name: arrbot
     restart: unless-stopped
-    env_file: .env
     volumes:
       - ./data:/data
-    # If Radarr/Sonarr run in the same compose project or Docker network, join it
-    # and use their service names in RADARR_URL / SONARR_URL (e.g. http://radarr:7878).
+    environment:
+      # --- Telegram ---------------------------------------------------------
+      # Token von @BotFather
+      TELEGRAM_BOT_TOKEN: ""
+      # Wer den Bot benutzen darf, kommagetrennt (z. B. "12345,67890").
+      # Deine ID: dem Bot schreiben, er antwortet mit "Kein Zugriff. Deine Telegram-ID ist ..."
+      ALLOWED_USER_IDS: ""
+
+      # --- Sprach-KI ---------------------------------------------------------
+      # gemini | anthropic | openai  (openai = alles OpenAI-kompatible: OpenAI, OpenRouter, Groq, Ollama ...)
+      LLM_PROVIDER: "gemini"
+      # Key des gewählten Anbieters. Gemini: https://aistudio.google.com/apikey
+      LLM_API_KEY: ""
+      # Leer = Standard: gemini-flash-latest / claude-opus-5-5 / gpt-4o-mini
+      LLM_MODEL: ""
+      # Nur für OpenAI-kompatible Server, z. B. http://ollama:11434/v1 oder https://openrouter.ai/api/v1
+      LLM_BASE_URL: ""
+
+      # --- Radarr (leer lassen, wenn nicht genutzt) ---------------------------
+      RADARR_URL: "http://radarr:7878"
+      # Radarr -> Settings -> General -> API Key
+      RADARR_API_KEY: ""
+      # Leer = erster Root-Ordner / erstes Qualitätsprofil in Radarr
+      RADARR_ROOT_FOLDER: ""
+      RADARR_QUALITY_PROFILE: ""
+      # announced | inCinemas | released
+      RADARR_MINIMUM_AVAILABILITY: "released"
+
+      # --- Sonarr (leer lassen, wenn nicht genutzt) ---------------------------
+      SONARR_URL: "http://sonarr:8989"
+      SONARR_API_KEY: ""
+      SONARR_ROOT_FOLDER: ""
+      SONARR_QUALITY_PROFILE: ""
+
+      # --- Verhalten ----------------------------------------------------------
+      # Wie oft Radarr/Sonarr nach neuen Ereignissen gefragt werden (Sekunden)
+      POLL_INTERVAL_SECONDS: "60"
+      # Nach so vielen Minuten ohne gefundenen Download einmal Bescheid geben
+      NO_RELEASE_NOTICE_MINUTES: "30"
+      # So lange werden Serien nach der letzten Aktivität weiter beobachtet (Tage)
+      TRACK_DAYS: "30"
+      # Nach so vielen Minuten Pause beginnt ein neues Gespräch
+      CONVERSATION_IDLE_MINUTES: "30"
+      LOG_LEVEL: "INFO"
+
+    # Laufen Radarr/Sonarr in einem anderen Compose-Projekt, das gemeinsame Netzwerk
+    # hier eintragen und oben die Containernamen als URL nutzen (http://radarr:7878).
+    # Sonst die LAN-IP des Servers verwenden, z. B. http://192.168.1.10:7878.
     # networks:
     #   - media
 

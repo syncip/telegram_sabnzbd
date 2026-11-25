@@ -18,11 +18,9 @@ oder alles **OpenAI-kompatible** (OpenAI, OpenRouter, Groq, lokal mit Ollama/LM 
 1. **Bot anlegen:** In Telegram `@BotFather` → `/newbot` → Token kopieren.
 2. **Gemini-Key:** <https://aistudio.google.com/apikey> → „Create API key“.
 3. **Radarr/Sonarr-Keys:** jeweils *Settings → General → API Key*.
-4. Konfiguration anlegen:
-   ```bash
-   cp .env.example .env
-   ```
-   `TELEGRAM_BOT_TOKEN`, `LLM_API_KEY`, `RADARR_*`, `SONARR_*` und `ALLOWED_USER_IDS` ausfüllen.
+4. In `docker-compose.yml` unter `environment:` die Werte eintragen: `TELEGRAM_BOT_TOKEN`, `LLM_API_KEY`,
+   `RADARR_*`, `SONARR_*` und `ALLOWED_USER_IDS`. Jede Einstellung ist dort kommentiert.
+   **Danach die Datei nicht mehr committen**, sonst landen die Keys im Repo.
    Deine Telegram-ID kennst du nicht? Lass `ALLOWED_USER_IDS` erstmal auf einer beliebigen Zahl, starte den
    Bot und schreib ihm – er antwortet mit „Kein Zugriff. Deine Telegram-ID ist …“.
 5. Starten:
@@ -38,13 +36,15 @@ per Polling und fragt Radarr/Sonarr regelmäßig nach neuen Ereignissen.
 
 ## Anbieter wechseln
 
-| Anbieter | `.env` |
+In `docker-compose.yml` unter `environment:` setzen, danach `docker compose up -d`:
+
+| Anbieter | Einstellungen |
 |---|---|
-| Gemini (Standard) | `LLM_PROVIDER=gemini`, `LLM_API_KEY=…` (Modell-Standard `gemini-flash-latest`) |
-| Claude | `LLM_PROVIDER=anthropic`, `LLM_API_KEY=sk-ant-…` (Standard `claude-opus-5-5`) |
-| OpenAI | `LLM_PROVIDER=openai`, `LLM_API_KEY=sk-…`, z. B. `LLM_MODEL=gpt-4o-mini` |
-| OpenRouter | `LLM_PROVIDER=openai`, `LLM_BASE_URL=https://openrouter.ai/api/v1`, `LLM_MODEL=…` |
-| Ollama lokal | `LLM_PROVIDER=openai`, `LLM_BASE_URL=http://ollama:11434/v1`, `LLM_MODEL=qwen2.5:14b` |
+| Gemini (Standard) | `LLM_PROVIDER: "gemini"`, `LLM_API_KEY: "…"` (Modell-Standard `gemini-flash-latest`) |
+| Claude | `LLM_PROVIDER: "anthropic"`, `LLM_API_KEY: "sk-ant-…"` (Standard `claude-opus-5-5`) |
+| OpenAI | `LLM_PROVIDER: "openai"`, `LLM_API_KEY: "sk-…"`, z. B. `LLM_MODEL: "gpt-4o-mini"` |
+| OpenRouter | `LLM_PROVIDER: "openai"`, `LLM_BASE_URL: "https://openrouter.ai/api/v1"`, `LLM_MODEL: "…"` |
+| Ollama lokal | `LLM_PROVIDER: "openai"`, `LLM_BASE_URL: "http://ollama:11434/v1"`, `LLM_MODEL: "qwen2.5:14b"` |
 
 Lokale Modelle müssen Tool-Calling können; kleine Modelle (< 7B) verhaspeln sich oft dabei.
 
