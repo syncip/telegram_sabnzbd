@@ -266,8 +266,9 @@ Gemessen mit `gpt-4o-mini`: Eine typische Anfrage („lad mir Dune 2“) braucht
 etwa 3.200 Tokens rein und 60 raus. Mit dem Standard **`gpt-6-luna`** ($0,10 rein, $0,01 zwischengespeichert,
 $0,50 raus pro 1 Mio. Tokens) sind das **etwa 0,02–0,035 Cent**, bei 5 Anfragen am Tag **rund 0,04–0,05 $
 im Monat** – ein Drittel bis die Hälfte weniger als mit `gpt-4o-mini`. Mit `/limit gesamt kosten 1` bleibt
-der Bot sicher unter 1 $. Das Nachdenken steht auf `low` (`LLM_REASONING`); das reicht zum Auswählen der
-Werkzeuge und hält die Denk-Tokens klein.
+der Bot sicher unter 1 $. Das Nachdenken steht auf `none` (`LLM_REASONING`): `gpt-6-luna` kann Werkzeuge über
+die Chat-Schnittstelle nur ohne Denk-Stufe nutzen. Lehnt ein Modell die eingestellte Stufe ab, schaltet der Bot
+von selbst auf `none` bzw. ohne um.
 
 Warum so wenig:
 

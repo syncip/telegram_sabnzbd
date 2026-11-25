@@ -14,9 +14,10 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 CHANGES = {
+    "1.9.1": "Fix: KI-Fehler 400 mit gpt-6-luna (Werkzeuge nur ohne Denk-Stufe) – Standard jetzt „none“, bei Ablehnung schaltet der Bot selbst um",
     "1.9.0": "/admin-Übersicht mit Buttons, Nutzerkarte (ℹ️ in /nutzer, „Zeig mir Anna“), Version und KI-Modell "
              "per /version oder Frage („Welches Modell nutzt du?“), Modelle mit Preis und Abschalt-Warnung in "
              "/check; Deutsch-Prüfung: „Melden, sobald es Deutsch gibt“ und „Sonarr neu einlesen“ statt Sackgasse; "

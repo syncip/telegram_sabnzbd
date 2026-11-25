@@ -75,7 +75,9 @@ class Config:
 
 
 RECIPE_MODELS = {"openai": "gpt-6.1-terra"}  # others: the configured model
-REASONING_DEFAULT = {"openai": "low"}  # think a little: enough for picking tools, cheap
+# Chat: gpt-6-luna takes tools in Chat Completions only without thinking ("none"); recipes think a little.
+REASONING_DEFAULT = {"openai": "none"}
+RECIPE_REASONING_DEFAULT = {"openai": "low"}
 DEFAULT_MODELS = {
     "gemini": "gemini-flash-latest",
     "anthropic": "claude-opus-5-5",
@@ -158,7 +160,7 @@ def load_config() -> Config:
         update_repo=_env("UPDATE_REPO", "syncip/telegram_sabnzbd") or "",  # type: ignore[arg-type]
         update_token=_env("UPDATE_TOKEN"),
         spam_check=(_env("SPAM_CHECK", "1") or "1").lower() not in ("0", "false", "nein", "aus", "off"),
-        recipe_reasoning=(_env("RECIPE_REASONING") or REASONING_DEFAULT.get(llm.provider, "")).lower(),
+        recipe_reasoning=(_env("RECIPE_REASONING") or RECIPE_REASONING_DEFAULT.get(llm.provider, "")).lower(),
         recipe_model=_env("RECIPE_MODEL") or RECIPE_MODELS.get(llm.provider, llm.model),
         llm=llm,
         radarr=radarr,

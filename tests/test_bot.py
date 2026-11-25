@@ -387,6 +387,38 @@ def test_openai_reasoning_setting_falls_back_for_older_models():
     assert turn.tool_calls[0].name == "ping" and turn.usage["input"] == 50
     assert sent[0]["reasoning_effort"] == "low"
     assert sent[0]["max_completion_tokens"] == MAX_OUTPUT_TOKENS + REASONING_EXTRA_TOKENS
-    assert "reasoning_effort" not in sent[1] and sent[1]["max_completion_tokens"] == MAX_OUTPUT_TOKENS
+    assert sent[1]["reasoning_effort"] == "none" and sent[1]["max_completion_tokens"] == MAX_OUTPUT_TOKENS
+    assert "reasoning_effort" not in sent[2]
     asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping]))
-    assert len(sent) == 3 and "reasoning_effort" not in sent[2]  # remembered: no second failed try
+    assert len(sent) == 4 and "reasoning_effort" not in sent[3]  # remembered: no second failed try
+
+
+def test_openai_thinking_model_with_tools_gets_reasoning_none():
+    """gpt-6-luna: tools in Chat Completions only with reasoning_effort "none" (leaving it out = thinks)."""
+    import openai
+
+    from arrbot.llm import ToolSpec, Turn
+
+    sent = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        sent.append(body)
+        if body.get("reasoning_effort") != "none":
+            return httpx.Response(400, json={"error": {
+                "message": "Function tools with reasoning_effort are not supported for gpt-6-luna in "
+                           "/v1/chat/completions. To use function tools, use /v1/responses or set "
+                           "reasoning_effort to 'none'.", "type": "invalid_request_error"}})
+        return httpx.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55}})
+
+    o = OpenAICompatProvider(LLMConfig("openai", "gpt-6-luna", "k", reasoning="low"))
+    o.client = openai.AsyncOpenAI(api_key="k", max_retries=0,
+                                  http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    ping = ToolSpec("ping", "x", {"type": "object", "properties": {}})
+    assert asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping])).text == "ok"
+    assert [b.get("reasoning_effort") for b in sent] == ["low", "none"]
+    asyncio.run(o.complete("s", [Turn("user", text="hi")], [ping]))
+    assert sent[2]["reasoning_effort"] == "none"  # remembered

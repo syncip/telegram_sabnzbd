@@ -300,7 +300,8 @@ class OpenAICompatProvider(LLMProvider):
 
         self.model = cfg.model
         self.reasoning = (cfg.reasoning or "").lower()  # reasoning_effort for thinking models; "" = model default
-        self.reasoning_ok = True  # turned off when the model does not know the setting
+        self.reasoning_ok = True  # turned off when the model does not take the setting
+        self.reasoning_fallback: str | None = None  # what works instead ("none" or None = leave out)
         self.max_output = cfg.max_output or MAX_OUTPUT_TOKENS
         self.client = openai.AsyncOpenAI(
             api_key=cfg.api_key or "not-needed", base_url=cfg.base_url, timeout=LLM_TIMEOUT_SECONDS, max_retries=1
@@ -352,19 +353,37 @@ class OpenAICompatProvider(LLMProvider):
         kwargs["max_completion_tokens"] = self.max_output + (REASONING_EXTRA_TOKENS if thinking else 0)
         if self.reasoning and self.reasoning_ok:
             kwargs["reasoning_effort"] = self.reasoning
+        elif self.reasoning_fallback:
+            kwargs["reasoning_effort"] = self.reasoning_fallback
         try:
             try:
                 resp = await self.client.chat.completions.create(**kwargs)
             except openai.BadRequestError as e:
-                if "reasoning_effort" not in kwargs or "reason" not in str(e.message).lower():
+                if not self.reasoning or "reason" not in str(e.message).lower():
                     raise
-                # Older models (gpt-4o-mini ...) or a level the model lacks: from now on without.
-                log.warning("%s kennt reasoning_effort=%s nicht (%s) – ab jetzt ohne", self.model, self.reasoning,
-                            e.message)
+                # The model does not take this level here: older models (gpt-4o-mini ...) know no
+                # reasoning_effort at all, newer ones (gpt-6-luna) think by default and allow tools in
+                # Chat Completions only with reasoning_effort "none". Try "none", then without.
+                log.warning("%s: reasoning_effort=%s geht nicht (%s) – ab jetzt ohne Denken", self.model,
+                            kwargs.get("reasoning_effort", "-"), e.message)
                 self.reasoning_ok = False
-                kwargs.pop("reasoning_effort")
                 kwargs["max_completion_tokens"] = self.max_output
-                resp = await self.client.chat.completions.create(**kwargs)
+                resp = None
+                for fallback in ("none", None):
+                    if fallback == kwargs.get("reasoning_effort"):
+                        continue
+                    if fallback:
+                        kwargs["reasoning_effort"] = fallback
+                    else:
+                        kwargs.pop("reasoning_effort", None)
+                    try:
+                        resp = await self.client.chat.completions.create(**kwargs)
+                    except openai.BadRequestError as e2:
+                        if fallback is None or "reason" not in str(e2.message).lower():
+                            raise
+                        continue
+                    self.reasoning_fallback = fallback
+                    break
         except openai.RateLimitError as e:
             raise LLMError("Ratenlimit des KI-Anbieters erreicht. Bitte gleich nochmal.") from e
         except openai.APIStatusError as e:
