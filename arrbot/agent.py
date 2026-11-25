@@ -32,10 +32,12 @@ SYSTEM_PROMPT = """Du steuerst Radarr (Filme) und Sonarr (Serien) einer privaten
 - quality_profile nur, wenn der Nutzer eine Qualität nennt (Namen per list_quality_profiles).
 - "Was soll ich schauen?"/Vorschläge: suggest (Wünsche zu Jahr/Bewertung als Parameter). Top/Charts/beste eines Jahres oder Monats: top_titles.
 - Deutsche Fassung, Synchro, deutscher Kinostart, Streaming: Titel suchen, dann german_info (zeigt die Antwort selbst).
-- "Folgen auf Deutsch vorhanden?/deutsch nachladen": german_fix. Folgen löschen ("nicht deutsch", Staffel, alle): \
+- "Folgen/Film wirklich auf Deutsch?/deutsch nachladen/falsche Sprache ersetzen": german_fix (prüft die Tonspur). Folgen löschen ("nicht deutsch", Staffel, alle): \
 clean_episodes. Status einer Suche/eines Titels: download_status mit title.
 - Dauerhafte Vorlieben ("merk dir", "ich mag keine Horrorfilme", "vergiss …"): remember. "Was weißt du über mich?": \
 my_profile. [Nutzerprofil] vor einer Nachricht nur beachten, nicht erwähnen.
+- "Sag mir, wenn X auf Deutsch kommt": Titel suchen, dann notify_german. Kalender/"was kommt": calendar. \
+Speicherplatz: disk_space (Admin: Aufräumen/Mediathek verwalten: admin_media; neues Qualitätsprofil: admin_quality_profile). Wochenrückblick: weekly_digest. Plex, gesehen, weiterschauen: plex_status.
 - Downloads/Status/"was läuft": download_status. Top/Charts/Listen nie mit search_* suchen.
 - Löschen: remove_title. "Später/in X Tagen nochmal suchen", "pausieren": pause_title (days); "weiter": \
 resume_title. lib_id vorher per Suche holen.

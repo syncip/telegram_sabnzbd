@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -116,6 +117,19 @@ class _ArrBase:
         await self._req("DELETE", f"{self._item_path}/{item_id}", params=params)
         log.info("%s: %s %s gelöscht (Dateien: %s)", self.kind, self._item_path, item_id, delete_files)
 
+    async def root_folders(self) -> list[dict]:
+        return await self._req("GET", "/rootfolder") or []
+
+    async def diskspace(self) -> list[dict]:
+        return await self._req("GET", "/diskspace") or []
+
+    async def calendar(self, start: Any, end: Any) -> list[dict]:
+        """Episodes (Sonarr, with series) or movies (Radarr) with a date between start and end."""
+        params = {"start": start.isoformat(), "end": end.isoformat(), "unmonitored": "false"}
+        if self._item_path == "/series":
+            params["includeSeries"] = "true"
+        return await self._req("GET", "/calendar", params=params) or []
+
     async def command(self, name: str, **body: Any) -> dict:
         return await self._req("POST", "/command", json={"name": name, **body})
 
@@ -160,6 +174,14 @@ class Radarr(_ArrBase):
             await self.search(created["id"])
         return created
 
+    async def grab(self, release: dict) -> None:
+        await self._req("POST", "/release", json={"guid": release["guid"], "indexerId": release["indexerId"]})
+        log.info("Radarr: Release geholt: %s", release.get("title"))
+
+    async def delete_movie_file(self, file_id: int) -> None:
+        await self._req("DELETE", f"/moviefile/{file_id}")
+        log.info("Radarr: Filmdatei %s gelöscht", file_id)
+
     async def search(self, movie_id: int) -> dict:
         cmd = await self.command("MoviesSearch", movieIds=[movie_id])
         log.info("Radarr: Suche für Film %s gestartet (Befehl %s)", movie_id, (cmd or {}).get("id"))
@@ -169,6 +191,58 @@ class Radarr(_ArrBase):
 class Sonarr(_ArrBase):
     kind = "Sonarr"
     _item_path = "/series"
+    READY_TRIES, READY_EVERY = 45, 2.0  # wait up to 90 s for Sonarr to load the episode list of a new series
+
+    def __init__(self, *a: Any, **kw: Any):
+        super().__init__(*a, **kw)
+        self._tasks: set[asyncio.Task] = set()
+
+    async def wait_pending(self) -> None:
+        """Tests: wait for background work after adding a series."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def _monitor_and_search(self, series_id: int, seasons: list[int], search: bool) -> None:
+        """Monitor the episodes of these seasons and search them.
+
+        Monitoring a season alone is not enough: Sonarr only searches *monitored episodes*. A new series
+        gets its episode list in a refresh after adding, and at the end of that refresh Sonarr applies the
+        monitoring chosen when adding ("none") – which would undo ours. So wait until the refresh is done."""
+        eps: list[dict] = []
+        for _ in range(self.READY_TRIES):
+            eps = await self.episodes(series_id)
+            if eps and not await self._refreshing(series_id):
+                break
+            await asyncio.sleep(self.READY_EVERY)
+        await self.set_seasons_monitored(series_id, seasons)
+        ids = [e["id"] for e in eps if e.get("seasonNumber") in seasons]
+        if not ids:
+            log.warning("Sonarr: Serie %s hat noch keine Folgen für Staffel %s", series_id, seasons)
+        await self.set_episodes_monitored(ids, True)
+        if search:
+            for n in seasons:
+                await self.command("SeasonSearch", seriesId=series_id, seasonNumber=n)
+        log.info("Sonarr: Serie %s – %d Folgen überwacht, Suche %s", series_id, len(ids), "gestartet" if search else "aus")
+
+    async def _refreshing(self, series_id: int) -> bool:
+        """Is Sonarr still refreshing this series (loading episodes, applying monitoring)?"""
+        try:
+            cmds = await self._req("GET", "/command") or []
+        except ArrError:
+            return False
+        return any(c.get("name") == "RefreshSeries" and c.get("status") in ("queued", "started")
+                   and (c.get("body") or {}).get("seriesId") in (series_id, None) for c in cmds)
+
+    def _background(self, coro: Any) -> None:
+        async def run() -> None:
+            try:
+                await coro
+            except Exception:  # noqa: BLE001
+                log.exception("Sonarr: Staffeln überwachen/suchen fehlgeschlagen")
+
+        task = asyncio.create_task(run())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
     _history_params = {"includeSeries": "true", "includeEpisode": "true"}
     _queue_params = {"includeSeries": "true", "includeEpisode": "true"}
 
@@ -201,6 +275,10 @@ class Sonarr(_ArrBase):
             for fid in file_ids:  # older Sonarr without the bulk endpoint
                 await self._req("DELETE", f"/episodefile/{fid}")
         log.info("Sonarr: %d Folgen-Dateien gelöscht", len(file_ids))
+
+    async def episode_files(self, series_id: int) -> list[dict]:
+        """All files of a series, with the real audio languages (mediaInfo)."""
+        return await self._req("GET", "/episodefile", params={"seriesId": series_id}) or []
 
     async def set_episodes_monitored(self, episode_ids: list[int], monitored: bool) -> None:
         if episode_ids:
@@ -248,15 +326,13 @@ class Sonarr(_ArrBase):
             series["languageProfileId"] = lang
 
         if seasons:
-            # Add without monitoring, then switch on only the requested seasons.
+            # Only the requested seasons. Their episodes are monitored and searched as soon as Sonarr
+            # has loaded them (in the background, the answer doesn't wait for it).
             series["addOptions"] = {"monitor": "none", "searchForMissingEpisodes": False}
             for s in series.get("seasons", []):
-                s["monitored"] = False
+                s["monitored"] = s.get("seasonNumber") in seasons
             created = await self._req("POST", "/series", json=series)
-            created = await self.set_seasons_monitored(created["id"], seasons)
-            if search:
-                for n in seasons:
-                    await self.command("SeasonSearch", seriesId=created["id"], seasonNumber=n)
+            self._background(self._monitor_and_search(created["id"], seasons, search))
             return created
 
         series["addOptions"] = {"monitor": monitor, "searchForMissingEpisodes": search}
@@ -272,7 +348,6 @@ class Sonarr(_ArrBase):
     async def search(self, series_id: int, seasons: list[int] | None = None) -> None:
         if seasons:
             await self.set_seasons_monitored(series_id, seasons)
-            for n in seasons:
-                await self.command("SeasonSearch", seriesId=series_id, seasonNumber=n)
+            await self._monitor_and_search(series_id, seasons, True)
         else:
             await self.command("SeriesSearch", seriesId=series_id)

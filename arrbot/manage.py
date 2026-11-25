@@ -13,7 +13,7 @@ from datetime import date
 from typing import Any
 
 from .arr import ArrError
-from .german import _air, _is_german_release, _langs
+from .german import _air, _is_german_release, file_check, file_langs, langs_de
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class FixPlan:
     german: list[dict] = field(default_factory=list)  # already German
     missing: list[dict] = field(default_factory=list)  # no file
     other_lang: list[dict] = field(default_factory=list)  # file, but not German
+    mislabelled: list[dict] = field(default_factory=list)  # part of other_lang: named German, audio isn't
     grabs: list[Grab] = field(default_factory=list)
     not_found: list[dict] = field(default_factory=list)  # needed, no German download found
     skipped_seasons: list[int] = field(default_factory=list)
@@ -67,8 +68,11 @@ def _score(r: dict) -> tuple:
             r.get("seeders") or 0, -(r.get("size") or 0))
 
 
-def _usable(r: dict) -> bool:
+def _usable(r: dict, bad: set[str] = frozenset()) -> bool:  # type: ignore[assignment]
+    """A German release we can grab; never one of the releases that turned out not to be German."""
     if not _is_german_release(r) or not r.get("guid") or r.get("indexerId") is None:
+        return False
+    if (r.get("title") or "").lower() in bad:
         return False
     rejections = " ".join(r.get("rejections") or []).lower()
     return not any(b in rejections for b in BAD_REJECTIONS)
@@ -80,12 +84,18 @@ async def plan_german(sonarr: Any, series_id: int, season: int | None, today: da
     eps = [e for e in await sonarr.episodes(series_id, season)
            if e.get("seasonNumber", 0) > 0 and (_air(e) or date.max) <= today]
     plan.checked = len(eps)
+    bad: set[str] = set()  # release names of files that are not really German
     for e in eps:
-        langs = _langs(e.get("episodeFile")) if e.get("hasFile") else []
-        if "German" in langs:
+        check = file_check(e.get("episodeFile")) if e.get("hasFile") else None
+        if check == "german":
             plan.german.append(e)
         elif e.get("hasFile"):
             plan.other_lang.append(e)
+            if check == "mislabelled":
+                plan.mislabelled.append(e)
+            scene = (e.get("episodeFile") or {}).get("sceneName")
+            if scene:
+                bad.add(scene.lower())
         else:
             plan.missing.append(e)
 
@@ -108,7 +118,7 @@ async def plan_german(sonarr: Any, series_id: int, season: int | None, today: da
             log.warning("Release-Suche Staffel %s: %s", n, releases)
             plan.not_found += season_needed.values()
             continue
-        german = [r for r in releases if _usable(r)]
+        german = [r for r in releases if _usable(r, bad)]
         packs = sorted((r for r in german if r.get("fullSeason")), key=_score, reverse=True)
         singles: dict[int, dict] = {}
         for r in german:
@@ -138,6 +148,9 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
     lines.append(f"✅ {len(plan.german)} auf Deutsch")
     if plan.other_lang:
         lines.append(f"📁 {len(plan.other_lang)} nur in anderer Sprache ({_eps_text(plan.other_lang)})")
+    if plan.mislabelled:
+        lines.append(f"🏷 Davon {len(plan.mislabelled)} als Deutsch benannt, die Tonspur ist aber "
+                     f"{langs_de(file_langs(plan.mislabelled[0].get('episodeFile')))} ({_eps_text(plan.mislabelled)})")
     if plan.missing:
         lines.append(f"❌ {len(plan.missing)} fehlen ({_eps_text(plan.missing)})")
     if not plan.other_lang and not plan.missing:
@@ -214,7 +227,7 @@ async def plan_clean(sonarr: Any, series_id: int, which: str, season: int | None
     series = await sonarr.get(series_id)
     eps = [e for e in await sonarr.episodes(series_id, season) if e.get("hasFile") and e.get("episodeFileId")]
     if which == "not_german":
-        eps = [e for e in eps if "German" not in _langs(e.get("episodeFile"))]
+        eps = [e for e in eps if file_check(e.get("episodeFile")) != "german"]
         what = "nicht auf Deutsch"
     elif season is not None:
         what = f"aus Staffel {season}"
@@ -244,3 +257,56 @@ async def run_clean(sonarr: Any, plan: CleanPlan, research: bool) -> str:
         await sonarr.set_episodes_monitored(ids, False)  # otherwise Sonarr would download them again
         tail = "Sie werden nicht mehr automatisch geladen."
     return f"🗑 {len(plan.episodes)} Folgen von {plan.title} gelöscht ({_gb(plan.size)} frei). {tail}"
+
+
+# ---- movies -------------------------------------------------------------------------------------
+@dataclass
+class MovieFix:
+    movie_id: int
+    title: str
+    check: str  # german | mislabelled | other | unknown | missing
+    langs: list[str]
+    file_id: int | None
+    release: dict | None = None
+    releases: int = 0
+
+
+async def plan_movie(radarr: Any, movie_id: int) -> MovieFix:
+    movie = await radarr.get(movie_id)
+    title = f"{movie.get('title')} ({movie.get('year')})" if movie.get("year") else movie.get("title", "?")
+    mfile = movie.get("movieFile") if movie.get("hasFile") else None
+    fix = MovieFix(movie_id, title, file_check(mfile) if mfile else "missing", file_langs(mfile) if mfile else [],
+                   (mfile or {}).get("id"))
+    if fix.check == "german":
+        return fix
+    bad = {((mfile or {}).get("sceneName") or "").lower()} - {""}
+    rel = await radarr.releases(movieId=movie_id)
+    fix.releases = len(rel)
+    ok = sorted((r for r in rel if _usable(r, bad)), key=_score, reverse=True)
+    fix.release = ok[0] if ok else None
+    return fix
+
+
+def render_movie(fix: MovieFix) -> tuple[str, list[tuple[str, str]]]:
+    if fix.check == "german":
+        return f"✅ {fix.title}: Die Tonspur ist Deutsch ({langs_de(fix.langs)}). Alles gut.", []
+    if fix.check == "mislabelled":
+        head = f"🏷 {fix.title}: Die Datei heißt Deutsch, die Tonspur ist aber {langs_de(fix.langs)}."
+    elif fix.check == "missing":
+        head = f"⏳ {fix.title} ist noch nicht geladen."
+    else:
+        head = f"📁 {fix.title} ist bei dir nur auf {langs_de(fix.langs)}."
+    if not fix.release:
+        return head + f"\n🔍 Auf deinen Indexern gibt es noch kein (anderes) deutsches Release ({fix.releases} geprüft).", []
+    size = _gb(fix.release.get("size") or 0)
+    text = f"{head}\n\n⬇️ Deutsches Release gefunden: {fix.release.get('title')} ({size})"
+    label = "🔁 Datei ersetzen" if fix.file_id else "⬇️ Laden"
+    return text, [(label, "all"), ("Abbrechen", "no")]
+
+
+async def run_movie(radarr: Any, fix: MovieFix) -> str:
+    await radarr.grab(fix.release)
+    if fix.file_id:  # otherwise Radarr keeps the old file as "no upgrade"
+        await radarr.delete_movie_file(fix.file_id)
+    return (f"⬇️ Deutsche Fassung von {fix.title} wird geladen" + (", die alte Datei ist gelöscht" if fix.file_id else "")
+            + ". Ich melde mich, wenn sie fertig ist.")

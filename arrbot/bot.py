@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -31,13 +32,13 @@ from . import downloads, fmt
 from .agent import Agent
 from .arr import ArrError, Radarr, Sonarr
 from .config import Config
-from .llm import make_provider
+from .llm import ToolCall, make_provider
 from .sabnzbd import SABnzbd, SabError
 from .state import Store, Tracked
 from .tmdb import TMDB
 from .tools import Flow, Offer, ToolRunner, View, release_languages
 from .tracker import Tracker
-from . import health, profiles, stats
+from . import extras, health, media, plex, profiles, stats, watch
 from .profiles import ProfileStore
 from .agent import PRICES
 from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text
@@ -54,17 +55,22 @@ HELP = (
     "• „Gibt es Severance schon auf Deutsch?“\n"
     "• „Such in 3 Tagen nochmal nach Dune 3“ / „Lösch The Office“\n"
     "• „Merk dir, ich mag keine Horrorfilme“ / „Was weißt du über mich?“\n"
+    "• „Sag mir, wenn Dune 3 auf Deutsch kommt“ / „Wo war ich bei Dark?“\n"
+    "• „Schick mir jeden Sonntag einen Wochenrückblick“\n"
     "• einen Link von IMDb, TMDB, Trakt, Letterboxd, JustWatch …\n\n"
     "Ich sage Bescheid, wenn ein Download startet, wann er fertig ist und ob es Probleme gibt.\n\n"
     "/downloads – deine Downloads mit Fortschritt\n"
     "/verbrauch – deine Anfragen und Limits\n"
     "/profil – was ich über deinen Geschmack weiß\n"
+    "/kalender – was diese Woche kommt\n"
+    "/plex – Plex verbinden (gesehen, weiterschauen)\n"
     "/neu – Gespräch zurücksetzen"
 )
 ADMIN_HELP = (
     "\n\n<b>Admin</b>\n"
     "/nutzer – Nutzer freigeben, sperren, entfernen\n"
     "/statistik – Nutzer, Anfragen, Tokens, Kosten\n"
+    "/mediathek – was fehlt, was nicht in Plex ist, was gesehen oder lange ungesehen ist (aufräumen)\n"
     "/check – alle APIs prüfen\n"
     "/limit – Limits setzen, z. B.\n"
     "<code>/limit standard tag 10</code>\n"
@@ -72,7 +78,8 @@ ADMIN_HELP = (
     "<code>/limit gesamt kosten 1</code>\n"
     "<code>/limit 123456 tokens aus</code>\n\n"
     "Oder einfach schreiben: „Zeig mir die Statistik“, „Setz Annas Tageslimit auf 5“, "
-    "„Sperr Bob“, „Prüf die APIs“."
+    "„Sperr Bob“, „Prüf die APIs“, „Was kann weg?“, "
+    "„Neues Qualitätsprofil 4K nur Englisch“, „Profil 1080p Deutsch und Englisch + Originalsprache“."
 )
 
 RESPONSE_TIMEOUT = 180  # seconds for one whole answer, including all AI steps
@@ -99,7 +106,16 @@ def build_app(cfg: Config) -> Application:
     agent.on_usage = users.add_usage
     profile_db = ProfileStore(cfg.data_dir)
     tools.profiles = profile_db
-    users.on_remove = profile_db.forget_all
+    plex_store = plex.PlexStore(cfg.data_dir)
+    plex_client = plex.Plex(plex_store.client_id(), cfg.plex_url)
+    tools.plex, tools.plex_store = plex_client, plex_store
+
+    def on_user_removed(uid: int) -> None:
+        profile_db.forget_all(uid)
+        plex_store.remove(uid)
+
+    users.on_remove = on_user_removed
+    background: set[asyncio.Task] = set()  # keeps running Plex links alive
     agent.context_for = lambda uid: profile_db.profile(uid).context_line()
 
     def on_finish(t, title: str) -> None:
@@ -220,6 +236,9 @@ def build_app(cfg: Config) -> Application:
 
         if reply.strip():
             await send_formatted(chat_id, reply)
+        await deliver_outbox(chat_id, user_id, ctx)
+
+    async def deliver_outbox(chat_id: int, user_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for item in tools.take_outbox(chat_id):
             if isinstance(item, Offer):
                 await send_offer(item)
@@ -340,6 +359,15 @@ def build_app(cfg: Config) -> Application:
                 await query.edit_message_reply_markup(None)
                 flow = await tools.start_remove(uid, kind, raw_id)
                 await show_flow(flow, ctx)
+            elif action == "w":
+                await query.answer("🔔")
+                await query.edit_message_reply_markup(None)
+                item = await (radarr if kind == "movie" else sonarr).get(raw_id)
+                ext = item.get("tmdbId") if kind == "movie" else item.get("tvdbId")
+                res = await tools.run(ToolCall("n", "notify_german", {"kind": kind, "id": ext}), uid)
+                if res.final:
+                    await send_formatted(query.message.chat_id, res.final)
+                await deliver_outbox(query.message.chat_id, uid, ctx)
             else:
                 await query.answer()
         except ArrError as e:
@@ -413,7 +441,9 @@ def build_app(cfg: Config) -> Application:
 
     # ---- statistics and API check (admin) ----------------------------------------------
     def stats_text() -> str:
-        return stats.render(users, store, cfg.llm.model, tz, price_known=cfg.llm.model in PRICES)
+        u = agent.usage
+        return stats.render(users, store, cfg.llm.model, tz, price_known=cfg.llm.model in PRICES,
+                            cache=(u.total_cached, u.total_input))
 
     async def send_stats(chat_id: int) -> None:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Aktualisieren", callback_data="s:r")]])
@@ -457,6 +487,290 @@ def build_app(cfg: Config) -> Application:
             await send_check(view.chat_id)
         elif view.kind == "profile":
             await send_profile(view.chat_id, viewer)
+        elif view.kind == "calendar":
+            days, mine = view.arg or (7, False)
+            await send_calendar(view.chat_id, viewer, days, mine)
+        elif view.kind == "disk":
+            await send_disk(view.chat_id)
+        elif view.kind == "plex":
+            await send_plex(view.chat_id, view.arg or {})
+        elif view.kind == "plex_link":
+            await start_plex_link(view.chat_id, viewer)
+        elif view.kind == "media" and users.is_admin(viewer):
+            section, days = view.arg or ("overview", None)
+            if days:
+                media_state["days"] = int(days)
+            await send_media(view.chat_id, section or "overview")
+
+    # ---- media check (admin) -------------------------------------------------------------------
+    media_state: dict = {"report": None, "days": cfg.unwatched_days}
+
+    async def media_report(fresh: bool = False) -> media.Report:
+        r = media_state["report"]
+        if fresh or r is None or (datetime.now(timezone.utc) - r.made) > timedelta(minutes=10):
+            accounts = [a for a in plex_store.all() if users.is_allowed(a.user_id)]
+            r = media_state["report"] = await media.collect(radarr, sonarr, plex_client, accounts)
+        return r
+
+    def media_view(r: media.Report, section: str) -> tuple[str, InlineKeyboardMarkup]:
+        days = media_state["days"]
+        if section in media.SECTIONS:
+            text, buttons = media.render_section(r, section, days, users.name)
+        else:
+            text, buttons = media.render_overview(r, days, users.name)
+        rows = [[InlineKeyboardButton(label, callback_data=data)] for label, data in buttons]
+        return text, InlineKeyboardMarkup(rows)
+
+    async def send_media(chat_id: int, section: str = "overview") -> None:
+        msg = await app.bot.send_message(chat_id, "🗂 Prüfe die Mediathek …")
+        try:
+            r = await media_report()
+        except Exception as e:  # noqa: BLE001
+            log.exception("Mediathek-Check fehlgeschlagen")
+            await msg.edit_text(f"⚠️ Mediathek-Check fehlgeschlagen: {e}")
+            return
+        text, markup = media_view(r, section)
+        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def on_media(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_media(update.effective_chat.id)
+
+    async def on_media_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not (update.effective_user and users.is_admin(update.effective_user.id)):
+            await query.answer("Nur für Admins.", show_alert=True)
+            return
+        parts = query.data.split(":")
+        action = parts[1]
+        if action == "gf" and len(parts) == 4:  # check/replace the language of one title
+            await query.answer("Prüfe die Tonspur …")
+            uid = update.effective_user.id
+            arg = {"tmdb_id": int(parts[3])} if parts[2] == "m" else {"tvdb_id": int(parts[3])}
+            res = await tools.run(ToolCall("m", "german_fix", arg), uid)
+            if res.final:
+                await send_formatted(query.message.chat_id, res.final)
+            elif res.is_error:
+                await app.bot.send_message(query.message.chat_id, f"⚠️ {res.content}")
+            await deliver_outbox(query.message.chat_id, uid, ctx)
+            return
+        if action == "search":
+            started = []
+            for svc, cmd in ((radarr, "MissingMoviesSearch"), (sonarr, "MissingEpisodeSearch")):
+                if svc:
+                    try:
+                        await svc.command(cmd)
+                        started.append(svc.kind)
+                    except ArrError as e:
+                        log.warning("%s: %s", cmd, e)
+            await query.answer(("🔍 Suche gestartet in " + " und ".join(started)) if started else "Hat nicht geklappt",
+                               show_alert=True)
+            return
+        if action == "scan":
+            acc = plex_store.get(update.effective_user.id) or next(iter(plex_store.all()), None)
+            try:
+                n = await plex_client.refresh_libraries(acc) if acc else 0
+            except plex.PlexError as e:
+                await query.answer(str(e)[:190], show_alert=True)
+                return
+            await query.answer(f"🔄 {n} Plex-Bibliotheken werden gescannt. In ein paar Minuten „Neu prüfen“.",
+                               show_alert=True)
+            return
+        await query.answer("Prüfe …" if action == "r" else None)
+        try:
+            r = await media_report(fresh=action == "r")
+        except Exception as e:  # noqa: BLE001
+            await app.bot.send_message(query.message.chat_id, f"⚠️ Mediathek-Check fehlgeschlagen: {e}")
+            return
+        text, markup = media_view(r, "overview" if action in ("o", "r") else action)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    # ---- calendar and disk space -------------------------------------------------------------
+    async def send_calendar(chat_id: int, viewer: int, days: int = 7, mine: bool = False) -> None:
+        today = date.today()
+        only = None
+        if mine:
+            only = {(r["kind"], r.get("tmdb") if r["kind"] == "movie" else r.get("tvdb"))
+                    for r in store.state.requests if r["chat_id"] == viewer}
+        entries = await extras.calendar_entries(radarr, sonarr, today, today + timedelta(days=days - 1), tz, only)
+        text = extras.render_calendar(entries, today, today + timedelta(days=days - 1), today, mine)
+        await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+
+    async def cleanup_candidates() -> list[str]:
+        """Movies everybody with a linked Plex has watched, biggest first."""
+        accounts = plex_store.all()
+        if not accounts or not radarr:
+            return []
+        seen = None
+        for a in accounts:
+            mine = {tmdb for kind, tmdb, _ in profile_db.known(a.user_id, "watched") if kind == "movie" and tmdb}
+            seen = mine if seen is None else seen & mine
+        try:
+            movies = [m for m in await radarr.library() if m.get("tmdbId") in (seen or set()) and m.get("sizeOnDisk")]
+        except ArrError:
+            return []
+        movies.sort(key=lambda m: -(m.get("sizeOnDisk") or 0))
+        return [f"• {m.get('title')} ({m.get('year')}) · {extras._size(m['sizeOnDisk'])}" for m in movies[:5]]
+
+    async def send_disk(chat_id: int) -> None:
+        ds = await extras.disks(radarr, sonarr)
+        low = extras.low_disks(ds, cfg.disk_warn_gb)
+        text = extras.render_disks(ds, cfg.disk_warn_gb, await cleanup_candidates() if low or ds else None)
+        await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+
+    async def on_calendar(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_calendar(update.effective_chat.id, update.effective_user.id)
+
+    async def on_disk(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_disk(update.effective_chat.id)
+
+    # ---- Plex ------------------------------------------------------------------------------
+    async def send_plex(chat_id: int, arg: dict) -> None:
+        markup = None
+        if arg.get("url"):
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ In Plex öffnen", url=arg["url"])]])
+        if arg.get("html"):
+            await app.bot.send_message(chat_id, arg["html"], parse_mode=ParseMode.HTML, reply_markup=markup)
+        else:
+            await app.bot.send_message(chat_id, arg.get("text") or "", reply_markup=markup)
+
+    def plex_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Jetzt abgleichen", callback_data="x:s"),
+                                      InlineKeyboardButton("🔌 Trennen", callback_data="x:u")]])
+
+    def plex_status_text(a: plex.Account) -> str:
+        when = f", zuletzt abgeglichen {a.synced[:16].replace('T', ' ')} UTC" if a.synced else ""
+        return (f"✅ Plex verbunden als <b>{html.escape(a.username)}</b> mit „{html.escape(a.server_name)}“{when}.\n"
+                "Ich lerne, was du schaust, und beantworte „Wo war ich bei …?“.")
+
+    async def plex_sync(a: plex.Account) -> int:
+        try:
+            n = await plex.sync(plex_client, plex_store, profile_db, a)
+            log.info("Plex-Abgleich %s: %d neu gesehen", a.username, n)
+            return n
+        except plex.PlexError as e:
+            log.warning("Plex-Abgleich %s: %s", a.username, e)
+            raise
+
+    async def start_plex_link(chat_id: int, uid: int) -> None:
+        acc = plex_store.get(uid)
+        if acc:
+            await app.bot.send_message(chat_id, plex_status_text(acc), parse_mode=ParseMode.HTML,
+                                       reply_markup=plex_markup())
+            return
+        try:
+            pin_id, code = await plex_client.create_pin()
+        except plex.PlexError as e:
+            await app.bot.send_message(chat_id, f"⚠️ {e}")
+            return
+        msg = await app.bot.send_message(
+            chat_id,
+            f"🔗 <b>Plex verbinden</b>\n\n1. Öffne <b>plex.tv/link</b> (Button unten) und melde dich an\n"
+            f"2. Gib diesen Code ein: <code>{html.escape(code)}</code>\n\n"
+            f"Der Code gilt {plex.PIN_MINUTES} Minuten. Dein Passwort bekomme ich dabei nicht zu sehen.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 plex.tv/link öffnen", url=plex.LINK_URL)]]))
+
+        async def finish() -> None:
+            try:
+                token = await plex.wait_for_pin(plex_client, pin_id)
+                if not token:
+                    await msg.edit_text("⌛ Der Code ist abgelaufen. Schreib /plex für einen neuen.")
+                    return
+                admin = plex_store.get(cfg.admin_id)
+                url, stoken, mid, name = await plex_client.pick_server(token, admin.machine_id if admin else None)
+                acc = plex.Account(uid, token, await plex_client.username(token), url, stoken, mid, name,
+                                   plex.utcnow())
+                plex_store.save(acc)
+                await msg.edit_text(plex_status_text(acc) + "\n\n⏳ Ich gleiche jetzt ab, was du schon gesehen hast …",
+                                    parse_mode=ParseMode.HTML)
+                n = await plex_sync(acc)
+                await app.bot.send_message(chat_id, f"👍 Abgleich fertig: {n} gesehene Titel übernommen. "
+                                                    "Deine Vorschläge berücksichtigen das ab jetzt.")
+            except plex.PlexError as e:
+                await app.bot.send_message(chat_id, f"⚠️ Plex: {e}")
+            except Exception:  # noqa: BLE001
+                log.exception("Plex verbinden fehlgeschlagen")
+                await app.bot.send_message(chat_id, "⚠️ Plex verbinden hat nicht geklappt. Versuch es nochmal: /plex")
+
+        task = asyncio.create_task(finish())
+        background.add(task)
+        task.add_done_callback(background.discard)
+
+    async def on_plex(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await start_plex_link(update.effective_chat.id, update.effective_user.id)
+
+    async def on_plex_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not allowed_user(update):
+            await query.answer("Kein Zugriff.", show_alert=True)
+            return
+        uid, action = update.effective_user.id, query.data.split(":")[1]
+        acc = plex_store.get(uid)
+        if not acc:
+            await query.answer("Nicht verbunden.")
+            await query.edit_message_reply_markup(None)
+            return
+        if action == "u":
+            plex_store.remove(uid)
+            await query.answer("Getrennt")
+            await query.edit_message_text("🔌 Plex getrennt. Was du bisher geschaut hast, bleibt in deinem Profil "
+                                          "(löschen per /profil).")
+            return
+        await query.answer("Gleiche ab …")
+        try:
+            n = await plex_sync(acc)
+        except plex.PlexError as e:
+            await app.bot.send_message(query.message.chat_id, f"⚠️ Plex: {e}")
+            return
+        await app.bot.send_message(query.message.chat_id, f"🔄 Abgleich fertig: {n} neue gesehene Titel.")
+
+    # ---- daily / hourly jobs -------------------------------------------------------------------
+    async def watch_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        for n in await watch.check_watches(tools):
+            try:
+                if n.text:
+                    await send_formatted(n.chat_id, n.text)
+                await deliver_outbox(n.chat_id, n.chat_id, ctx)
+            except (BadRequest, Forbidden) as e:
+                log.info("Deutsch-Meldung an %s nicht zugestellt: %s", n.chat_id, e)
+
+    async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        for uid in profile_db.digest_users(date.today().weekday()):
+            if not users.is_allowed(uid):
+                continue
+            try:
+                d = await watch.weekly_digest(tools, uid, tz)
+                await app.bot.send_message(uid, d.text, parse_mode=ParseMode.HTML)
+                if d.suggestions:
+                    await tools.run(ToolCall("d", "suggest", {}), uid)
+                    await deliver_outbox(uid, uid, ctx)
+            except (BadRequest, Forbidden) as e:
+                log.info("Wochenrückblick an %s nicht zugestellt: %s", uid, e)
+            except Exception:  # noqa: BLE001
+                log.exception("Wochenrückblick für %s fehlgeschlagen", uid)
+
+    disk_warned: set[str] = set()
+
+    async def disk_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        ds = await extras.disks(radarr, sonarr)
+        low = {d.path for d in extras.low_disks(ds, cfg.disk_warn_gb)}
+        new = low - disk_warned
+        if new:
+            text = extras.render_disks([d for d in ds if d.path in new], cfg.disk_warn_gb, await cleanup_candidates())
+            await tell_admins("⚠️ Wenig Speicherplatz!\n\n" + text, html_text=True)
+        disk_warned.intersection_update(low)  # warn again after it was fine in between
+        disk_warned.update(low)
+
+    async def plex_sync_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        for a in plex_store.all():
+            try:
+                await plex_sync(a)
+            except plex.PlexError:
+                pass
 
     # ---- user profile ---------------------------------------------------------------------
     def profile_markup() -> InlineKeyboardMarkup:
@@ -685,6 +999,8 @@ def build_app(cfg: Config) -> Application:
             BotCommand("neu", "Gespräch zurücksetzen"),
             BotCommand("verbrauch", "Anfragen und Limits"),
             BotCommand("profil", "Was ich über dich weiß"),
+            BotCommand("kalender", "Was kommt diese Woche"),
+            BotCommand("plex", "Plex verbinden"),
             BotCommand("hilfe", "Was kann ich?"),
         ]
         await application.bot.set_my_commands(base, scope=BotCommandScopeDefault())
@@ -692,12 +1008,18 @@ def build_app(cfg: Config) -> Application:
             try:
                 await application.bot.set_my_commands(
                     base + [BotCommand("nutzer", "Nutzer verwalten"), BotCommand("statistik", "Statistik"),
-                            BotCommand("check", "APIs prüfen"), BotCommand("limit", "Limits setzen")],
+                            BotCommand("check", "APIs prüfen"), BotCommand("limit", "Limits setzen"),
+                            BotCommand("mediathek", "Mediathek prüfen und aufräumen")],
                     scope=BotCommandScopeChat(admin),
                 )
             except BadRequest as e:  # admin never wrote to the bot yet
                 log.info("Admin-Befehle für %s nicht gesetzt: %s", admin, e)
         application.job_queue.run_repeating(poll_job, interval=cfg.poll_interval, first=5)
+        application.job_queue.run_daily(watch_job, time(9, 0, tzinfo=tz), name="deutsch")
+        application.job_queue.run_daily(digest_job, time(10, 0, tzinfo=tz), name="wochenrueckblick")
+        application.job_queue.run_repeating(plex_sync_job, interval=6 * 3600, first=600, name="plex")
+        if cfg.disk_warn_gb > 0:
+            application.job_queue.run_repeating(disk_job, interval=3600, first=120, name="speicher")
         try:
             n = await tools.import_history()
             if n:
@@ -712,6 +1034,8 @@ def build_app(cfg: Config) -> Application:
         for svc in (radarr, sonarr, sab, tmdb):
             if svc:
                 await svc.close()
+        await plex_client.close()
+        plex_store.close()
         profile_db.close()
 
     app = (
@@ -727,10 +1051,14 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["downloads", "status", "dl"], on_downloads, filters=allowed))
     app.add_handler(CommandHandler("verbrauch", on_usage, filters=allowed))
     app.add_handler(CommandHandler(["profil", "profile", "ich"], on_profile, filters=allowed))
+    app.add_handler(CommandHandler(["kalender", "woche"], on_calendar, filters=allowed))
+    app.add_handler(CommandHandler(["speicher", "platz"], on_disk, filters=allowed))
+    app.add_handler(CommandHandler("plex", on_plex, filters=allowed))
     app.add_handler(CommandHandler("nutzer", on_users, filters=is_admin))
     app.add_handler(CommandHandler("limit", on_limit, filters=is_admin))
     app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
     app.add_handler(CommandHandler(["check", "apis"], on_check, filters=is_admin))
+    app.add_handler(CommandHandler(["mediathek", "medien", "aufraeumen"], on_media, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))
@@ -739,6 +1067,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(on_notice_button, pattern=r"^n:"))
     app.add_handler(CallbackQueryHandler(on_stats_button, pattern=r"^s:"))
     app.add_handler(CallbackQueryHandler(on_profile_button, pattern=r"^p:"))
+    app.add_handler(CallbackQueryHandler(on_plex_button, pattern=r"^x:"))
+    app.add_handler(CallbackQueryHandler(on_media_button, pattern=r"^m:"))
     app.add_handler(MessageHandler(~allowed, on_unknown))
     app.add_handler(MessageHandler(allowed & filters.COMMAND, on_start))  # unknown command: show help
     app.add_error_handler(on_error)

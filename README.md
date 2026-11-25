@@ -59,6 +59,33 @@ Außerdem:
   Dune 3“ pausiert die Suche in Radarr/Sonarr und startet sie dann automatisch neu. „Weiter mit Dune
   3“ sofort. Nutzer können nur ändern, was sie selbst angefragt haben; was mehrere wollten, löscht
   nur der Admin.
+- **Echt Deutsch?** Geprüft wird die **Tonspur**, die Radarr/Sonarr beim Import aus der Datei lesen
+  – nicht der Release-Name. So fallen Folgen auf, die „GERMAN“ heißen, aber englisch sind („🏷 heißt
+  Deutsch, Tonspur aber nicht“). „Ist Eine schrecklich nette Familie wirklich auf Deutsch?“ oder „Ist
+  Dune auf Deutsch?“ bietet dann ein **anderes** deutsches Release als Ersatz an (nie dasselbe noch
+  einmal) und löscht die alte Datei erst nach deinem Okay.
+- **Deutsch-Benachrichtigung:** „Sag mir, wenn Dune 3 auf Deutsch kommt“ – der Bot prüft täglich um 9 Uhr
+  (Filme: deutsche Termine und Streaming laut TMDB, Serien: neue deutsche Folgen auf deinen Indexern),
+  startet dann die Suche oder bietet die Folgen per Button an. Auch als Button „🔔 Bei Deutsch melden“
+  unter „nichts gefunden“.
+- **Kalender:** „Was kommt diese Woche?“ oder /kalender – neue Folgen und Filmtermine, auf Wunsch nur
+  deine Titel. **Speicherplatz:** „Wie viel Platz ist noch?“ oder /speicher; Admins werden gewarnt, wenn
+  weniger als `DISK_WARN_GB` frei ist.
+- **Wochenrückblick:** „Schick mir jeden Sonntag einen Wochenrückblick“ – was fertig wurde, was in der
+  Woche kommt, drei Vorschläge. „Keinen Wochenrückblick mehr“ beendet ihn.
+- **Plex:** Jeder verbindet sein eigenes Konto mit /plex: der Bot zeigt einen Code, den gibst du auf
+  plex.tv/link ein – dein Passwort sieht der Bot nie. Danach: „Wo war ich bei Dark?“ (mit Button „In
+  Plex öffnen“), „Hab ich Dune gesehen?“, „Was schaue ich gerade?“. Alle 6 Stunden gleicht der Bot ab,
+  was du geschaut hast; das fließt in Profil und Vorschläge ein.
+- **Mediathek (Admin):** /mediathek oder „Was kann weg?“ zeigt
+  ⏳ was fehlt (in Radarr/Sonarr, aber nicht geladen – Button „alle fehlenden suchen“),
+  ❓ was geladen, aber nicht in Plex ist (Button „Plex scannen“),
+  ✅ was alle mit verknüpftem Plex gesehen haben, 💤 was seit `UNWATCHED_DAYS` Tagen niemand
+  angefangen hat (beides nach Größe, mit Lösch-Buttons) und 🗣 was nicht wirklich auf Deutsch ist.
+- **Qualitätsprofile (Admin):** „Neues Qualitätsprofil 4K nur Englisch“ oder „Profil 1080p mindestens
+  Deutsch und Englisch + Originalsprache“. Der Bot zeigt, was er verstanden hat, und legt es nach
+  Bestätigung in Radarr und Sonarr an (Sprachen als Custom Formats „Sprache: Deutsch“ usw., braucht
+  Sonarr v4). 2K wird als 1080p angelegt, weil Radarr/Sonarr kein 1440p kennen.
 - **Wenig Nerv:** Wird nichts gefunden, kommt **eine** Nachricht (nach 30 Minuten) mit Buttons
   „⏸ In 3 Tagen nochmal“, „⏸ In 7 Tagen nochmal“, „🗑 Löschen“, „👍 Okay“. Danach sucht
   Radarr/Sonarr still weiter, die nächste Nachricht kommt erst, wenn ein Download startet.

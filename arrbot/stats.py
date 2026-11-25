@@ -33,7 +33,8 @@ def _ago(iso: str, tz: tzinfo, now: datetime) -> str:
 
 
 def render(users: UserStore, store: Store, model: str, tz: tzinfo, price_known: bool = True,
-           now: datetime | None = None) -> str:
+           now: datetime | None = None, cache: tuple[int, int] | None = None) -> str:
+    """cache: (cached input tokens, all input tokens) since the start, for the cache hit rate."""
     now = now or utcnow()
     e = lambda s: html.escape(str(s), quote=False)  # noqa: E731
     all_users = users.listing()
@@ -67,6 +68,9 @@ def render(users: UserStore, store: Store, model: str, tz: tzinfo, price_known: 
     ]
     if tot.total_requests:
         out.append(f"Ø pro Anfrage: {_n(per_req)} Tokens · {_usd(per_req_cost)}")
+    if cache and cache[1]:
+        out.append(f"♻️ Prompt-Cache: {cache[0] / cache[1]:.0%} der Eingabe-Tokens aus dem Cache (seit Start, "
+                   "kosten nur die Hälfte)".replace("%", " %"))
     budget = users.total_limits.get("kosten")
     if budget:
         pct = min(100.0, 100 * tot.month_cost / budget)

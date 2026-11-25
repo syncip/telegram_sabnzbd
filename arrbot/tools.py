@@ -16,7 +16,7 @@ from datetime import date, timedelta, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import german, manage, profiles, urlinfo
+from . import german, manage, plex, profiles, qprofiles, urlinfo, watch
 from .arr import ArrError, Radarr, Sonarr
 from .llm import ToolCall, ToolResult, ToolSpec
 from .state import Store, utcnow
@@ -97,8 +97,8 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
         ),
         ToolSpec(
             "german_fix",
-            "Prüft die Folgen einer Serie in der Bibliothek auf Deutsch und bietet deutsche Downloads per Button an.",
-            obj({"tvdb_id": {"type": "integer"}, "season": {"type": "integer"}}, ["tvdb_id"]),
+            "Prüft die echte Tonspur (Serie: alle Folgen, Film: tmdb_id) auf Deutsch und bietet Ersatz per Button an.",
+            obj({"tvdb_id": {"type": "integer"}, "tmdb_id": {"type": "integer"}, "season": {"type": "integer"}}),
         ),
         ToolSpec(
             "clean_episodes",
@@ -151,6 +151,30 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
                  "from_year": {"type": "integer"}, "min_rating": {"type": "number"}, "note": {"type": "string"},
                  "forget": {"type": "array", "items": {"type": "string"}}}),
         ),
+        ToolSpec(
+            "calendar",
+            "Was diese Woche/demnächst kommt (neue Folgen, Filmtermine). mine=true nur eigene Titel.",
+            obj({"days": {"type": "integer"}, "mine": {"type": "boolean"}}),
+        ),
+        ToolSpec("disk_space", "Freier Speicherplatz der Mediathek.", obj({})),
+        ToolSpec(
+            "plex_status",
+            "Plex: \"Wo war ich bei X?\", \"Hab ich X gesehen?\", \"Ist X in Plex?\" (title); ohne title: Weiterschauen. "
+            "link=true: Plex verbinden/trennen.",
+            obj({"title": {"type": "string"}, "link": {"type": "boolean"}}),
+        ),
+        ToolSpec(
+            "notify_german",
+            "Benachrichtigen, sobald es einen Titel auf Deutsch gibt (\"sag mir, wenn …\"). id: tmdb (Film) "
+            "oder tvdb (Serie). stop=true beendet das.",
+            obj({"kind": {"type": "string", "enum": ["movie", "series"]}, "id": {"type": "integer"},
+                 "season": {"type": "integer"}, "stop": {"type": "boolean"}}, ["kind", "id"]),
+        ),
+        ToolSpec(
+            "weekly_digest",
+            "Wöchentlicher Rückblick an- oder abbestellen. day: Wochentag (deutsch), off=true abbestellen.",
+            obj({"day": {"type": "string"}, "off": {"type": "boolean"}}),
+        ),
         ToolSpec("my_profile", "Zeigt, was der Bot über den Nutzer weiß (\"was weißt du über mich?\").", obj({})),
         ToolSpec(
             "open_url",
@@ -192,6 +216,24 @@ def build_admin_specs() -> list[ToolSpec]:
         ToolSpec("admin_users", "Nutzerliste mit Buttons zum Freigeben/Sperren.", obj({})),
         ToolSpec("admin_check", "Prüft alle APIs (KI, Radarr, Sonarr, SABnzbd, TMDB, Telegram).", obj({})),
         ToolSpec(
+            "admin_quality_profile",
+            "Neues Qualitätsprofil anlegen (Bot fragt vorher). Auflösung in p (4K=2160, 2K/FullHD=1080, HD=720). "
+            "required_languages: alle Pflicht (\"Deutsch und Englisch\", \"Englisch\"), preferred: Bonus "
+            "(\"+ Originalsprache\" = Original), only=true bei \"nur\"/\"only\". service weglassen = beide.",
+            obj({"name": {"type": "string"}, "service": {"type": "string", "enum": ["radarr", "sonarr", "both"]},
+                 "min_resolution": {"type": "integer"}, "max_resolution": {"type": "integer"},
+                 "required_languages": {"type": "array", "items": {"type": "string"}},
+                 "preferred_languages": {"type": "array", "items": {"type": "string"}},
+                 "only": {"type": "boolean"}}, ["name"]),
+        ),
+        ToolSpec(
+            "admin_media",
+            "Mediathek verwalten: was fehlt, was nicht in Plex ist, was alle gesehen haben, was lange ungesehen "
+            "herumliegt (zum Löschen). days: ab wie vielen Tagen 'lange'.",
+            obj({"section": {"type": "string", "enum": ["overview", "missing", "not_in_plex", "watched", "unwatched"]},
+                 "days": {"type": "integer"}}),
+        ),
+        ToolSpec(
             "admin_set_limit",
             "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot). value: Zahl oder 'aus'.",
             obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": ["tag", "monat", "tokens", "kosten"]},
@@ -214,6 +256,7 @@ class View:
     kind: str  # downloads | stats | users | check | profile
     finished: bool = False
     query: str | None = None  # downloads: only titles containing this
+    arg: Any = None  # calendar: (days, mine)
 
 
 def _compact(d: dict) -> dict:
@@ -324,6 +367,9 @@ class ToolRunner:
         self._seen: dict[int, dict[tuple[str, int], Candidate]] = {}
         self.url_options: dict = {}  # tests inject a fake transport here
         self.profiles: profiles.ProfileStore | None = None  # set by the bot
+        self.plex: plex.Plex | None = None  # set by the bot
+        self.plex_store: plex.PlexStore | None = None
+        self.trace: dict[int, list[tuple[str, str | None, str]]] = {}
 
     # ---- plumbing -------------------------------------------------------
     def take_outbox(self, chat_id: int) -> list[Flow | Offer | View]:
@@ -333,7 +379,17 @@ class ToolRunner:
     def specs_for(self, user_id: int) -> list[ToolSpec]:
         return self.specs + self.admin_specs if self.users is not None and self.is_admin(user_id) else self.specs
 
+    def take_trace(self, chat_id: int) -> list[tuple[str, str | None, str]]:
+        """(tool, error or None, final text) of every tool run since the last call (activity log)."""
+        return self.trace.pop(chat_id, [])
+
     async def run(self, call: ToolCall, chat_id: int) -> ToolResult:
+        r = await self._run(call, chat_id)
+        error = r.content if r.is_error else (r.final if (r.final or "").startswith("⚠️") else None)
+        self.trace.setdefault(chat_id, []).append((call.name, error, r.final or ""))
+        return r
+
+    async def _run(self, call: ToolCall, chat_id: int) -> ToolResult:
         fn = getattr(self, f"_t_{call.name}", None)
         if fn is None:
             return ToolResult(call.id, call.name, f"Unbekanntes Werkzeug {call.name}", is_error=True)
@@ -503,7 +559,11 @@ class ToolRunner:
             self.flows.pop(flow.id, None)
             flow.step = await self._do_remove(flow, value)
             return flow
-        if flow.stage in ("gfix", "clean"):
+        if flow.stage == "qprof":
+            self.flows.pop(flow.id, None)
+            flow.step = await self._create_profiles(flow, value)
+            return flow
+        if flow.stage in ("gfix", "clean", "mfix"):
             self.flows.pop(flow.id, None)
             flow.step = await self._run_series_job(flow, value)
             return flow
@@ -815,7 +875,12 @@ class ToolRunner:
         await self._managed(chat_id, "series", cand.lib_id, delete=delete)
         return cand.lib_id
 
-    async def _t_german_fix(self, chat_id: int, tvdb_id: int, season: int | None = None) -> Final:
+    async def _t_german_fix(self, chat_id: int, tvdb_id: int | None = None, season: int | None = None,
+                            tmdb_id: int | None = None) -> Final:
+        if tmdb_id and not tvdb_id:
+            return await self._movie_fix(chat_id, int(tmdb_id))
+        if not tvdb_id:
+            raise ArrError("tvdb_id (Serie) oder tmdb_id (Film) angeben.")
         lib_id = await self._library_series(chat_id, tvdb_id, delete=False)
         sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
         plan = await manage.plan_german(sonarr, lib_id, int(season) if season else None, date.today())
@@ -831,10 +896,35 @@ class ToolRunner:
         text, buttons = manage.render_clean(plan)
         return await self._series_job(chat_id, tvdb_id, "clean", text, buttons, plan)
 
+    async def _movie_fix(self, chat_id: int, tmdb_id: int) -> Final:
+        cand = await self._candidate(chat_id, "movie", tmdb_id)
+        if not cand.lib_id:
+            raise ArrError(f"{cand.title} ist nicht in Radarr.")
+        await self._managed(chat_id, "movie", cand.lib_id, delete=False)
+        radarr: Radarr = self._need(self.radarr, "Radarr")
+        fix = await manage.plan_movie(radarr, cand.lib_id)
+        text, buttons = manage.render_movie(fix)
+        if not buttons:
+            return Final(text)
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, cand, stage="mfix", data=fix)
+        flow.step = Step(text, buttons)
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
     async def _run_series_job(self, flow: Flow, value: str) -> Step:
         plan, title = flow.data, flow.cand.title
         if value not in ("all", "missing", "research", "drop"):
             return Step(f"👍 Okay, bei {title} bleibt alles, wie es ist.", done=True)
+        if flow.stage == "mfix":
+            radarr: Radarr = self._need(self.radarr, "Radarr")
+            try:
+                text = await manage.run_movie(radarr, flow.data)
+            except ArrError as e:
+                return Step(f"❌ Hat nicht geklappt: {e}", done=True)
+            self.store.track("radarr", flow.data.movie_id, title, flow.chat_id)
+            await self._added(flow.chat_id, f"🇩🇪 {title}: deutsche Fassung wird geladen")
+            return Step(text, done=True)
         sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
         try:
             if flow.stage == "gfix":
@@ -849,6 +939,40 @@ class ToolRunner:
         return Step(text, done=True)
 
     # ---- admin ------------------------------------------------------------------------
+    async def _t_admin_quality_profile(self, chat_id: int, name: str, service: str | None = None,
+                                       min_resolution: int | None = None, max_resolution: int | None = None,
+                                       required_languages: list[str] | None = None,
+                                       preferred_languages: list[str] | None = None, only: bool = False) -> Final:
+        w = qprofiles.make_wish(name, service, min_resolution, max_resolution, required_languages,
+                                preferred_languages, only)
+        w.services = [s for s in w.services if (self.radarr if s == "radarr" else self.sonarr)]
+        if not w.services:
+            raise ArrError("Dafür ist weder Radarr noch Sonarr eingerichtet.")
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, w.name, None), stage="qprof", data=w)
+        flow.step = Step(w.summary() + "\n\nSo anlegen?", [("✅ Anlegen", "yes"), ("Abbrechen", "no")])
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
+    async def _create_profiles(self, flow: Flow, value: str) -> Step:
+        w = flow.data
+        if value != "yes":
+            return Step("👍 Okay, kein neues Profil.", done=True)
+        lines = []
+        for s in w.services:
+            svc = self.radarr if s == "radarr" else self.sonarr
+            try:
+                lines.append(await qprofiles.create(svc, w))
+            except ArrError as e:
+                lines.append(f"❌ {svc.kind}: {e}")
+        lines.append(f"Nutzen: „Lad Dune in {w.name}“ oder als Standard über RADARR_QUALITY_PROFILE / "
+                     "SONARR_QUALITY_PROFILE.")
+        return Step("\n".join(lines), done=True)
+
+    async def _t_admin_media(self, chat_id: int, section: str = "overview", days: int | None = None) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "media", arg=(section, days)))
+        return Final("")
+
     async def _t_admin_stats(self, chat_id: int) -> Final:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "stats"))
         return Final("")
@@ -1027,6 +1151,82 @@ class ToolRunner:
             return Final("Profile sind nicht eingerichtet.")
         return Final(self.profiles.remember(chat_id, like=like, avoid=avoid, from_year=from_year,
                                             min_rating=min_rating, note=note, forget=forget))
+
+    async def _t_calendar(self, chat_id: int, days: int | None = None, mine: bool = False) -> Final:
+        days = max(1, min(int(days or 7), 31))
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "calendar", arg=(days, bool(mine))))
+        return Final("")
+
+    async def _t_disk_space(self, chat_id: int) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "disk"))
+        return Final("")
+
+    async def _t_notify_german(self, chat_id: int, kind: str, id: int, season: int | None = None,  # noqa: A002
+                               stop: bool = False) -> Final:
+        if not self.profiles:
+            return Final("Profile sind nicht eingerichtet.")
+        if stop:
+            gone = [w for w in self.profiles.watches(chat_id) if w["kind"] == kind and w["ext_id"] == int(id)]
+            for w in gone:
+                self.profiles.drop_watch(w["id"])
+            return Final(f"🔕 Okay, für {gone[0]['title']} melde ich mich nicht mehr." if gone
+                         else "Dafür hatte ich keine Benachrichtigung.")
+        if kind == "movie" and not self.tmdb:
+            return Final(NO_TMDB)
+        cand = await self._candidate(chat_id, kind, int(id))
+        if kind == "series" and not cand.lib_id:
+            return Final(f"📺 {cand.title} ist noch nicht in Sonarr. Füg die Serie zuerst hinzu, dann prüfe ich "
+                         "täglich, ob es neue deutsche Folgen gibt.")
+        title = cand.title + (f" ({cand.year})" if kind == "movie" and cand.year else "")
+        what = f"{title} Staffel {season}" if season else title
+        self.profiles.add_watch(chat_id, kind, int(id), title, int(season) if season else None)
+        w = [x for x in self.profiles.watches(chat_id) if x["kind"] == kind and x["ext_id"] == int(id)
+             and x["season"] == (int(season) if season else None)]
+        notices = await watch.check_watches(self, only=w)  # maybe it's already there
+        if notices:
+            n = notices[0]
+            return Final(n.text) if n.text else Final("")
+        return Final(f"🔔 Mach ich! Ich prüfe {what} jeden Tag und melde mich, sobald es "
+                     f"{'eine deutsche Fassung gibt' if kind == 'movie' else 'neue deutsche Folgen gibt'}.")
+
+    async def _t_weekly_digest(self, chat_id: int, day: str | None = None, off: bool = False) -> Final:
+        if not self.profiles:
+            return Final("Profile sind nicht eingerichtet.")
+        if off:
+            self.profiles.set_digest(chat_id, None)
+            return Final("🔕 Okay, kein Wochenrückblick mehr.")
+        n = watch.parse_day(day) if day is not None else 6
+        if n is None:
+            return Final("An welchem Wochentag? Z. B. „jeden Sonntag“.")
+        self.profiles.set_digest(chat_id, n)
+        return Final(f"📰 Gern! Du bekommst jeden {profiles.DAY_NAMES[n]} um 10 Uhr deinen Wochenrückblick: "
+                     "was fertig wurde, was in der Woche kommt, und ein paar Vorschläge.")
+
+    async def _t_plex_status(self, chat_id: int, title: str | None = None, link: bool = False) -> Final:
+        if not (self.plex and self.plex_store):
+            return Final("Plex ist nicht eingerichtet.")
+        acc = self.plex_store.get(chat_id)
+        if link or not acc:
+            self._outbox.setdefault(chat_id, []).append(View(chat_id, "plex_link"))
+            return Final("" if link else "🔗 Dafür verbinde zuerst dein Plex-Konto:")
+        try:
+            if not title:
+                deck = await self.plex.on_deck(acc)
+                self._outbox.setdefault(chat_id, []).append(
+                    View(chat_id, "plex", arg={"html": plex.on_deck_text(deck)}))
+                return Final("")
+            found = await self.plex.search(acc, title)
+            if not found:
+                return Final(f"🤷 „{title}“ habe ich in Plex nicht gefunden. Noch nicht fertig geladen? /downloads")
+            it = found[0]
+            meta = await self.plex.metadata(acc, it.rating_key)
+            eps = await self.plex.episodes(acc, it.rating_key) if it.kind == "series" else []
+        except plex.PlexError as e:
+            return Final(f"⚠️ {e}")
+        text, key = plex.progress_text(it, meta, eps)
+        url = self.plex.web_link(acc, key) if key else None
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "plex", arg={"text": text, "url": url}))
+        return Final("")
 
     async def _t_my_profile(self, chat_id: int) -> Final:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "profile"))

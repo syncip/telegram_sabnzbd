@@ -66,6 +66,16 @@ services:
       # themoviedb.org -> Einstellungen -> API: "API-Schlüssel" oder "Lesezugriffs-Token"
       TMDB_API_KEY: ""
 
+      # --- Plex (optional): verbinden macht jeder selbst im Bot mit /plex (Code auf plex.tv/link) ---
+      # Lokale Adresse des Plex-Servers, falls der Bot ihn sonst nicht findet. Leer = automatisch.
+      PLEX_URL: ""
+
+      # --- Mediathek ---
+      # Admins bekommen eine Warnung, wenn weniger als so viele GB frei sind ("0" = aus)
+      DISK_WARN_GB: "50"
+      # /mediathek: "lange da, nie geschaut" ab so vielen Tagen
+      UNWATCHED_DAYS: "180"
+
       # Zeitzone für "fertig ca. 21:45 Uhr"
       TZ: "Europe/Berlin"
 

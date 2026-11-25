@@ -267,6 +267,7 @@ class Tracker:
                     ("⏸ In 3 Tagen nochmal", f"n:p3:{t.key}"),
                     ("⏸ In 7 Tagen nochmal", f"n:p7:{t.key}"),
                     ("🗑 Löschen", f"n:rm:{t.key}"),
+                    ("🔔 Bei Deutsch melden", f"n:w:{t.key}"),
                     ("👍 Okay", "n:ok"),
                 ])
 

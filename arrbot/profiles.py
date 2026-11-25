@@ -43,8 +43,9 @@ ARR_GENRES = {
 }
 GENRE_NAMES = sorted(set(TMDB_GENRES.values()))
 # Weight change per event.
-WEIGHTS = {"requested": 1.0, "finished": 0.5, "deleted": -1.0, "not_interested": -0.3}
+WEIGHTS = {"requested": 1.0, "finished": 0.5, "watched": 1.5, "deleted": -1.0, "not_interested": -0.3}
 MAX_NOTES = 5
+DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 
 def genre_de(name: str) -> str | None:
@@ -67,6 +68,7 @@ class Prefs:
     from_year: int | None = None
     min_rating: float | None = None
     notes: list[str] = field(default_factory=list)  # short free text, e.g. "schaut mit Kindern"
+    digest_day: int | None = None  # weekly overview on this weekday (0 = Monday), None = off
 
 
 @dataclass
@@ -140,6 +142,11 @@ class ProfileStore:
                 PRIMARY KEY (user_id, genre));
             CREATE TABLE IF NOT EXISTS prefs (
                 user_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated TEXT NOT NULL);
+            -- "Sag mir, wenn es auf Deutsch kommt": checked once a day
+            CREATE TABLE IF NOT EXISTS watches (
+                id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, kind TEXT NOT NULL, ext_id INTEGER NOT NULL,
+                title TEXT NOT NULL, season INTEGER, known INTEGER NOT NULL DEFAULT 0,
+                created TEXT NOT NULL, checked TEXT, UNIQUE(user_id, kind, ext_id, season));
         """)
         self._db.commit()
 
@@ -154,7 +161,7 @@ class ProfileStore:
         w = WEIGHTS.get(action, 0.0)
         try:
             with self._lock, self._db:
-                if action in ("requested", "finished"):  # same title again: only the newest entry
+                if action in ("requested", "finished", "watched"):  # same title again: only the newest entry
                     self._db.execute(
                         "DELETE FROM events WHERE user_id=? AND action=? AND kind=? AND tmdb IS ? AND tvdb IS ?",
                         (user_id, action, kind, tmdb, tvdb))
@@ -169,6 +176,13 @@ class ProfileStore:
                         (user_id, g, w))
         except sqlite3.Error as e:  # a profile must never break a download
             log.error("Profil-DB: %s", e)
+
+    def known(self, user_id: int, action: str) -> set[tuple[str, int | None, int | None]]:
+        """(kind, tmdb, tvdb) of titles with this action, e.g. everything already learned as watched."""
+        with self._lock:
+            rows = self._db.execute("SELECT kind, tmdb, tvdb FROM events WHERE user_id=? AND action=?",
+                                    (user_id, action)).fetchall()
+        return {(r["kind"], r["tmdb"], r["tvdb"]) for r in rows}
 
     def has_events(self) -> bool:
         with self._lock:
@@ -249,8 +263,42 @@ class ProfileStore:
 
     def forget_all(self, user_id: int) -> None:
         with self._lock, self._db:
-            for table in ("events", "genres", "prefs"):
+            for table in ("events", "genres", "prefs", "watches"):
                 self._db.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))  # noqa: S608 - fixed names
+
+    # ---- German watch list --------------------------------------------------------------------
+    def add_watch(self, user_id: int, kind: str, ext_id: int, title: str, season: int | None = None) -> bool:
+        """kind movie: ext_id = TMDB id; series: TVDB id. False if it was already on the list."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO watches(user_id, kind, ext_id, title, season, created) VALUES (?,?,?,?,?,?)",
+                (user_id, kind, ext_id, title, season, utcnow()))
+            return cur.rowcount > 0
+
+    def watches(self, user_id: int | None = None) -> list[dict]:
+        with self._lock:
+            q, args = "SELECT * FROM watches", ()
+            if user_id is not None:
+                q, args = q + " WHERE user_id=?", (user_id,)
+            return [dict(r) for r in self._db.execute(q + " ORDER BY id", args)]
+
+    def update_watch(self, watch_id: int, known: int) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE watches SET known=?, checked=? WHERE id=?", (known, utcnow(), watch_id))
+
+    def drop_watch(self, watch_id: int) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM watches WHERE id=?", (watch_id,))
+
+    def set_digest(self, user_id: int, weekday: int | None) -> None:
+        p = self.prefs(user_id)
+        p.digest_day = weekday
+        self.save_prefs(user_id, p)
+
+    def digest_users(self, weekday: int) -> list[int]:
+        with self._lock:
+            rows = self._db.execute("SELECT user_id, data FROM prefs").fetchall()
+        return [r["user_id"] for r in rows if json.loads(r["data"]).get("digest_day") == weekday]
 
     # ---- reading ----------------------------------------------------------------------------
     def profile(self, user_id: int) -> Profile:
@@ -262,7 +310,7 @@ class ProfileStore:
         counts = Counter(r["action"] for r in rows)
         decades = Counter((r["year"] // 10) * 10 for r in rows if r["year"] and r["action"] in ("requested", "finished"))
         rejected = {(r["kind"], r["tmdb"]) for r in rows if r["action"] == "not_interested" and r["tmdb"]}
-        seen = {(r["kind"], r["tmdb"]) for r in rows if r["action"] in ("requested", "deleted") and r["tmdb"]}
+        seen = {(r["kind"], r["tmdb"]) for r in rows if r["action"] in ("requested", "deleted", "watched") and r["tmdb"]}
         since = min((r["at"] for r in rows), default=None)
         return Profile(user_id, self.prefs(user_id), genres, dict(decades), dict(counts), since, rejected, seen)
 
@@ -310,7 +358,10 @@ def render(p: Profile, name: str) -> str:
         learned.append(f"📼 Am liebsten aus den {dec % 100:02d}ern" if dec < 2000 else f"📼 Am liebsten ab {dec}")
     c = p.counts
     learned.append(f"📊 {c.get('requested', 0)} angefragt · {c.get('finished', 0)} fertig geladen · "
+                   + (f"{c['watched']} in Plex gesehen · " if c.get("watched") else "") +
                    f"{c.get('deleted', 0)} gelöscht · {c.get('not_interested', 0)} Vorschläge abgelehnt")
+    if pr.digest_day is not None:
+        out.insert(2 if p.since else 1, f"📰 Wochenrückblick jeden {DAY_NAMES[pr.digest_day]}")
     out += ["", "<b>Hab ich gelernt</b>"] + learned
     out += ["", "<i>Ändern einfach per Nachricht, z. B. „Vergiss Horror“ oder „Ich mag Krimis“.</i>"]
     return "\n".join(out)

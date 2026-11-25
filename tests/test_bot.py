@@ -66,9 +66,19 @@ class FakeArr:
         if p.startswith("/series/") and req.method == "PUT":
             self.series[int(p.split("/")[-1])] = body
             return httpx.Response(202, json=body)
+        if p == "/command" and req.method == "GET":  # running commands: a refresh that is done
+            return httpx.Response(200, json=[{"name": "RefreshSeries", "status": "completed", "body": {"seriesId": 3}}])
         if p == "/command":
             self.commands.append(body)
             return httpx.Response(201, json=body)
+        if p == "/episode" and req.method == "GET":
+            s = self.series.get(int(q["seriesId"]), {})
+            return httpx.Response(200, json=[
+                {"id": 1000 + x["seasonNumber"] * 10 + n, "seasonNumber": x["seasonNumber"], "episodeNumber": n}
+                for x in s.get("seasons", []) for n in (1, 2)])
+        if p == "/episode/monitor" and req.method == "PUT":
+            self.monitored_episodes = getattr(self, "monitored_episodes", []) + body["episodeIds"]
+            return httpx.Response(202, json={})
         if p == "/history/since":
             return httpx.Response(200, json=self.history)
         if p == "/queue":
@@ -132,10 +142,17 @@ def test_tool_error_is_reported_not_raised(tmp_path):
 def test_add_series_specific_seasons(tmp_path):
     fr, fs, radarr, sonarr, store = make(tmp_path)
     tools = ToolRunner(radarr, sonarr, store, "released")
-    res = asyncio.run(tools.run(ToolCall("x", "add_series", {"tvdb_id": 371980, "seasons": [2]}), 5))
+    async def go():
+        res = await tools.run(ToolCall("x", "add_series", {"tvdb_id": 371980, "seasons": [2]}), 5)
+        await sonarr.wait_pending()  # monitoring + search run in the background after adding
+        return res
+
+    res = asyncio.run(go())
     assert not res.is_error, res.content
     s = fs.series[3]
     assert {x["seasonNumber"]: x["monitored"] for x in s["seasons"]} == {0: False, 1: False, 2: True}
+    # The episodes themselves must be monitored, otherwise Sonarr's season search finds nothing.
+    assert fs.monitored_episodes == [1021, 1022]
     assert fs.commands == [{"name": "SeasonSearch", "seriesId": 3, "seasonNumber": 2}]
     assert "languageProfileId" not in s
 

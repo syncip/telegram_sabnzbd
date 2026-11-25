@@ -57,6 +57,9 @@ class Config:
     sabnzbd_api_key: str | None = None
     timezone: str = "Europe/Berlin"
     tmdb_api_key: str | None = None
+    plex_url: str | None = None  # optional: local address of the Plex server, e.g. http://192.168.1.10:32400
+    disk_warn_gb: int = 50  # warn admins below this much free space; 0 = off
+    unwatched_days: int = 180  # media check: "on the server for a long time" means this many days
     extra: dict = field(default_factory=dict)
 
 
@@ -131,6 +134,9 @@ def load_config() -> Config:
         sabnzbd_api_key=sab_key,
         timezone=_env("TZ", "Europe/Berlin"),  # type: ignore[arg-type]
         tmdb_api_key=_env("TMDB_API_KEY"),
+        plex_url=_env("PLEX_URL"),
+        disk_warn_gb=int(_env("DISK_WARN_GB", "50")),  # type: ignore[arg-type]
+        unwatched_days=int(_env("UNWATCHED_DAYS", "180")),  # type: ignore[arg-type]
         llm=llm,
         radarr=radarr,
         sonarr=sonarr,

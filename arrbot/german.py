@@ -10,6 +10,7 @@ Movies: German cinema / digital / disc dates and streaming (TMDB), file language
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -28,6 +29,55 @@ def _langs(obj: dict | None) -> list[str]:
     if isinstance(obj.get("language"), dict):  # Sonarr v3
         names.append(obj["language"].get("name") or "")
     return [n for n in names if n]
+
+
+AUDIO_CODES = {
+    "ger": "German", "deu": "German", "de": "German", "german": "German", "deutsch": "German",
+    "eng": "English", "en": "English", "english": "English", "fre": "French", "fra": "French", "fr": "French",
+    "french": "French", "spa": "Spanish", "es": "Spanish", "spanish": "Spanish", "ita": "Italian", "it": "Italian",
+    "italian": "Italian", "jpn": "Japanese", "ja": "Japanese", "japanese": "Japanese", "kor": "Korean",
+    "ko": "Korean", "korean": "Korean", "rus": "Russian", "ru": "Russian", "russian": "Russian",
+    "pol": "Polish", "pl": "Polish", "polish": "Polish", "tur": "Turkish", "tr": "Turkish", "turkish": "Turkish",
+    "dut": "Dutch", "nld": "Dutch", "nl": "Dutch", "dutch": "Dutch",
+}
+LANG_DE = {"German": "Deutsch", "English": "Englisch", "French": "Französisch", "Spanish": "Spanisch",
+           "Italian": "Italienisch", "Japanese": "Japanisch", "Korean": "Koreanisch", "Russian": "Russisch",
+           "Polish": "Polnisch", "Turkish": "Türkisch", "Dutch": "Niederländisch"}
+
+
+def audio_langs(file: dict | None) -> list[str] | None:
+    """The real audio tracks of a file (Sonarr/Radarr read them on import). None = not known."""
+    raw = ((file or {}).get("mediaInfo") or {}).get("audioLanguages")
+    if not raw or not isinstance(raw, str):
+        return None
+    names = []
+    for part in re.split(r"[/,|]", raw):
+        n = part.strip()
+        if not n or n.lower() in ("und", "unknown", "zxx", "mul"):
+            continue
+        names.append(AUDIO_CODES.get(n.lower(), n.title()))
+    return list(dict.fromkeys(names)) or None
+
+
+def file_langs(file: dict | None) -> list[str]:
+    """Languages of a file: the real audio tracks when known, otherwise what the release name said."""
+    return audio_langs(file) or _langs(file)
+
+
+def file_check(file: dict | None) -> str:
+    """german | mislabelled (name says German, audio isn't) | other | unknown."""
+    audio, named = audio_langs(file), _langs(file)
+    if audio is not None:
+        if "German" in audio:
+            return "german"
+        return "mislabelled" if "German" in named else "other"
+    if "German" in named:
+        return "german"
+    return "other" if named else "unknown"
+
+
+def langs_de(langs: list[str]) -> str:
+    return ", ".join(LANG_DE.get(x, x) for x in langs) or "unbekannt"
 
 
 def _is_german_release(r: dict) -> bool:
@@ -112,17 +162,20 @@ async def series_report(sonarr: Any, tmdb: TMDB | None, tvdb_id: int, season: in
         air = _air(ep) or t.get("air")
         de_title = t.get("de")
         label = f"E{n:02d}" + (f" „{de_title}“" if de_title else (f" {ep.get('title') or t.get('en')}" if (ep.get("title") or t.get("en")) else ""))
-        file_langs = _langs(ep.get("episodeFile")) if ep.get("hasFile") else []
+        efile = ep.get("episodeFile") if ep.get("hasFile") else None
+        check = file_check(efile) if efile else None
+        langs = file_langs(efile) if efile else []
+        bad_name = " (heißt Deutsch, Tonspur aber nicht)" if check == "mislabelled" else ""
         if air and air > today:
             status = f"⏳ kommt erst am {_d(air)} (Original)"
-        elif "German" in file_langs:
+        elif check == "german":
             status, german = "✅ bei dir auf Deutsch", german + 1
         elif german_rel.get(n):
             status, german = f"⬇️ deutscher Download da ({german_rel[n]})", german + 1
-            if file_langs:
-                status += f" – bei dir nur {', '.join(file_langs)}"
-        elif file_langs:
-            status = f"📁 bei dir nur auf {', '.join(file_langs)}"
+            if langs:
+                status += f" – bei dir nur {', '.join(langs)}{bad_name}"
+        elif langs:
+            status = f"📁 bei dir nur auf {', '.join(langs)}{bad_name}"
         elif indexer and lib_id and any_rel.get(n):
             status = "🇺🇸 nur Originalfassung gefunden"
         elif de_title:
@@ -186,9 +239,15 @@ async def movie_report(radarr: Any, tmdb: TMDB | None, tmdb_id: int, indexer: bo
     lib_id = movie.get("id")
     if lib_id:
         full = await radarr.get(lib_id)
-        langs = _langs(full.get("movieFile")) if full.get("hasFile") else []
-        if langs:
-            out.append(("✅ Bei dir vorhanden auf Deutsch" if "German" in langs else f"📁 Bei dir nur auf {', '.join(langs)}"))
+        mfile = full.get("movieFile") if full.get("hasFile") else None
+        if mfile:
+            check, langs = file_check(mfile), file_langs(mfile)
+            if check == "german":
+                out.append("✅ Bei dir vorhanden auf Deutsch")
+            elif check == "mislabelled":
+                out.append(f"🏷 Deine Datei heißt Deutsch, die Tonspur ist aber {langs_de(langs)}")
+            else:
+                out.append(f"📁 Bei dir nur auf {langs_de(langs)}")
         if indexer:
             try:
                 rel = await radarr.releases(movieId=lib_id)

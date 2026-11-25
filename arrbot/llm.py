@@ -284,6 +284,13 @@ class AnthropicProvider(LLMProvider):
 # --------------------------------------------------------------------------
 # OpenAI-compatible (OpenAI, OpenRouter, Groq, Ollama, LM Studio, ...)
 # --------------------------------------------------------------------------
+def _cache_key(tools: list) -> str:
+    import hashlib
+
+    names = ",".join(t.name for t in tools)
+    return "arrbot-" + hashlib.sha1(names.encode()).hexdigest()[:8]
+
+
 class OpenAICompatProvider(LLMProvider):
     name = "openai"
 
@@ -327,8 +334,9 @@ class OpenAICompatProvider(LLMProvider):
                 messages=self._messages(system, history),
                 # Answers are short; the cap only guards against runaway output.
                 max_completion_tokens=MAX_OUTPUT_TOKENS,
-                # Same key for every call -> better hit rate on OpenAI's automatic prompt cache.
-                prompt_cache_key="arrbot",
+                # Same key for the same tool set -> requests with the same prompt start land on the same
+                # cache (admins get extra tools, so they get their own key).
+                prompt_cache_key=_cache_key(tools),
                 tools=[
                     {
                         "type": "function",
