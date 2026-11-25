@@ -27,12 +27,12 @@ GROUPS: dict[str, tuple[set[str], str]] = {
     "manage": ({"remove_title", "pause_title", "resume_title", "clean_episodes"},
                r"lösch|entfern|\bweg\b|raus|pausier|später|nochmal suchen|in \d+ tag|weiter\b|fortsetz|stopp|"
                r"abbrech|nicht mehr"),
-    "extras": ({"calendar", "disk_space", "weekly_digest", "plex_status"},
-               r"kalender|woche|kommt|wann|heute|morgen|speicher|platz|festplatte|voll|rückblick|plex|gesehen|"
+    "extras": ({"calendar", "disk_space", "weekly_digest", "plex_status", "bot_info"},
+               r"version|modell|\bki\b|update|bist du aktuell|kalender|woche|kommt|wann|heute|morgen|speicher|platz|festplatte|voll|rückblick|plex|gesehen|"
                r"geschaut|weiterschau|fortschritt|verknüpf|verbind"),
     "sites": ({"watch_site"}, r"überwach|beobacht|webseite|website|im auge|seiten?\b"),
     "admin": (set(),  # all admin_* tools, only for admins
-              r"statistik|nutzer|user|limit|check|api|mediathek|aufräum|qualität|profil|aktivit|anfrag|"
+              r"statistik|übersicht|dashboard|verwaltung|wie steht|was macht|zeig mir|nutzer|user|limit|check|api|mediathek|aufräum|qualität|profil|aktivit|anfrag|"
               r"sammlung|collection|problem|fehler|freigab|kosten|tokens|sperr|erlaub|admin|gesehen|ungesehen|platz|speicher|lösch|regel|"
               r"untertitel|überwach|webseite|website"),
 }

@@ -55,6 +55,7 @@ class FixPlan:
     grabs: list[Grab] = field(default_factory=list)
     not_found: list[dict] = field(default_factory=list)  # needed, no German download found
     skipped_seasons: list[int] = field(default_factory=list)  # not searched yet (time budget)
+    season: int | None = None  # asked for one season only
     bad: set[str] = field(default_factory=set)  # release names of files that are not really German
 
     def covered(self, only_missing: bool) -> list[Grab]:
@@ -89,7 +90,7 @@ def _usable(r: dict, bad: set[str] = frozenset()) -> bool:  # type: ignore[assig
 
 async def plan_german(sonarr: Any, series_id: int, season: int | None, today: date) -> FixPlan:
     series = await sonarr.get(series_id)
-    plan = FixPlan(series_id, series.get("title", "?"))
+    plan = FixPlan(series_id, series.get("title", "?"), season=season)
     eps = [e for e in await sonarr.episodes(series_id, season)
            if e.get("seasonNumber", 0) > 0 and (_air(e) or date.max) <= today]
     plan.checked = len(eps)
@@ -177,6 +178,10 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
                      "Markierung falsch (alte DVD-Rips). Hör kurz rein: ist es Deutsch, tipp „Ist Deutsch“.")
     if plan.missing:
         lines.append(f"❌ {len(plan.missing)} fehlen ({_eps_text(plan.missing)})")
+        if not plan.german and not plan.other_lang:
+            lines.append("ℹ️ Sonarr kennt für keine dieser Folgen eine Datei. Siehst du sie trotzdem in Plex, liegen "
+                         "sie nicht dort, wo Sonarr sucht, oder sind nicht importiert – „🔄 Neu einlesen“ lässt "
+                         "Sonarr den Serienordner prüfen.")
     if not plan.other_lang and not plan.missing:
         lines.append("\n👍 Alles ist auf Deutsch da.")
         return "\n".join(lines), []
@@ -193,8 +198,16 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
         lines.append(f"⏳ Staffel {', '.join(map(str, plan.skipped_seasons))} noch nicht durchsucht (Suche dauert) – "
                      "tipp „Weiter suchen“.")
         more = [(f"🔎 Weiter suchen ({len(plan.skipped_seasons)} Staffeln)", "more")]
+    extra: list[tuple[str, str]] = []
+    if plan.missing:
+        extra.append(("🔄 Sonarr neu einlesen", "rescan"))
+    if plan.not_found and not plan.skipped_seasons:
+        extra.append(("🔔 Melden, sobald es Deutsch gibt", "notify"))
     if not covered:
-        rest = more + ok_button
+        if plan.not_found and not plan.skipped_seasons:
+            lines.append("\nGerade gibt es auf deinen Indexern nichts auf Deutsch. Sonarr sucht weiter; ich kann dir "
+                         "Bescheid sagen, sobald es eine deutsche Fassung gibt.")
+        rest = more + ok_button + extra
         return "\n".join(lines), rest + ([("Abbrechen", "no")] if rest else [])
 
     replace = [e for g in plan.grabs for e in g.episodes if e.get("hasFile")]
@@ -207,7 +220,7 @@ def render_plan(plan: FixPlan) -> tuple[str, list[tuple[str, str]]]:
             buttons.append((f"⬇️ Nur fehlende ({len(only_missing)})", "missing"))
     else:
         buttons.append((f"⬇️ {len(covered)} Folgen auf Deutsch laden", "all"))
-    buttons += more + ok_button
+    buttons += more + ok_button + [b for b in extra if b[1] == "notify"]
     buttons.append(("Abbrechen", "no"))
     return "\n".join(lines), buttons
 
@@ -250,6 +263,7 @@ class CleanPlan:
     title: str
     what: str
     episodes: list[dict]
+    files: int = -1  # episodes with a file at all (-1 = unknown)
 
     @property
     def size(self) -> float:
@@ -259,6 +273,7 @@ class CleanPlan:
 async def plan_clean(sonarr: Any, series_id: int, which: str, season: int | None) -> CleanPlan:
     series = await sonarr.get(series_id)
     eps = [e for e in await sonarr.episodes(series_id, season) if e.get("hasFile") and e.get("episodeFileId")]
+    files = len(eps)
     if which == "not_german":
         eps = [e for e in eps if file_check(e.get("episodeFile")) != "german"]
         what = "nicht auf Deutsch"
@@ -266,11 +281,15 @@ async def plan_clean(sonarr: Any, series_id: int, which: str, season: int | None
         what = f"aus Staffel {season}"
     else:
         what = "alle"
-    return CleanPlan(series_id, series.get("title", "?"), what, eps)
+    return CleanPlan(series_id, series.get("title", "?"), what, eps, files)
 
 
 def render_clean(plan: CleanPlan) -> tuple[str, list[tuple[str, str]]]:
     if not plan.episodes:
+        if plan.files == 0:
+            return (f"🤔 {plan.title}: Sonarr kennt dafür keine einzige Datei – also kann ich nichts löschen. "
+                    "Siehst du die Folgen in Plex, liegen sie nicht im Serienordner von Sonarr oder sind nicht "
+                    "importiert. Sag „Prüf die deutschen Folgen“, dort kann ich Sonarr neu einlesen lassen."), []
         return f"👍 {plan.title}: keine Folgen {plan.what} gefunden – nichts zu löschen.", []
     text = (f"🗑 {plan.title}: {len(plan.episodes)} Folgen {plan.what} ({_gb(plan.size)})\n"
             f"{_eps_text(plan.episodes, 10)}\n\nWas soll passieren?")

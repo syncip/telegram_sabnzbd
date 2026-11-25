@@ -224,6 +224,12 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             }, ["kind"]),
         ))
         specs.append(ToolSpec(
+            "bot_info",
+            "Welche Version des Bots läuft und welches KI-Modell (\"welche Version?\", \"welches Modell nutzt du?\", "
+            "\"bist du aktuell?\"). Zeigt es selbst an.",
+            obj({}),
+        ))
+        specs.append(ToolSpec(
             "german_info",
             "Ob/wann es auf Deutsch gibt; zeigt dem Nutzer selbst eine Übersicht (Serie: pro Folge). "
             "id: tmdb (Film) bzw. tvdb (Serie). season nur wenn genannt. indexer=false nur bei Filmen ohne "
@@ -299,6 +305,18 @@ def build_admin_specs() -> list[ToolSpec]:
             "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot). value: Zahl oder 'aus'.",
             obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": ["tag", "monat", "tokens", "kosten"]},
                  "value": {"type": "string"}}, ["who", "kind", "value"]),
+        ),
+        ToolSpec(
+            "admin_overview",
+            "Verwaltungs-Übersicht (\"wie steht's?\", \"Übersicht\", \"Dashboard\"): Version, Modelle, Nutzer, "
+            "Kosten, Offenes. Zeigt sie selbst an.",
+            obj({}),
+        ),
+        ToolSpec(
+            "admin_user_info",
+            "Alles über einen Nutzer (\"zeig mir Anna\", \"was macht Bob?\"): Verbrauch, Limits, Qualität, Wünsche, "
+            "Warnungen. Zeigt es selbst an.",
+            obj({"who": {"type": "string"}}, ["who"]),
         ),
         ToolSpec(
             "build_tool",
@@ -456,6 +474,7 @@ class ToolRunner:
         self.sites: sitewatch.SiteStore | None = None  # set by the bot
         self.wishes: wishlist.WishStore | None = None  # set by the bot
         self.recipes: recipes.RecipeStore | None = None  # set by the bot
+        self.bot_info: Callable[[int], Awaitable[str]] | None = None  # version and models, set by the bot
         self.builder: Any = None  # LLM provider that writes recipes (a stronger model)
         self.builder_model = ""
         self.builder_cost: Callable[[dict], float | None] = lambda _u: None
@@ -836,6 +855,8 @@ class ToolRunner:
         if flow.stage in ("gfix", "clean", "mfix"):
             self.flows.pop(flow.id, None)
             flow.step = await self._run_series_job(flow, value)
+            if not flow.step.done:  # "Weiter suchen", "Neu einlesen": the buttons stay
+                self.flows[flow.id] = flow
             return flow
         if flow.stage == "extend":
             if value == "rest":
@@ -1157,6 +1178,18 @@ class ToolRunner:
         text, buttons = manage.render_plan(plan)
         return await self._series_job(chat_id, tvdb_id, "gfix", text, buttons, plan)
 
+    @staticmethod
+    async def _rescan(sonarr: Any, series_id: int, wait: float = 60.0) -> None:
+        """Let Sonarr read the series folder again and wait (max. wait seconds) until it is done."""
+        cmd = await sonarr.command("RescanSeries", seriesId=series_id)
+        loop = asyncio.get_running_loop()
+        end = loop.time() + wait
+        while cmd.get("id") and loop.time() < end:
+            state = await sonarr._req("GET", f"/command/{cmd['id']}") or {}
+            if state.get("status") in ("completed", "failed", "aborted", "cancelled"):
+                return
+            await asyncio.sleep(2)
+
     async def _t_clean_episodes(self, chat_id: int, tvdb_id: int, which: str, season: int | None = None) -> Final:
         if which == "season" and not season:
             raise ArrError("Welche Staffel? season angeben.")
@@ -1189,6 +1222,19 @@ class ToolRunner:
             german.confirmed.add(kind, arr_id)
             return Step(f"👍 Gemerkt: {title} ist Deutsch, nur die Tonspur ist falsch markiert. "
                         "Ich melde das nicht mehr.", done=True)
+        if value == "notify" and flow.stage == "gfix":
+            res = await self._t_notify_german(flow.chat_id, "series", flow.cand.ext_id)
+            return Step(res.text or f"🔔 Ich sage Bescheid, sobald es {title} auf Deutsch gibt.", done=True)
+        if value == "rescan" and flow.stage == "gfix":
+            sonarr_ = self._need(self.sonarr, "Sonarr")
+            try:
+                await self._rescan(sonarr_, plan.series_id)
+                flow.data = plan = await manage.plan_german(sonarr_, plan.series_id, plan.season, date.today())
+            except ArrError as e:
+                return Step(f"❌ Neu einlesen hat nicht geklappt: {e}", done=True)
+            text, buttons = manage.render_plan(plan)
+            text = "🔄 Sonarr hat den Ordner neu eingelesen.\n" + text
+            return Step(text, [b for b in buttons if b[1] != "rescan"]) if len(buttons) > 1 else Step(text, done=True)
         if value == "more" and flow.stage == "gfix":
             try:
                 await manage.search_more(self._need(self.sonarr, "Sonarr"), plan)
@@ -1654,6 +1700,22 @@ class ToolRunner:
         lines = [f"• {r.title} ({r.tool}) – {r.uses}× benutzt" for r in self.recipes.all()]
         return Final("🛠 Selbstgebaute Werkzeuge:\n" + "\n".join(lines) if lines
                      else "🛠 Noch keine selbstgebauten Werkzeuge.")
+
+    async def _t_bot_info(self, chat_id: int) -> Final:
+        if self.bot_info is None:
+            raise ArrError("Keine Versionsinfo verfügbar.")
+        return Final(await self.bot_info(chat_id))
+
+    async def _t_admin_overview(self, chat_id: int) -> Final:
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "admin"))
+        return Final("")
+
+    async def _t_admin_user_info(self, chat_id: int, who: str) -> Final:
+        uid = self.users.find(str(who)) if self.users else None
+        if uid is None or uid not in self.users.users:
+            raise ArrError(f"Nutzer „{who}“ kenne ich nicht. /nutzer zeigt alle.")
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "usercard", arg=uid))
+        return Final("")
 
     async def _t_admin_max_quality(self, chat_id: int, who: str, quality: str) -> Final:
         try:

@@ -42,9 +42,10 @@ from .tmdb import TMDB
 from .tools import Flow, Offer, ToolRunner, View, release_languages
 from .tracker import Tracker
 from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
+from . import admin as admin_view
 from .profiles import ProfileStore
 from .agent import PRICES, UsageStats
-from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text
+from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text, quality_label
 
 log = logging.getLogger(__name__)
 
@@ -69,12 +70,13 @@ HELP = (
     "/kalender – was diese Woche kommt\n"
     "/plex – Plex verbinden (gesehen, weiterschauen)\n"
     "/neu – Gespräch zurücksetzen\n"
-    "/version – welche Version läuft\n\n"
+    "/version – welche Version und welche KI läuft („Welche Version hast du?“ geht auch)\n\n"
     "Du kannst Filme und Serien suchen und hinzufügen. Löschen, Pausieren oder Austauschen macht der Admin.\n\n"
     "Hinweis: Der Admin sieht, was du fragst und ob es geklappt hat – so kann er Probleme beheben."
 )
 ADMIN_HELP = (
     "\n\n<b>Admin</b>\n"
+    "/admin – Übersicht: Version, Modelle, Nutzer, Kosten, offene Freigaben, Probleme – mit Buttons zu allem\n"
     "/nutzer – Nutzer freigeben, sperren, entfernen\n"
     "/statistik – Nutzer, Anfragen, Tokens, Kosten\n"
     "/mediathek – was fehlt, was nicht in Plex ist, was gesehen oder lange ungesehen ist (aufräumen)\n"
@@ -632,7 +634,7 @@ def build_app(cfg: Config) -> Application:
                                          builder=tools.builder if cfg.recipe_model != cfg.llm.model else None,
                                          builder_model=cfg.recipe_model)
         update_state["latest"] = await version.latest(cfg.update_repo, token=cfg.update_token) or update_state["latest"]
-        extra = [version.line(update_state["latest"])]
+        extra = [version.line(update_state["latest"]), *model_lines(True)]
         if cfg.monitor_minutes > 0:
             extra.append(monitor.status() + f" (alle {cfg.monitor_minutes} Min.)")
         return health.render(checks) + "\n\n" + "\n".join(html.escape(x) for x in extra)
@@ -654,12 +656,111 @@ def build_app(cfg: Config) -> Application:
             await tell_admins(f"⬆️ Neue Bot-Version {latest} verfügbar (läuft: {version.__version__}).\n"
                               "Container neu bauen bzw. Image ziehen und neu starten. Details: /version")
 
-    async def on_version(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-        if users.is_admin(update.effective_user.id):
+    def models() -> tuple[admin_view.Model, admin_view.Model | None]:
+        main = admin_view.model_of(agent.provider, cfg.llm.model)
+        builder = admin_view.model_of(tools.builder, cfg.recipe_model) if tools.builder else None
+        return main, builder
+
+    def model_lines(is_admin_: bool) -> list[str]:
+        main, builder = models()
+        out = [f"🧠 KI ({cfg.llm.provider}): {main.text(PRICES if is_admin_ else {})}"]
+        if is_admin_ and builder and builder.name != main.name:
+            out.append(f"🛠 Werkzeug-KI: {builder.text(PRICES)}")
+        return out
+
+    async def bot_info(uid: int) -> str:
+        """Version and models; admins also get the update check and what is new."""
+        is_adm = users.is_admin(uid)
+        if is_adm:
             update_state["latest"] = await version.latest(cfg.update_repo, token=cfg.update_token) or update_state["latest"]
-            await update.effective_message.reply_text(version.text(update_state["latest"]))
+        main, builder = models()
+        changes = ""
+        if is_adm:
+            vt = version.text(update_state["latest"]).split("\n", 1)
+            changes = vt[1].strip() if len(vt) > 1 else ""
+        return admin_view.info_text(version.line(update_state["latest"] if is_adm else None), main, builder, PRICES,
+                               cfg.llm.provider, is_adm, changes)
+
+    tools.bot_info = bot_info
+
+    async def on_version(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.effective_message.reply_text(await bot_info(update.effective_user.id))
+
+    # ---- admin overview and user card -------------------------------------------------------------
+    ADMIN_VIEWS = [("👥 Nutzer", "users"), ("⏳ Freigaben", "approvals"), ("📊 Statistik", "stats"),
+                   ("📋 Aktivität", "activity"), ("🩺 Check", "check"), ("🗓 Monatsbericht", "monthly"),
+                   ("🧹 Regeln", "cleanup"), ("🎞 Mediathek", "media"), ("🛠 Werkzeuge", "recipes")]
+
+    def admin_text() -> tuple[str, InlineKeyboardMarkup]:
+        week = utcnow() - timedelta(days=7)
+        text = admin_view.dashboard(
+            version_line=version.line(update_state["latest"]), models=model_lines(True), users=users,
+            pending_approvals=len(approvals.pending()), entries=activity_db.entries(days=7),
+            events=shield.events(week), monitor_status=monitor.status(), recipes=len(tools.recipes.all()))
+        rows = [[InlineKeyboardButton(label, callback_data=f"g:{key}") for label, key in ADMIN_VIEWS[i:i + 3]]
+                for i in range(0, len(ADMIN_VIEWS), 3)]
+        for u in users.listing():
+            if u.role == PENDING:
+                rows.append([InlineKeyboardButton(f"✅ {u.name[:18]} freigeben", callback_data=f"u:ok:{u.id}"),
+                             InlineKeyboardButton("🗑", callback_data=f"u:rm:{u.id}")])
+        rows.append([InlineKeyboardButton("🔄 Aktualisieren", callback_data="g:refresh")])
+        return text, InlineKeyboardMarkup(rows)
+
+    async def send_admin(chat_id: int) -> None:
+        text, markup = admin_text()
+        await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def on_admin(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_admin(update.effective_chat.id)
+
+    def user_card_text(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
+        u = users.users.get(uid)
+        if u is None:
+            return "Diesen Nutzer gibt es nicht mehr.", None
+        month = utcnow() - timedelta(days=30)
+        extra = []
+        acc = plex_store.get(uid)
+        extra.append("\n🎬 Plex: " + (f"verbunden ({html.escape(acc.server_name)})" if acc else "nicht verbunden"))
+        n_wish, n_sites = len(wishes.wishes(uid)), len(sites.sites(uid))
+        if n_wish or n_sites:
+            extra.append(f"⭐ Wunschliste: {n_wish} · 🌐 beobachtete Seiten: {n_sites}")
+        rules_ = [r for r in approvals.rules() if r.user_id in (None, uid)]
+        if rules_ and u.role != ADMIN:
+            extra.append(f"⏳ {len(rules_)} Freigabe-Regel{'n' if len(rules_) != 1 else ''} gelten für {html.escape(u.name)}")
+        text = admin_view.user_card(u, users, store.state.requests, activity_db.entries(days=30, user_id=uid),
+                               [e for e in shield.events(month) if e.user_id == uid], extra, tz)
+        if u.role == ADMIN:
+            return text, None
+        first = (InlineKeyboardButton("🔓 Freigeben", callback_data=f"u:ok:{uid}") if u.role in (PENDING, BLOCKED)
+                 else InlineKeyboardButton("🚫 Sperren", callback_data=f"u:no:{uid}"))
+        return text, InlineKeyboardMarkup([[first, InlineKeyboardButton("🗑 Entfernen", callback_data=f"u:rm:{uid}")]])
+
+    async def send_user_card(chat_id: int, uid: int) -> None:
+        text, markup = user_card_text(uid)
+        await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def on_admin_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        viewer = update.effective_user.id if update.effective_user else 0
+        if not users.is_admin(viewer):
+            await query.answer("Nur für Admins.", show_alert=True)
+            return
+        key = query.data.split(":", 1)[1]
+        await query.answer()
+        chat_id = query.message.chat_id
+        if key == "refresh":
+            text, markup = admin_text()
+            try:
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except BadRequest:
+                pass  # unchanged
+        elif key == "monthly":
+            await app.bot.send_message(chat_id, monthly_text(monthly.previous_month(datetime.now(tz).date())),
+                                       parse_mode=ParseMode.HTML)
+        elif key == "recipes":
+            await app.bot.send_message(chat_id, recipes.render_list(tools.recipes.all()), parse_mode=ParseMode.HTML)
         else:
-            await update.effective_message.reply_text(version.line(None))
+            await send_view(View(chat_id, key), viewer)
 
     async def send_check(chat_id: int) -> None:
         msg = await app.bot.send_message(chat_id, "🩺 Prüfe alle APIs …")
@@ -690,6 +791,10 @@ def build_app(cfg: Config) -> Application:
             await start_plex_link(view.chat_id, viewer)
         elif view.kind == "approvals" and users.is_admin(viewer):
             await send_approvals(view.chat_id)
+        elif view.kind == "admin" and users.is_admin(viewer):
+            await send_admin(view.chat_id)
+        elif view.kind == "usercard" and users.is_admin(viewer):
+            await send_user_card(view.chat_id, int(view.arg))
         elif view.kind == "cleanup" and users.is_admin(viewer):
             if view.arg:
                 n = await run_cleanup(view.chat_id)
@@ -1377,6 +1482,9 @@ def build_app(cfg: Config) -> Application:
             lim = users.limits_for(u.id)
             lim_txt = ", ".join(limit_text(k, v) for k, v in lim.items()) or "keine Limits"
             cost = f"{u.usage.month_cost:.3f} $".replace(".", ",")
+            cap = users.max_quality(u.id)
+            if cap:
+                lim_txt += f", höchstens {quality_label(cap)}"
             lines.append(
                 f"\n{ROLE_LABEL.get(u.role, u.role)} <b>{html.escape(u.name)}</b> <code>{u.id}</code>\n"
                 f"   heute {u.usage.day_requests} · Monat {u.usage.month_requests} Anfragen · {cost}\n"
@@ -1385,7 +1493,8 @@ def build_app(cfg: Config) -> Application:
         std = ", ".join(limit_text(k, v) for k, v in users.defaults.items()) or "keine"
         tot = ", ".join(limit_text(k, v) for k, v in users.total_limits.items()) or "keins"
         users.total.roll()
-        lines.append(f"\n<b>Standard-Limits</b> für Nutzer: {html.escape(std)}")
+        lines.append(f"\n<b>Standard-Limits</b> für Nutzer: {html.escape(std)}"
+                     + (f", höchstens {quality_label(users.default_quality)}" if users.default_quality else ""))
         lines.append(f"<b>Gesamtbudget</b>: {html.escape(tot)} · diesen Monat "
                      + f"{users.total.month_cost:.3f} $".replace(".", ","))
         lines.append("\nÄndern mit /limit, z. B. <code>/limit standard tag 10</code>")
@@ -1397,11 +1506,12 @@ def build_app(cfg: Config) -> Application:
             if u.role == ADMIN:
                 continue
             short = u.name[:18]
+            info = InlineKeyboardButton("ℹ️", callback_data=f"u:info:{u.id}")
             if u.role in (PENDING, BLOCKED):
-                rows.append([InlineKeyboardButton(f"✅ {short} freigeben", callback_data=f"u:ok:{u.id}"),
+                rows.append([InlineKeyboardButton(f"✅ {short} freigeben", callback_data=f"u:ok:{u.id}"), info,
                              InlineKeyboardButton("🗑", callback_data=f"u:rm:{u.id}")])
             else:
-                rows.append([InlineKeyboardButton(f"🚫 {short} sperren", callback_data=f"u:no:{u.id}"),
+                rows.append([InlineKeyboardButton(f"🚫 {short} sperren", callback_data=f"u:no:{u.id}"), info,
                              InlineKeyboardButton("🗑", callback_data=f"u:rm:{u.id}")])
         return InlineKeyboardMarkup(rows) if rows else None
 
@@ -1417,6 +1527,10 @@ def build_app(cfg: Config) -> Application:
         _, action, raw_uid = query.data.split(":")
         uid = int(raw_uid)
         name = users.name(uid)
+        if action == "info":
+            await query.answer()
+            await send_user_card(query.message.chat_id, uid)
+            return
         try:
             if action == "ok":
                 users.set_role(uid, USER)
@@ -1547,19 +1661,24 @@ def build_app(cfg: Config) -> Application:
             BotCommand("profil", "Was ich über dich weiß"),
             BotCommand("kalender", "Was kommt diese Woche"),
             BotCommand("plex", "Plex verbinden"),
+            BotCommand("version", "Version und KI-Modell"),
             BotCommand("hilfe", "Was kann ich?"),
         ]
         await application.bot.set_my_commands(base, scope=BotCommandScopeDefault())
         for admin in users.admins():
             try:
                 await application.bot.set_my_commands(
-                    base + [BotCommand("nutzer", "Nutzer verwalten"), BotCommand("statistik", "Statistik"),
-                            BotCommand("check", "APIs prüfen"), BotCommand("limit", "Limits setzen"),
-                            BotCommand("mediathek", "Mediathek prüfen und aufräumen"),
-                            BotCommand("aktivitaet", "Was Nutzer fragen, was klappte, wo es hakte"),
-                            BotCommand("regeln", "Aufräumregeln"),
-                            BotCommand("freigaben", "Wünsche erst freigeben"),
-                            BotCommand("version", "Version und Updates")],
+                    [BotCommand("admin", "Übersicht mit Buttons zu allem")]
+                    + [c for c in base if c.command != "version"]
+                    + [BotCommand("nutzer", "Nutzer verwalten"), BotCommand("statistik", "Statistik"),
+                       BotCommand("check", "APIs und KI prüfen"), BotCommand("limit", "Limits setzen"),
+                       BotCommand("mediathek", "Mediathek prüfen und aufräumen"),
+                       BotCommand("aktivitaet", "Was Nutzer fragen, was klappte, wo es hakte"),
+                       BotCommand("regeln", "Aufräumregeln"),
+                       BotCommand("freigaben", "Wünsche erst freigeben"),
+                       BotCommand("rezepte", "Selbstgebaute Werkzeuge"),
+                       BotCommand("monatsbericht", "Bericht für den letzten Monat"),
+                       BotCommand("version", "Version, Modelle und Updates")],
                     scope=BotCommandScopeChat(admin),
                 )
             except BadRequest as e:  # admin never wrote to the bot yet
@@ -1633,6 +1752,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["freigaben", "freigabe"], on_approvals, filters=is_admin))
     app.add_handler(CommandHandler(["rezepte", "werkzeuge"], on_recipes, filters=is_admin))
     app.add_handler(CommandHandler(["monatsbericht", "bericht"], on_monthly, filters=is_admin))
+    app.add_handler(CommandHandler(["admin", "verwaltung", "uebersicht"], on_admin, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))
@@ -1646,6 +1766,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(on_activity_button, pattern=r"^a:"))
     app.add_handler(CallbackQueryHandler(on_cleanup_button, pattern=r"^c:"))
     app.add_handler(CallbackQueryHandler(on_approval_button, pattern=r"^r:"))
+    app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^g:"))
     app.add_handler(MessageHandler(~allowed, on_unknown))
     app.add_handler(MessageHandler(allowed & filters.COMMAND, on_start))  # unknown command: show help
     app.add_error_handler(on_error)

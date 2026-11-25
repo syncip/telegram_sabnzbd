@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.8.1"
+__version__ = "1.9.0"
 
 CHANGES = {
+    "1.9.0": "/admin-Übersicht mit Buttons, Nutzerkarte (ℹ️ in /nutzer, „Zeig mir Anna“), Version und KI-Modell "
+             "per /version oder Frage („Welches Modell nutzt du?“), Modelle mit Preis und Abschalt-Warnung in "
+             "/check; Deutsch-Prüfung: „Melden, sobald es Deutsch gibt“ und „Sonarr neu einlesen“ statt Sackgasse; "
+             "fertiges Docker-Image auf ghcr.io",
     "1.8.1": "Neue Standard-Modelle: gpt-6-luna für den Bot (günstiger als gpt-4o-mini, das OpenAI im Januar "
              "abschaltet), gpt-6.1-terra für selbstgebaute Werkzeuge; Denk-Stufe einstellbar (LLM_REASONING), "
              "/check prüft auch, ob die KI Werkzeuge aufruft",

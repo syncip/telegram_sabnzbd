@@ -57,7 +57,9 @@ Außerdem:
   Folgen bevorzugt Staffelpakete, alle Staffeln; dauert es über 2½ Minuten, macht „🔎 Weiter suchen“
   beim Rest weiter) und bietet per Button „Alle auf
   Deutsch laden“ oder „Nur fehlende“ an. Dateien in anderer Sprache werden dabei durch die
-  deutschen ersetzt.
+  deutschen ersetzt. Gibt es noch nichts auf Deutsch, bietet der Bot „🔔 Melden, sobald es Deutsch gibt“ an;
+  kennt Sonarr für Folgen keine Datei (obwohl sie in Plex liegen), „🔄 Sonarr neu einlesen“ und prüft danach
+  gleich nochmal.
 - **Folgen löschen (Admin):** „Lösch die Folgen von Dark, die nicht auf Deutsch sind“ (oder „Staffel 2“,
   „alle Folgen“) zeigt, was mit wie viel GB weg würde, und fragt per Button: löschen und auf Deutsch
   neu suchen, nur löschen (nicht mehr automatisch laden) oder abbrechen. Die KI erkennt nur die
@@ -217,12 +219,17 @@ Für alle:
 - `/downloads` (auch `/status`) – deine Downloads mit Fortschritt
 - `/verbrauch` – deine Anfragen, Tokens und Kosten, mit Balken bis zum Limit
 - `/neu` – Gespräch zurücksetzen
-- `/version` – laufende Version
+- `/version` – laufende Version und welches KI-Modell der Bot nutzt (oder einfach fragen: „Welche Version hast du?“)
 - `/hilfe` – Beispiele
 
 Nur für den Admin:
 
-- `/nutzer` – alle Nutzer mit Rolle, Verbrauch und Limits; Buttons zum Freigeben, Sperren, Entfernen
+- `/admin` – Übersicht auf einen Blick: Version, Modelle (mit Preis und Abschalt-Warnung), Nutzer, Kosten
+  und Budget, Erfolgsquote der letzten 24 Std., Offenes (Zugangsanfragen, Freigaben, Sperren), Dienste –
+  mit Buttons zu allen Admin-Ansichten und zum direkten Freigeben wartender Nutzer
+- `/nutzer` – alle Nutzer mit Rolle, Verbrauch, Limits und Höchstqualität; Buttons zum Freigeben, Sperren,
+  Entfernen und ℹ️ für die **Nutzerkarte** (Verbrauch, Limits mit Herkunft, Wünsche, letzte Titel,
+  Erfolgsquote, Warnungen, Plex, Wunschliste) – auch per Text: „Zeig mir Anna“
 - `/statistik` – Nutzerzahl, aktive Nutzer, Anfragen, KI-Aufrufe, Tokens und Kosten (heute, Monat,
   gesamt, Ø pro Anfrage), Budget-Balken, die letzten Monate und alles pro Nutzer
 - `/check` – prüft Telegram, KI, Radarr, Sonarr, SABnzbd und TMDB: ✅/❌ mit Version, Antwortzeit und

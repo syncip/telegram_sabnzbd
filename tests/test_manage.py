@@ -52,6 +52,8 @@ class SeriesLib:
                                              ep(3, "2026-10-15"), ep(4, "2026-12-20")])
         if p == "/release" and req.method == "GET":
             return httpx.Response(200, json=self.releases)
+        if p == "/command/1" and req.method == "GET":
+            return httpx.Response(200, json={"id": 1, "status": "completed"})
         if p in ("/release", "/command") and req.method == "POST":
             return httpx.Response(201, json={"id": 1})
         if p in ("/episodefile/bulk", "/episode/monitor"):
@@ -93,7 +95,7 @@ def test_plan_without_pack_offers_only_missing():
     assert [e["episodeNumber"] for e in plan.not_found] == [2]
     text, buttons = manage.render_plan(plan)
     assert "🔍 Noch nichts Deutsches für: S01E02" in text
-    assert [v for _, v in buttons] == ["all", "no"]
+    assert [v for _, v in buttons] == ["all", "notify", "no"]  # E02: tell me when there is German
     asyncio.run(manage.run_fix(sonarr(lib), plan, only_missing=True))
     assert lib.sent("DELETE", "/episodefile/bulk") == []  # E03 had no file, nothing to delete
 
@@ -165,3 +167,19 @@ def test_german_search_goes_on_where_time_ran_out():
     asyncio.run(manage.search_more(sonarr(lib), plan))
     assert plan.skipped_seasons == [] and len(plan.grabs) == 3
     assert all(b[1] != "more" for b in manage.render_plan(plan)[1])
+
+
+def test_nothing_german_offers_rescan_and_notify(tmp_path):
+    lib = SeriesLib(releases=[])
+    store = Store(str(tmp_path))
+    tools = ToolRunner(None, sonarr(lib), store, "released")
+    tools.is_admin = lambda uid: True
+    asyncio.run(tools.run(ToolCall("1", "german_fix", {"tvdb_id": 500}), 5))
+    flow = tools.take_outbox(5)[0]
+    assert "nichts auf Deutsch" in flow.step.text
+    assert [v for _, v in flow.step.buttons] == ["rescan", "notify", "no"]  # no more dead end
+    flow = asyncio.run(tools.choose(flow.id, "rescan"))
+    assert {"name": "RescanSeries", "seriesId": 4} in lib.sent("POST", "/command")
+    assert not flow.step.done and flow.step.text.startswith("🔄 Sonarr hat den Ordner neu eingelesen")
+    assert "rescan" not in [v for _, v in flow.step.buttons]
+    assert tools.flows[flow.id] is flow  # buttons still work after a step that is not done
