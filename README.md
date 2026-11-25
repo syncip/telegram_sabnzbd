@@ -25,6 +25,14 @@ Außerdem:
   (TMDB-Empfehlungen, ohne was ihr schon habt). Antippen = hinzufügen. Wünsche wie „nur Filme
   neuer als 2000“ oder „ab 7 Sterne“ werden beachtet; gibt es zu wenig Passendes, füllt der Bot mit
   den bestbewerteten Titeln dieser Jahre auf.
+- **Nutzerprofil:** Der Bot merkt sich pro Nutzer dauerhaft, was er mag (SQLite-Datenbank
+  `data/profiles.db`). Er lernt ohne KI-Kosten aus jeder Anfrage (Genres und Jahr aus Radarr/Sonarr),
+  aus fertigen und gelöschten Titeln und aus „🙅 Nichts davon“ unter Vorschlägen. Dazu kommt, was du
+  ihm sagst: „Merk dir, ich mag keine Horrorfilme“, „Schlag mir nur Filme ab 2000 vor“, „Vergiss
+  Horror“. Vorschläge bevorzugen deine Lieblingsgenres und lassen Abgelehntes weg. Die KI bekommt
+  eine Zeile Profil (~30 Tokens) vor jede Nachricht. **/profil** oder „Was weißt du über mich?“ zeigt
+  alles, mit Button „🗑 Alles vergessen“. Entfernt der Admin einen Nutzer, wird sein Profil gelöscht.
+  Beim ersten Start übernimmt der Bot die bisherigen Anfragen aus `state.json`.
 - **Top-Listen:** „Welche Filme waren die Top 5 2024?“ zeigt die Liste mit Buttons, „Lade die Top 3
   Filme vom Oktober 2025“ lädt sie direkt (Standard-Qualität). Auch „bestbewertet“ oder „nach
   Einspielergebnis“. Was ihr schon habt, ist mit ✅ markiert und hat keinen Button; „⬇️ Alle

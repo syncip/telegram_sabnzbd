@@ -120,7 +120,14 @@ class Store:
         self.save()
         return t
 
+    on_finish = None  # (Tracked, title) -> None, set by the bot (user profiles)
+
     def finish(self, t: Tracked, title: str) -> None:
+        if self.on_finish:
+            try:
+                self.on_finish(t, title)
+            except Exception:  # noqa: BLE001 - a profile must never break the tracker
+                log.exception("Profil bei 'fertig' nicht aktualisiert")
         self.state.finished.append(
             {"title": title, "service": t.service, "chat_ids": list(t.chat_ids), "at": utcnow().isoformat()}
         )

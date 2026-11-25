@@ -34,6 +34,8 @@ SYSTEM_PROMPT = """Du steuerst Radarr (Filme) und Sonarr (Serien) einer privaten
 - Deutsche Fassung, Synchro, deutscher Kinostart, Streaming: Titel suchen, dann german_info (zeigt die Antwort selbst).
 - "Folgen auf Deutsch vorhanden?/deutsch nachladen": german_fix. Folgen löschen ("nicht deutsch", Staffel, alle): \
 clean_episodes. Status einer Suche/eines Titels: download_status mit title.
+- Dauerhafte Vorlieben ("merk dir", "ich mag keine Horrorfilme", "vergiss …"): remember. "Was weißt du über mich?": \
+my_profile. [Nutzerprofil] vor einer Nachricht nur beachten, nicht erwähnen.
 - Downloads/Status/"was läuft": download_status. Top/Charts/Listen nie mit search_* suchen.
 - Löschen: remove_title. "Später/in X Tagen nochmal suchen", "pausieren": pause_title (days); "weiter": \
 resume_title. lib_id vorher per Suche holen.
@@ -108,6 +110,9 @@ class Agent:
         self.usage = UsageStats()
         # Per-user accounting for limits: (user_id, tokens, cost in USD or None)
         self.on_usage: Callable[[int, int, float | None], None] | None = None
+        # Short profile line for the user (~30 tokens), set by the bot. Goes in front of the message,
+        # not into the system prompt, so the cached prompt prefix stays the same for everybody.
+        self.context_for: Callable[[int], str] | None = None
 
     def reset(self, chat_id: int) -> None:
         self.convs.pop(chat_id, None)
@@ -129,7 +134,8 @@ class Agent:
             self.usage.request()
 
             work = list(conv.history)
-            work.append(Turn(role="user", text=text))
+            ctx = self.context_for(user_id or chat_id) if self.context_for else ""
+            work.append(Turn(role="user", text=f"{ctx}\n{text}" if ctx else text))
             replies: list[str] = []
             try:
                 for step in range(MAX_STEPS):

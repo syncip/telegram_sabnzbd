@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from .profiles import TMDB_GENRES
+
 log = logging.getLogger(__name__)
 
 LANG, REGION = "de-DE", "DE"
@@ -91,6 +93,7 @@ class Recommendation:
     votes: int
     score: float = 0.0
     because: list[str] = field(default_factory=list)
+    genres: list[str] = field(default_factory=list)  # German names
 
 
 class TMDB:
@@ -254,6 +257,7 @@ def _rec(kind: str, r: dict) -> Recommendation:
     return Recommendation(
         kind, r["id"], r.get("title") or r.get("name") or "?", d.year if d else None,
         float(r.get("vote_average") or 0), int(r.get("vote_count") or 0),
+        genres=list(dict.fromkeys(TMDB_GENRES[g] for g in r.get("genre_ids") or [] if g in TMDB_GENRES)),
     )
 
 

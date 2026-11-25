@@ -77,6 +77,8 @@ class User:
 
 
 class UserStore:
+    on_remove = None  # (uid) -> None, set by the bot
+
     def __init__(self, data_dir: str, admin_id: int, seed_users: set[int] = frozenset()):  # type: ignore[assignment]
         self.path = Path(data_dir) / "users.json"
         self.admin_id = admin_id
@@ -187,6 +189,8 @@ class UserStore:
             raise ValueError("Der Haupt-Admin (ADMIN_USER_ID) kann nicht entfernt werden.")
         u = self.users.pop(uid, None)
         self.save()
+        if u and self.on_remove:
+            self.on_remove(uid)  # their profile goes too
         return u
 
     # ---- limits -------------------------------------------------------------------

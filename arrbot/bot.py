@@ -37,7 +37,8 @@ from .state import Store, Tracked
 from .tmdb import TMDB
 from .tools import Flow, Offer, ToolRunner, View, release_languages
 from .tracker import Tracker
-from . import health, stats
+from . import health, profiles, stats
+from .profiles import ProfileStore
 from .agent import PRICES
 from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text
 
@@ -52,10 +53,12 @@ HELP = (
     "• „Lade die Top 3 Filme vom Oktober 2025“\n"
     "• „Gibt es Severance schon auf Deutsch?“\n"
     "• „Such in 3 Tagen nochmal nach Dune 3“ / „Lösch The Office“\n"
+    "• „Merk dir, ich mag keine Horrorfilme“ / „Was weißt du über mich?“\n"
     "• einen Link von IMDb, TMDB, Trakt, Letterboxd, JustWatch …\n\n"
     "Ich sage Bescheid, wenn ein Download startet, wann er fertig ist und ob es Probleme gibt.\n\n"
     "/downloads – deine Downloads mit Fortschritt\n"
     "/verbrauch – deine Anfragen und Limits\n"
+    "/profil – was ich über deinen Geschmack weiß\n"
     "/neu – Gespräch zurücksetzen"
 )
 ADMIN_HELP = (
@@ -94,6 +97,17 @@ def build_app(cfg: Config) -> Application:
     tools = ToolRunner(radarr, sonarr, store, cfg.minimum_availability, cfg.quality_prompt_seconds, tmdb, tz)
     agent = Agent(make_provider(cfg.llm), tools, cfg.history_idle_minutes, cfg.max_history_messages)
     agent.on_usage = users.add_usage
+    profile_db = ProfileStore(cfg.data_dir)
+    tools.profiles = profile_db
+    users.on_remove = profile_db.forget_all
+    agent.context_for = lambda uid: profile_db.profile(uid).context_line()
+
+    def on_finish(t, title: str) -> None:
+        kind = "movie" if t.service == "radarr" else "series"
+        for uid in t.chat_ids:
+            profile_db.learn(uid, "finished", kind, title)
+
+    store.on_finish = on_finish
 
     class Allowed(filters.MessageFilter):
         def filter(self, message: Message) -> bool:
@@ -228,6 +242,8 @@ def build_app(cfg: Config) -> Application:
         buttons = [(c.label, str(i)) for i, c in enumerate(offer.cands)]
         if offer.bulk and len(offer.cands) > 1:
             buttons.append((f"⬇️ Alle {len(offer.cands)} hinzufügen", "all"))
+        if offer.suggest:
+            buttons.append(("🙅 Nichts davon", "none"))
         msg = await app.bot.send_message(offer.chat_id, offer.text, reply_markup=markup_for(buttons, f"o:{offer.id}"))
         offer.message_id = msg.message_id
 
@@ -274,6 +290,11 @@ def build_app(cfg: Config) -> Application:
             return
         _, offer_id, idx = query.data.split(":")
         await query.answer()
+        if idx == "none":
+            text = tools.reject_offer(offer_id, update.effective_user.id)
+            await query.edit_message_reply_markup(None)
+            await app.bot.send_message(query.message.chat_id, text or "Diese Auswahl ist abgelaufen.")
+            return
         if idx == "all":
             text = await tools.add_all(offer_id)
             await query.edit_message_reply_markup(None)
@@ -434,6 +455,37 @@ def build_app(cfg: Config) -> Application:
             await app.bot.send_message(view.chat_id, users_text(), parse_mode=ParseMode.HTML, reply_markup=users_markup())
         elif view.kind == "check" and users.is_admin(viewer):
             await send_check(view.chat_id)
+        elif view.kind == "profile":
+            await send_profile(view.chat_id, viewer)
+
+    # ---- user profile ---------------------------------------------------------------------
+    def profile_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Alles vergessen", callback_data="p:x")]])
+
+    async def send_profile(chat_id: int, uid: int) -> None:
+        text = profiles.render(profile_db.profile(uid), html.escape(users.name(uid)))
+        await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=profile_markup())
+
+    async def on_profile(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_profile(update.effective_chat.id, update.effective_user.id)
+
+    async def on_profile_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not allowed_user(update):
+            await query.answer("Kein Zugriff.", show_alert=True)
+            return
+        uid, action = update.effective_user.id, query.data.split(":")[1]
+        await query.answer()
+        if action == "x":  # ask first
+            await query.edit_message_reply_markup(InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑 Ja, alles löschen", callback_data="p:y"),
+                InlineKeyboardButton("Abbrechen", callback_data="p:n")]]))
+        elif action == "y":
+            profile_db.forget_all(uid)
+            await query.edit_message_text("🗑 Erledigt – ich habe alles über deinen Geschmack vergessen. "
+                                          "Ab jetzt lerne ich neu.")
+        else:
+            await query.edit_message_reply_markup(profile_markup())
 
     # ---- access requests and user management ----------------------------------------
     async def on_unknown(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -632,6 +684,7 @@ def build_app(cfg: Config) -> Application:
             BotCommand("downloads", "Deine Downloads"),
             BotCommand("neu", "Gespräch zurücksetzen"),
             BotCommand("verbrauch", "Anfragen und Limits"),
+            BotCommand("profil", "Was ich über dich weiß"),
             BotCommand("hilfe", "Was kann ich?"),
         ]
         await application.bot.set_my_commands(base, scope=BotCommandScopeDefault())
@@ -645,6 +698,12 @@ def build_app(cfg: Config) -> Application:
             except BadRequest as e:  # admin never wrote to the bot yet
                 log.info("Admin-Befehle für %s nicht gesetzt: %s", admin, e)
         application.job_queue.run_repeating(poll_job, interval=cfg.poll_interval, first=5)
+        try:
+            n = await tools.import_history()
+            if n:
+                log.info("Nutzerprofile: %d frühere Anfragen übernommen", n)
+        except Exception:  # noqa: BLE001 - never block the start
+            log.exception("Nutzerprofile: Import der Anfragen fehlgeschlagen")
         extras = [x for x, on in (("SABnzbd", sab), ("TMDB", tmdb)) if on]
         log.info("Bot läuft mit %s / %s%s, Admin %s", cfg.llm.provider, cfg.llm.model,
                  f" + {', '.join(extras)}" if extras else "", cfg.admin_id)
@@ -653,6 +712,7 @@ def build_app(cfg: Config) -> Application:
         for svc in (radarr, sonarr, sab, tmdb):
             if svc:
                 await svc.close()
+        profile_db.close()
 
     app = (
         Application.builder()
@@ -666,6 +726,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["neu", "reset"], on_reset, filters=allowed))
     app.add_handler(CommandHandler(["downloads", "status", "dl"], on_downloads, filters=allowed))
     app.add_handler(CommandHandler("verbrauch", on_usage, filters=allowed))
+    app.add_handler(CommandHandler(["profil", "profile", "ich"], on_profile, filters=allowed))
     app.add_handler(CommandHandler("nutzer", on_users, filters=is_admin))
     app.add_handler(CommandHandler("limit", on_limit, filters=is_admin))
     app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
@@ -677,6 +738,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(on_user_button, pattern=r"^u:"))
     app.add_handler(CallbackQueryHandler(on_notice_button, pattern=r"^n:"))
     app.add_handler(CallbackQueryHandler(on_stats_button, pattern=r"^s:"))
+    app.add_handler(CallbackQueryHandler(on_profile_button, pattern=r"^p:"))
     app.add_handler(MessageHandler(~allowed, on_unknown))
     app.add_handler(MessageHandler(allowed & filters.COMMAND, on_start))  # unknown command: show help
     app.add_error_handler(on_error)
