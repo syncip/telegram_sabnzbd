@@ -7,6 +7,7 @@ import dataclasses
 import html
 import json
 import logging
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,7 +32,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import downloads, fmt
+from . import debuglog, diagnose, downloads, fmt
 from .agent import Agent
 from .arr import ArrError, Radarr, Sonarr
 from .config import Config
@@ -39,7 +40,7 @@ from .llm import ToolCall, make_provider
 from .sabnzbd import SABnzbd, SabError
 from .state import Store, Tracked, utcnow
 from .tmdb import TMDB
-from .tools import Flow, Offer, ToolRunner, View, release_languages
+from .tools import Flow, Offer, ToolRunner, View, mute, release_languages
 from .tracker import Tracker
 from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from . import admin as admin_view
@@ -70,6 +71,7 @@ HELP = (
     "/kalender – was diese Woche kommt\n"
     "/plex – Plex verbinden (gesehen, weiterschauen)\n"
     "/neu – Gespräch zurücksetzen\n"
+    "/stumm 30 – Download-Meldungen 30 Min. stumm (auch 2h, 1d; „sei bis morgen still“), /laut – wieder an\n"
     "/version – welche Version und welche KI läuft („Welche Version hast du?“ geht auch)\n\n"
     "Du kannst Filme und Serien suchen und hinzufügen. Löschen, Pausieren oder Austauschen macht der Admin.\n\n"
     "Hinweis: Der Admin sieht, was du fragst und ob es geklappt hat – so kann er Probleme beheben."
@@ -85,6 +87,9 @@ ADMIN_HELP = (
     "/version – Versionsnummer, ob es ein Update gibt und was neu ist\n"
     "/aktivitaet – was Nutzer fragen, was geklappt hat und wo es Probleme gab (<code>/aktivitaet Anna</code>)\n"
     "/check – alle APIs prüfen\n"
+    "/log – was ich bei der letzten Nachricht gemacht habe: KI-Schritte, Werkzeuge, jede Anfrage an "
+    "Sonarr/Radarr, Suchergebnis (<code>/log 3</code>, <code>/log Anna</code>)\n"
+    "/debug an – das Log kommt nach jeder Antwort mit, Suchergebnisse sobald sie fertig sind\n"
     "/rezepte – Werkzeuge, die ich mir selbst gebaut habe\n"
     "Plex-Sammlungen: „Mach eine Sammlung Marvel“, „Automatische Sammlungen pro Nutzer an“\n"
     "/monatsbericht – Kosten, Nutzer, Erfolgsquote, Sperren (kommt am 1. von selbst; "
@@ -303,6 +308,98 @@ def build_app(cfg: Config) -> Application:
                       hint=no_release_hint)
     tracker.is_admin = users.is_admin
 
+    # ---- 🩺 search done, nothing loaded: say why right away ----------------------------------
+    diagnosed: dict[str, float] = {}  # key -> when last explained (several commands per request)
+
+    async def on_search_done(chat_id: int, name: str, body: dict, state: dict) -> None:
+        svc = radarr if name.startswith("Movie") or "movieIds" in body else sonarr
+        if svc is None:
+            return
+        if state.get("status") != "completed":
+            debuglog.LOG.late(chat_id, "⚠️", f"{svc.kind} {name} nicht fertig: {state.get('message') or state.get('status')}")
+            return
+        n = diagnose.grabbed(state.get("message"))
+        kind = "movie" if svc is radarr else "series"
+        season = body.get("seasonNumber")
+        episode_id = None
+        if kind == "movie":
+            item_id = (body.get("movieIds") or [None])[0]
+        elif body.get("episodeIds"):
+            episode_id = body["episodeIds"][0]
+            ep = await sonarr._req("GET", f"/episode/{episode_id}") or {}
+            item_id, season = ep.get("seriesId"), ep.get("seasonNumber")
+        else:
+            item_id = body.get("seriesId")
+        if item_id is None:
+            return
+        field_ = "movieId" if kind == "movie" else "seriesId"
+        if n is None:  # message without a number: look into the queue instead
+            n = sum(1 for q in await svc.queue() if q.get(field_) == item_id)
+        if n:
+            debuglog.LOG.late(chat_id, "⬇️", f"{svc.kind}: {n} Download(s) gestartet")
+            return
+        key = f"{'radarr' if kind == 'movie' else 'sonarr'}:{item_id}"
+        now = asyncio.get_running_loop().time()
+        if now - diagnosed.get(key, -1e9) < 600:
+            return
+        diagnosed[key] = now
+        why = await diagnose.why_nothing(svc, kind, item_id, season, episode_id)
+        item = await svc.get(item_id)
+        what = item.get("title", "?") + (f" (Staffel {season})" if season is not None else "")
+        text = f"🔍 {svc.kind} hat für {what} gesucht, aber nichts geladen.\n{why}"
+        debuglog.LOG.late(chat_id, "🩺", text)
+        if t := store.state.tracked.get(key):
+            t.no_release_notified = True  # this replaces the notice after 30 minutes
+        await tracker.tell(chat_id, text, tracker.no_release_buttons(key))
+
+    for svc_ in (radarr, sonarr):
+        if svc_ is not None:
+            svc_.on_search_done = on_search_done
+
+    # ---- 🐞 chat log -----------------------------------------------------------------------
+    async def debug_send(chat_id: int, text: str) -> None:
+        await app.bot.send_message(chat_id, f"🐞 {text}")
+
+    debuglog.LOG.notify = debug_send
+
+    async def on_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/log [name] [n]: what the bot did for the last n messages (default 1) of a chat."""
+        args = list(ctx.args or [])
+        n = int(args.pop()) if args and args[-1].isdigit() and len(args[-1]) < 3 else 1
+        chat, title = update.effective_chat.id, ""
+        if args:
+            who = users.find(" ".join(args))
+            if who is None:
+                await update.effective_message.reply_text(f"Nutzer „{' '.join(args)}“ kenne ich nicht.")
+                return
+            chat, title = who, users.name(who)
+        await update.effective_message.reply_text(debuglog.LOG.render(chat, tz, max(1, min(n, 10)), title),
+                                                  parse_mode=ParseMode.HTML)
+
+    async def on_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/debug an|aus: after every answer the log of it, plus late results (search done)."""
+        chat = update.effective_chat.id
+        arg = (ctx.args[0].lower() if ctx.args else "")
+        on = arg in ("an", "on", "ein", "1") or (not arg and chat not in debuglog.LOG.live)
+        (debuglog.LOG.live.add if on else debuglog.LOG.live.discard)(chat)
+        await update.effective_message.reply_text(
+            "🐞 Debug an: Nach jeder Antwort kommt das Log dazu, Suchergebnisse von Sonarr/Radarr sobald "
+            "sie fertig sind. Aus mit /debug aus." if on else "🐞 Debug aus. Das Log gibt es weiter mit /log.")
+
+    # ---- 🔕 mute ---------------------------------------------------------------------------
+    async def on_mute(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/stumm [Minuten | 2h | 1d]: download messages off for a while (default 60 min)."""
+        raw = (ctx.args[0].lower() if ctx.args else "60")
+        m = re.fullmatch(r"(\d+)\s*(m|min|h|std|d|t)?", raw)
+        if not m:
+            await update.effective_message.reply_text("So: /stumm 30 (Minuten), /stumm 2h oder /stumm 1d")
+            return
+        unit = {"h": 60, "std": 60, "d": 1440, "t": 1440}.get(m.group(2) or "", 1)
+        await update.effective_message.reply_text(mute(store, update.effective_chat.id, int(m.group(1)) * unit))
+
+    async def on_unmute(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.effective_message.reply_text(mute(store, update.effective_chat.id, None))
+
     # ---- conversation -----------------------------------------------------
     async def keep_typing(chat_id: int) -> None:
         # Telegram shows "typing…" for 5 s only; refresh it until the answer is ready.
@@ -354,6 +451,8 @@ def build_app(cfg: Config) -> Application:
         if reply.strip():
             await send_formatted(chat_id, reply)
         await deliver_outbox(chat_id, user_id, ctx)
+        if chat_id in debuglog.LOG.live:
+            await app.bot.send_message(chat_id, debuglog.LOG.render(chat_id, tz), parse_mode=ParseMode.HTML)
 
     async def log_activity(chat_id: int, user_id: int, text: str, reply: str, failed: str | None) -> None:
         """Remember what was asked and how it went; tell the admins about real errors right away."""
@@ -1661,6 +1760,8 @@ def build_app(cfg: Config) -> Application:
             BotCommand("profil", "Was ich über dich weiß"),
             BotCommand("kalender", "Was kommt diese Woche"),
             BotCommand("plex", "Plex verbinden"),
+            BotCommand("stumm", "Download-Meldungen stumm (z. B. /stumm 30)"),
+            BotCommand("laut", "Meldungen wieder an"),
             BotCommand("version", "Version und KI-Modell"),
             BotCommand("hilfe", "Was kann ich?"),
         ]
@@ -1678,6 +1779,8 @@ def build_app(cfg: Config) -> Application:
                        BotCommand("freigaben", "Wünsche erst freigeben"),
                        BotCommand("rezepte", "Selbstgebaute Werkzeuge"),
                        BotCommand("monatsbericht", "Bericht für den letzten Monat"),
+                       BotCommand("log", "Was der Bot bei der letzten Nachricht gemacht hat"),
+                       BotCommand("debug", "Log nach jeder Antwort an/aus"),
                        BotCommand("version", "Version, Modelle und Updates")],
                     scope=BotCommandScopeChat(admin),
                 )
@@ -1741,6 +1844,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["kalender", "woche"], on_calendar, filters=allowed))
     app.add_handler(CommandHandler(["speicher", "platz"], on_disk, filters=allowed))
     app.add_handler(CommandHandler("plex", on_plex, filters=allowed))
+    app.add_handler(CommandHandler(["stumm", "ruhe", "mute"], on_mute, filters=allowed))
+    app.add_handler(CommandHandler(["laut", "unmute"], on_unmute, filters=allowed))
     app.add_handler(CommandHandler("nutzer", on_users, filters=is_admin))
     app.add_handler(CommandHandler("limit", on_limit, filters=is_admin))
     app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
@@ -1753,6 +1858,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["rezepte", "werkzeuge"], on_recipes, filters=is_admin))
     app.add_handler(CommandHandler(["monatsbericht", "bericht"], on_monthly, filters=is_admin))
     app.add_handler(CommandHandler(["admin", "verwaltung", "uebersicht"], on_admin, filters=is_admin))
+    app.add_handler(CommandHandler(["log", "protokoll"], on_log, filters=is_admin))
+    app.add_handler(CommandHandler("debug", on_debug, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))

@@ -27,7 +27,8 @@ GROUPS: dict[str, tuple[set[str], str]] = {
     "manage": ({"remove_title", "pause_title", "resume_title", "clean_episodes"},
                r"lösch|entfern|\bweg\b|raus|pausier|später|nochmal suchen|in \d+ tag|weiter\b|fortsetz|stopp|"
                r"abbrech|nicht mehr"),
-    "extras": ({"calendar", "disk_space", "weekly_digest", "plex_status", "bot_info"},
+    "extras": ({"calendar", "disk_space", "weekly_digest", "plex_status", "bot_info", "mute_notifications"},
+               r"stumm|mute|still|ruhe|keine (nachricht|meldung|benachrichtigung)|meldungen|nerv|laut\b|"
                r"version|modell|\bki\b|update|bist du aktuell|kalender|woche|kommt|wann|heute|morgen|speicher|platz|festplatte|voll|rückblick|plex|gesehen|"
                r"geschaut|weiterschau|fortschritt|verknüpf|verbind"),
     "sites": ({"watch_site"}, r"überwach|beobacht|webseite|website|im auge|seiten?\b"),

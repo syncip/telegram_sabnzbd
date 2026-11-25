@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import httpx
 
@@ -596,3 +596,173 @@ def test_search_again_finds_title_monitors_and_searches_missing_episodes(tmp_pat
     res = asyncio.run(tools.run(ToolCall("x", "search_existing", {"kind": "movie", "title": "dune"}), 42))
     assert lib.movies[9]["monitored"] and lib.commands == [{"name": "MoviesSearch", "movieIds": [9]}]
     assert "Neue Suche für Dune (2021)" in res.final
+
+
+def test_series_job_one_start_message_and_one_summary(tmp_path):
+    from arrbot.tracker import Tracker as Tr
+
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    sent = []
+
+    async def send(chat, text, kb=None):
+        sent.append(text)
+
+    tr = Tr(radarr, sonarr, store, send, no_release_minutes=30, track_days=30)
+    store.track("sonarr", 3, "Eine schrecklich nette Familie", 42)
+    asyncio.run(tr.poll())
+    now = utcnow().isoformat()
+
+    def ep(i, e, event):
+        return {"id": i, "seriesId": 3, "eventType": event, "date": now,
+                "episode": {"seasonNumber": 1, "episodeNumber": e}}
+
+    fs.queue = [{"seriesId": 3}]
+    fs.history = [ep(e, e, "grabbed") for e in (1, 2)]
+    asyncio.run(tr.poll())
+    assert len(sent) == 1 and "Download gestartet" in sent[0] and "Zusammenfassung" in sent[0]
+    for start in (3, 8):  # many more grabs and imports over several polls: silent
+        fs.history = [ep(100 + e, e, "grabbed") for e in range(start, start + 5)] + \
+                     [ep(200 + e, e, "downloadFolderImported") for e in range(1, start)]
+        asyncio.run(tr.poll())
+    assert len(sent) == 1
+    fs.history = [ep(300 + e, e, "downloadFolderImported") for e in range(1, 13)]
+    asyncio.run(tr.poll())
+    assert len(sent) == 1  # still in the queue
+    fs.queue = []
+    asyncio.run(tr.poll())
+    assert len(sent) == 1  # queue empty, but news came in less than 3 minutes ago
+    store.state.tracked["sonarr:3"].job["last"] = (utcnow() - timedelta(minutes=4)).isoformat()
+    asyncio.run(tr.poll())
+    assert len(sent) == 2
+    assert "12 von 12 Folgen fertig importiert (S01E01–S01E12)" in sent[1]
+    assert not store.state.tracked["sonarr:3"].job
+
+
+def test_mute_collects_messages_and_sums_up(tmp_path):
+    from arrbot.tools import mute
+    from arrbot.tracker import Tracker as Tr
+
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    sent = []
+
+    async def send(chat, text, kb=None):
+        sent.append((chat, text))
+
+    tr = Tr(radarr, sonarr, store, send, no_release_minutes=30, track_days=30)
+    store.track("radarr", 7, "Dune: Part Two (2024)", 42)
+    store.track("radarr", 7, "Dune: Part Two (2024)", 43)
+    asyncio.run(tr.poll())
+    assert "Stumm für 30 Minuten" in mute(store, 42, 30)
+    fr.history = [{"id": 1, "movieId": 7, "eventType": "grabbed", "date": utcnow().isoformat()}]
+    asyncio.run(tr.poll())
+    assert [c for c, _ in sent] == [43]  # 42 is muted, 43 is not
+    store.state.muted["42"]["until"] = (utcnow() - timedelta(seconds=1)).isoformat()
+    asyncio.run(tr.poll())
+    assert sent[-1][0] == 42 and "1 Meldung:" in sent[-1][1] and "Download gestartet: Dune" in sent[-1][1]
+    assert "42" not in store.state.muted
+    assert "nicht stummgeschaltet" in mute(store, 42, None)
+
+
+def test_debug_log_records_message_tools_and_requests(tmp_path):
+    from arrbot import debuglog
+
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released")
+    llm = ScriptedLLM([
+        Turn("assistant", tool_calls=[ToolCall("1", "search_movies", {"query": "Dune 2", "year": 2024})]),
+        Turn("assistant", text="Gefunden.", usage={"input": 100, "output": 5}),
+    ])
+    agent = Agent(llm, tools, 30, 40)
+    asyncio.run(agent.handle(777, "such dune 2"))
+    icons = [e.icon for e in debuglog.LOG.entries(777)]
+    texts = " | ".join(e.text for e in debuglog.LOG.entries(777))
+    assert icons[0] == "💬" and "such dune 2" in texts
+    assert "🔧" in icons and 'search_movies({"query": "Dune 2", "year": 2024})' in texts
+    assert "Radarr GET /movie/lookup" in texts and "→ 200" in texts
+    assert "↩️" in icons and "📤" in icons and "Gefunden." in texts
+    assert debuglog.CURRENT.get() is None  # reset after the message
+    html_ = debuglog.LOG.render(777, timezone.utc)
+    assert html_.startswith("🐞 <b>Log</b>") and "<pre>" in html_
+
+
+def test_diagnose_explains_why_nothing_was_loaded():
+    from arrbot import diagnose
+
+    assert diagnose.grabbed("Season search completed. 0 reports downloaded.") == 0
+    assert diagnose.grabbed("Episode search completed. 3 reports downloaded.") == 3
+    assert diagnose.grabbed("Completed") is None
+
+    rel = [
+        {"rejected": True, "rejections": ["Quality WEBDL-1080p is not wanted in profile"],
+         "quality": {"quality": {"name": "DVD"}}, "languages": [{"name": "German"}]},
+        {"rejected": True, "rejections": [{"reason": "Language is not wanted"}],
+         "quality": {"quality": {"name": "WEBDL-1080p"}}, "languages": [{"name": "English"}]},
+    ]
+    lines = diagnose.summarize_releases(rel)
+    assert "2 Releases – 0 passend, 2 abgelehnt" in lines[0]
+    assert "1× DVD (Deutsch)" in lines[1] and "1× WEBDL-1080p (Englisch)" in lines[1]
+    assert "Qualität nicht im Profil" in lines[2] and "Sprache nicht gewünscht" in lines[2]
+
+    ix = [{"name": "scenenzbs", "enableAutomaticSearch": True,
+           "fields": [{"name": "categories", "value": [5000, 5100]}]},
+          {"name": "gut", "enableAutomaticSearch": True, "fields": [{"name": "categories", "value": [5000, 5030]}]}]
+    hint = diagnose.category_hint(ix)
+    assert "scenenzbs (5000, 5100)" in hint and "gut" not in hint
+
+    class Svc:
+        kind = "Sonarr"
+
+        async def get(self, _):
+            return {"title": "Married... with Children", "monitored": False,
+                    "seasons": [{"seasonNumber": 1, "monitored": False}]}
+
+        async def releases(self, **_):
+            return []
+
+        async def _req(self, *_a, **_k):
+            return ix
+
+    text = asyncio.run(diagnose.why_nothing(Svc(), "series", 5, 1))
+    assert "nicht überwacht" in text and "Staffel 1 ist nicht überwacht" in text
+    assert "liefern für Staffel 1 gar nichts" in text and "scenenzbs (5000, 5100)" in text
+
+
+def test_search_command_is_watched_until_done(tmp_path):
+    from arrbot import debuglog
+
+    calls = []
+
+    def handler(req):
+        p = req.url.path.removeprefix("/api/v3")
+        if p == "/command" and req.method == "POST":
+            return httpx.Response(201, json={"id": 9, "status": "queued"})
+        if p == "/command/9":
+            calls.append(1)
+            st = "started" if len(calls) < 2 else "completed"
+            return httpx.Response(200, json={"id": 9, "status": st,
+                                             "message": "Season search completed. 0 reports downloaded."})
+        return httpx.Response(404)
+
+    sonarr = Sonarr(ArrConfig("http://s", "k"), transport=httpx.MockTransport(handler))
+    sonarr.COMMAND_EVERY = 0
+    done = []
+
+    async def on_done(chat, name, body, state):
+        done.append((chat, name, body, state["message"]))
+
+    sonarr.on_search_done = on_done
+
+    async def go():
+        token = debuglog.LOG.begin(555, "such nochmal")
+        try:
+            await sonarr.command("SeasonSearch", seriesId=5, seasonNumber=1)
+        finally:
+            debuglog.LOG.end(token)
+        await sonarr.command("RefreshSeries", seriesId=5)  # no chat, no search: not watched
+        from arrbot.arr import _WATCHERS
+        await asyncio.gather(*list(_WATCHERS))
+
+    asyncio.run(go())
+    assert done == [(555, "SeasonSearch", {"seriesId": 5, "seasonNumber": 1},
+                     "Season search completed. 0 reports downloaded.")]
+    assert any("0 reports downloaded" in e.text for e in debuglog.LOG.entries(555))

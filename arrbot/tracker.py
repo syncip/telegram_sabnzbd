@@ -36,6 +36,17 @@ def _episode_label(rec: dict) -> str | None:
     return f"S{ep.get('seasonNumber', 0):02d}E{ep.get('episodeNumber', 0):02d}"
 
 
+def _span(labels: list[str], limit: int = 6) -> str:
+    """'S01E01–S01E13, S02E01': long lists shortened to a range per season."""
+    labels = sorted(set(labels))
+    if len(labels) <= limit:
+        return ", ".join(labels)
+    seasons: dict[str, list[str]] = defaultdict(list)
+    for x in labels:
+        seasons[x[:3]].append(x)
+    return ", ".join(f"{v[0]}–{v[-1]}" if len(v) > 1 else v[0] for v in seasons.values())
+
+
 def _quality(rec: dict) -> str | None:
     return ((rec.get("quality") or {}).get("quality") or {}).get("name")
 
@@ -68,6 +79,7 @@ class Tracker:
         self.tz = tz or ZoneInfo("Europe/Berlin")
         self.sab_queue: SabQueue | None = None
         self._sab_failed = False
+        self.in_queue: dict[str, set] = {}  # service -> ids (movieId/seriesId) with downloads in the queue
 
     async def poll(self) -> None:
         await self._poll_sab()
@@ -78,8 +90,10 @@ class Tracker:
             except ArrError as e:
                 log.warning("Abfrage von %s fehlgeschlagen: %s", name, e)
         await self._check_pending()
+        await self._check_jobs()
         await self._check_paused()
         await self._check_no_release()
+        await self._check_mutes()
         self._cleanup()
         self.store.save()
 
@@ -151,6 +165,8 @@ class Tracker:
             if not msg:
                 continue
             t.last_activity = now.isoformat()
+            if name == "sonarr" and self._job_event(t, event, recs, now):
+                continue  # part of a running job: summed up when it is done
             if event == GRABBED:
                 t.grabbed = True
                 if self.sab:
@@ -169,6 +185,59 @@ class Tracker:
                 self.store.finish(t, t.title + (f" ({eps})" if eps else ""))
             await self._notify(t, msg)
 
+    def _job_event(self, t: Tracked, event: str, recs: list[dict], now: datetime) -> bool:
+        """Series: the first grab starts a job (announced as usual), later grabs and imports only count.
+        True = no message now."""
+        labels = [x for x in (_episode_label(r) for r in recs) if x]
+        job = t.job
+        if event == GRABBED:
+            if not job:
+                t.job = {"started": now.isoformat(), "last": now.isoformat(), "grabbed": labels,
+                         "imported": [], "failed": 0}
+                return False  # the start is announced
+            job["grabbed"] = list(dict.fromkeys(job["grabbed"] + labels))
+            job["last"] = now.isoformat()
+            t.grabbed = True
+            return True
+        if not job:
+            return False
+        job["last"] = now.isoformat()
+        if event in IMPORTED:
+            job["imported"] = list(dict.fromkeys(job["imported"] + labels))
+            self.store.finish(t, t.title + (f" ({self._episodes(recs)})" if labels else ""))
+            return True
+        if event == FAILED:
+            job["failed"] = job.get("failed", 0) + max(len(labels), 1)
+            return len(job["grabbed"]) > 1  # a single download: say it right away
+        return False
+
+    JOB_QUIET = timedelta(minutes=3)  # no news for this long and nothing in the queue: the job is done
+
+    async def _check_jobs(self) -> None:
+        now = utcnow()
+        queued = self.in_queue.get("sonarr")
+        if queued is None:
+            return  # queue unknown (Sonarr not reachable): don't guess
+        for t in self.store.state.tracked.values():
+            job = t.job
+            if not job or t.service != "sonarr" or t.arr_id in queued or now - _parse(job["last"]) < self.JOB_QUIET:
+                continue
+            got, want, failed = job.get("imported", []), job.get("grabbed", []), job.get("failed", 0)
+            t.job = {}
+            if len(want) <= 1 and not failed and len(got) <= 1:
+                if got:  # one episode: the usual message
+                    await self._notify(t, f"✅ Fertig und importiert: {t.title} ({got[0]})")
+                continue
+            n = len(want)
+            lines = [f"✅ {t.title}: {len(got)} von {n} Folge{'n' if n != 1 else ''} fertig importiert"
+                     + (f" ({_span(got)})" if got else "") + "."]
+            if failed:
+                lines.append(f"❌ {failed} Download{'s' if failed != 1 else ''} fehlgeschlagen – Sonarr sucht Ersatz.")
+            missing = [x for x in want if x not in got]
+            if missing and len(got) + failed < n:
+                lines.append(f"⏳ Nicht angekommen: {_span(missing)}. Details: /downloads")
+            await self._notify(t, "\n".join(lines))
+
     @staticmethod
     def _episodes(recs: list[dict]) -> str:
         eps = sorted({e for e in (_episode_label(r) for r in recs) if e})
@@ -181,7 +250,9 @@ class Tracker:
         data = first.get("data") or {}
         if event == GRABBED:
             details = ", ".join(x for x in (_quality(first), data.get("indexer")) if x)
-            return f"⬇️ Download gestartet: {t.title}{ep_txt}" + (f"\n{details}" if details else "")
+            more = ("\nWeitere Folgen melde ich nicht einzeln – es gibt eine Zusammenfassung, wenn alles fertig ist."
+                    if t.service == "sonarr" else "")
+            return f"⬇️ Download gestartet: {t.title}{ep_txt}" + (f"\n{details}" if details else "") + more
         if event in IMPORTED:
             return f"✅ Fertig und importiert: {t.title}{ep_txt}"
         if event == FAILED:
@@ -194,7 +265,9 @@ class Tracker:
 
     async def _poll_queue(self, name: str, svc: _ArrBase) -> None:
         st = self.store.state
-        for q in await svc.queue():
+        records = await svc.queue()
+        self.in_queue[name] = {q.get("movieId") if name == "radarr" else q.get("seriesId") for q in records}
+        for q in records:
             arr_id = q.get("movieId") if name == "radarr" else q.get("seriesId")
             t = st.tracked.get(f"{name}:{arr_id}")
             if not t:
@@ -263,13 +336,31 @@ class Tracker:
                     if extra:
                         msg += "\n" + extra
                 # One tap instead of typing: pause for a few days, delete, or just acknowledge.
-                await self._notify(t, msg, [
-                    ("⏸ In 3 Tagen nochmal", f"n:p3:{t.key}"),
-                    ("⏸ In 7 Tagen nochmal", f"n:p7:{t.key}"),
-                    ("🗑 Löschen", f"n:rm:{t.key}"),
-                    ("🔔 Bei Deutsch melden", f"n:w:{t.key}"),
-                    ("👍 Okay", "n:ok"),
-                ])
+                await self._notify(t, msg, self.no_release_buttons(t.key))
+
+    @staticmethod
+    def no_release_buttons(key: str) -> list[tuple[str, str]]:
+        return [
+            ("⏸ In 3 Tagen nochmal", f"n:p3:{key}"),
+            ("⏸ In 7 Tagen nochmal", f"n:p7:{key}"),
+            ("🗑 Löschen", f"n:rm:{key}"),
+            ("🔔 Bei Deutsch melden", f"n:w:{key}"),
+            ("👍 Okay", "n:ok"),
+        ]
+
+    async def tell(self, chat_id: int, text: str, buttons: list[tuple[str, str]] | None = None) -> None:
+        """One chat; users only get the buttons meant for them."""
+        if self.muted(chat_id, text):
+            return
+        if buttons and not self.is_admin(chat_id):
+            buttons = [b for b in buttons if b[1].startswith(self.USER_BUTTONS)]
+        try:
+            if buttons:
+                await self.send(chat_id, text, buttons)
+            else:
+                await self.send(chat_id, text)
+        except Exception:  # noqa: BLE001
+            log.exception("Nachricht an %s fehlgeschlagen", chat_id)
 
     def _cleanup(self) -> None:
         st = self.store.state
@@ -285,8 +376,39 @@ class Tracker:
     is_admin = staticmethod(lambda _uid: True)  # set by the bot: users get no pause/delete buttons
     USER_BUTTONS = ("n:w:", "n:ok")
 
+    def muted(self, chat_id: int, text: str) -> bool:
+        """Muted chat: count the message for the summary afterwards instead of sending it."""
+        m = self.store.state.muted.get(str(chat_id))
+        if not m or _parse(m["until"]) <= utcnow():
+            return False
+        m["missed"] = m.get("missed", 0) + 1
+        first = text.strip().split("\n", 1)[0][:120]
+        m["lines"] = (m.get("lines") or [])[-19:] + [first]
+        return True
+
+    async def _check_mutes(self) -> None:
+        now = utcnow()
+        for chat, m in list(self.store.state.muted.items()):
+            if _parse(m["until"]) > now:
+                continue
+            del self.store.state.muted[chat]
+            n = m.get("missed", 0)
+            if not n:
+                text = "🔔 Die Stummschaltung ist vorbei – in der Zeit gab es keine Meldungen."
+            else:
+                shown = m.get("lines") or []
+                text = (f"🔔 Die Stummschaltung ist vorbei. In der Zeit gab es {n} Meldung{'en' if n != 1 else ''}:\n"
+                        + "\n".join(f"• {x}" for x in shown[-8:]) + ("\n…" if n > 8 else "")
+                        + "\nAlles Aktuelle: /downloads")
+            try:
+                await self.send(int(chat), text)
+            except Exception:  # noqa: BLE001
+                log.exception("Nachricht an %s fehlgeschlagen", chat)
+
     async def _notify(self, t: Tracked, text: str, buttons: list[tuple[str, str]] | None = None) -> None:
         for chat_id in t.chat_ids:
+            if self.muted(chat_id, text):
+                continue
             mine = buttons if not buttons or self.is_admin(chat_id) else                 [b for b in buttons if b[1].startswith(self.USER_BUTTONS)]
             try:
                 if mine:

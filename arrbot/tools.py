@@ -17,7 +17,7 @@ from datetime import date, timedelta, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import approval, collections_plex, german, manage, plex, profiles, qprofiles, sitewatch, together, urlinfo, watch, wishlist
+from . import debuglog, approval, collections_plex, german, manage, plex, profiles, qprofiles, sitewatch, together, urlinfo, watch, wishlist
 from . import recipes
 from . import users as users_mod
 from .arr import ArrError, Radarr, Sonarr
@@ -225,6 +225,13 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
                 "studio": {"type": "string"},
                 "download": {"type": "boolean"},
             }, ["kind"]),
+        ))
+        specs.append(ToolSpec(
+            "mute_notifications",
+            "Download-Meldungen an diesen Chat stummschalten (\"sei 30 Minuten still\", \"keine Nachrichten bis "
+            "morgen\") oder wieder an (off). Danach kommt eine kurze Zusammenfassung.",
+            obj({"minutes": {"type": "integer", "description": "Dauer in Minuten (1 Std. = 60, bis morgen ≈ 720)"},
+                 "off": {"type": "boolean", "description": "true = wieder laut"}}),
         ))
         specs.append(ToolSpec(
             "bot_info",
@@ -841,6 +848,19 @@ class ToolRunner:
         flow = self.flows.get(flow_id)
         if flow is None:
             return None
+        token = debuglog.LOG.begin(flow.chat_id, f"Button „{value}“ bei {flow.cand.title} ({flow.stage})", "🔘")
+        try:
+            out = await self._choose(flow, value)
+        except Exception as e:
+            debuglog.LOG.add("💥", f"{type(e).__name__}: {e}")
+            raise
+        finally:
+            debuglog.LOG.end(token)
+        if out is not None and out.step:
+            debuglog.LOG.add("📤", out.step.text, flow.chat_id)
+        return out
+
+    async def _choose(self, flow: Flow, value: str) -> Flow | None:
         if flow.stage == "remove":
             self.flows.pop(flow.id, None)
             flow.step = await self._do_remove(flow, value)
@@ -1096,7 +1116,11 @@ class ToolRunner:
         missing, was_off = await sonarr.search_missing(series["id"], seasons)
         where = f" in Staffel {', '.join(map(str, seasons))}" if seasons else ""
         if not missing:
-            return Final(f"👍 Bei {series['title']} fehlt{where} keine bereits erschienene Folge – nichts zu suchen.")
+            if seasons:
+                self.store.track("sonarr", series["id"], series["title"], chat_id)
+                return Final(f"👁 {series['title']}{where.replace(' in ', ': ')} wird überwacht. Bisher fehlt keine "
+                             "erschienene Folge; neue lädt Sonarr, sobald sie da sind.")
+            return Final(f"👍 Bei {series['title']} fehlt keine bereits erschienene Folge – nichts zu suchen.")
         self.store.track("sonarr", series["id"], series["title"], chat_id)
         await self._added(chat_id, f"🔍 {series['title']}{where} ({len(missing)} Folgen neu gesucht)")
         eps = manage._eps_text(missing)
@@ -1117,13 +1141,11 @@ class ToolRunner:
             return Final(f"🔍 Suche für {movie['title']} gestartet. Ich melde mich, wenn der Download startet.")
         sonarr: Sonarr = self._need(self.sonarr, "Sonarr")
         series = await sonarr.get(lib_id)
-        await sonarr.search(series["id"], seasons)
-        self.store.track("sonarr", series["id"], series["title"], chat_id)
         self.store.record_request(chat_id, "series", series["title"], series.get("tmdbId"), series.get("tvdbId"))
         self._learn(chat_id, "requested", "series", series)
-        what = f" (Staffel {', '.join(map(str, seasons))})" if seasons else ""
-        await self._added(chat_id, f"🔍 {series['title']}{what}")
-        return Final(f"🔍 Suche für {series['title']}{what} gestartet. Ich melde mich, wenn Downloads starten.")
+        # Same as "such nochmal": monitors series/seasons/episodes (an unmonitored series is skipped by
+        # Sonarr without a word) and searches only what is missing, whole seasons as season packs.
+        return await self._search_again(chat_id, "series", series["id"], seasons)
 
     # ---- delete / pause / resume ---------------------------------------------------------
     async def _managed(self, chat_id: int, kind: str, lib_id: int, delete: bool = False) -> tuple[dict, str, str]:
@@ -1776,6 +1798,9 @@ class ToolRunner:
         return Final("🛠 Selbstgebaute Werkzeuge:\n" + "\n".join(lines) if lines
                      else "🛠 Noch keine selbstgebauten Werkzeuge.")
 
+    async def _t_mute_notifications(self, chat_id: int, minutes: int | None = None, off: bool = False) -> Final:
+        return Final(mute(self.store, chat_id, None if off else (minutes or 60)))
+
     async def _t_bot_info(self, chat_id: int) -> Final:
         if self.bot_info is None:
             raise ArrError("Keine Versionsinfo verfügbar.")
@@ -2265,6 +2290,35 @@ def release_languages(releases: list[dict]) -> dict:
         return "german" in langs or ".german." in f".{title}."
 
     return {"releases": len(releases), "deutsch": sum(1 for r in releases if german(r))}
+
+
+def mute(store: Any, chat_id: int, minutes: int | None) -> str:
+    """Mute download messages for this chat (minutes) or switch them on again (None)."""
+    from datetime import datetime, timezone
+
+    muted = store.state.muted
+    key = str(chat_id)
+    if minutes is None:
+        m = muted.pop(key, None)
+        store.save()
+        if not m:
+            return "🔔 Meldungen waren nicht stummgeschaltet."
+        n = m.get("missed", 0)
+        return "🔔 Meldungen sind wieder an." + (
+            f" In der Zeit gab es {n} Meldung{'en' if n != 1 else ''} – Überblick: /downloads" if n else "")
+    minutes = max(1, min(int(minutes), 7 * 24 * 60))
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    old = muted.get(key) or {}
+    muted[key] = {"until": until.isoformat(), "missed": old.get("missed", 0), "lines": old.get("lines", [])}
+    store.save()
+    if minutes < 120:
+        span = f"{minutes} Minuten"
+    elif minutes < 48 * 60:
+        span = f"{minutes / 60:.0f} Stunden"
+    else:
+        span = f"{minutes / 1440:.0f} Tage"
+    return (f"🔕 Stumm für {span}. Download-Meldungen sammle ich und sage dir danach kurz, was war. "
+            "Früher wieder an: „Meldungen wieder an“ oder /laut.")
 
 
 async def resume_search(svc: Any, item_id: int) -> None:

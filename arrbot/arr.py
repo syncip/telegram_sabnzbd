@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from . import debuglog
 from .config import ArrConfig
 
 log = logging.getLogger(__name__)
@@ -16,6 +17,9 @@ log = logging.getLogger(__name__)
 
 class ArrError(Exception):
     pass
+
+
+_WATCHERS: set[asyncio.Task] = set()
 
 
 class _ArrBase:
@@ -35,10 +39,21 @@ class _ArrBase:
         await self._http.aclose()
 
     async def _req(self, method: str, path: str, **kw: Any) -> Any:
+        started = asyncio.get_running_loop().time()
         try:
             r = await self._http.request(method, path, **kw)
         except httpx.HTTPError as e:
+            debuglog.LOG.add("🌐", f"{self.kind} {method} {path} → nicht erreichbar: {e}")
             raise ArrError(f"{self.kind} nicht erreichbar: {e}") from e
+        if debuglog.CURRENT.get() is not None:
+            took = asyncio.get_running_loop().time() - started
+            extra = ""
+            if method != "GET" and kw.get("json") is not None:
+                extra = " " + debuglog.short(kw["json"], 160)
+            elif kw.get("params"):
+                extra = " " + debuglog.short(kw["params"], 120)
+            debuglog.LOG.add("🌐", f"{self.kind} {method} {path}{extra} → {r.status_code} ({took:.1f}s)"
+                             + (f": {debuglog.short(r.text, 200)}" if r.status_code >= 400 else ""))
         if r.status_code >= 400:
             detail = r.text[:500]
             try:
@@ -130,8 +145,53 @@ class _ArrBase:
             params["includeSeries"] = "true"
         return await self._req("GET", "/calendar", params=params) or []
 
+    COMMAND_WAIT = 300.0  # seconds: how long the bot waits for a search command to finish
+    COMMAND_EVERY = 4.0
+    # Set by the bot: called when a search started while answering a chat is done
+    # (chat_id, command name, command body, final command state).
+    on_search_done: Any = None
+
     async def command(self, name: str, **body: Any) -> dict:
-        return await self._req("POST", "/command", json={"name": name, **body})
+        cmd = await self._req("POST", "/command", json={"name": name, **body})
+        chat = debuglog.CURRENT.get()
+        if chat is not None and isinstance(cmd, dict) and cmd.get("id") and "Search" in name:
+            task = asyncio.create_task(self._watch_command(chat, name, cmd["id"], body))
+            _WATCHERS.add(task)
+            task.add_done_callback(_WATCHERS.discard)
+        return cmd
+
+    async def _watch_command(self, chat: int, name: str, cmd_id: int, body: dict | None = None) -> None:
+        """Wait until Sonarr/Radarr report the search done ("… 0 reports downloaded"): log it and let the
+        bot check why nothing was loaded."""
+        debuglog.CURRENT.set(None)  # the polling itself is not interesting
+        loop = asyncio.get_running_loop()
+        end = loop.time() + self.COMMAND_WAIT
+        state: dict = {}
+        try:
+            while loop.time() < end:
+                await asyncio.sleep(self.COMMAND_EVERY)
+                state = await self._req("GET", f"/command/{cmd_id}") or {}
+                if state.get("status") in ("completed", "failed", "aborted", "cancelled", "orphaned"):
+                    break
+            else:
+                state = {**state, "message": f"nach {self.COMMAND_WAIT:.0f} s noch nicht fertig "
+                                             f"({state.get('status', '?')})"}
+        except ArrError as e:
+            state = {"status": "?", "message": str(e)}
+        msg = state.get("message") or state.get("exception") or ""
+        icon = "✅" if state.get("status") == "completed" else "⚠️"
+        text = f"{self.kind} {name}: {state.get('status', '?')}" + (f" – {msg}" if msg else "")
+        debuglog.LOG.late(chat, icon, text)
+        if debuglog.LOG.notify and chat in debuglog.LOG.live:
+            try:
+                await debuglog.LOG.notify(chat, f"{icon} {text}")
+            except Exception:  # noqa: BLE001
+                log.exception("Debug-Nachricht nicht gesendet")
+        if self.on_search_done:
+            try:
+                await self.on_search_done(chat, name, body or {}, state)
+            except Exception:  # noqa: BLE001
+                log.exception("%s: Auswertung der Suche fehlgeschlagen", self.kind)
 
     _history_params: dict = {}
     _queue_params: dict = {}
@@ -374,15 +434,17 @@ class Sonarr(_ArrBase):
                    and (e.get("airDateUtc") or "") <= now and e.get("airDateUtc")]
         series = await self.get(series_id)
         was_off = not series.get("monitored", True)
-        want = {e["seasonNumber"] for e in missing}
-        if missing and (was_off or any(s["seasonNumber"] in want and not s.get("monitored")
-                                       for s in series.get("seasons", []))):
+        # Named seasons are monitored even if nothing has aired yet (Sonarr loads them when they come).
+        want = set(seasons) if seasons else {e["seasonNumber"] for e in missing}
+        if want and (was_off or any(s["seasonNumber"] in want and not s.get("monitored")
+                                    for s in series.get("seasons", []))):
             series["monitored"] = True
             for s in series.get("seasons", []):
                 if s["seasonNumber"] in want:
                     s["monitored"] = True
             await self._req("PUT", f"/series/{series_id}", json=series)
-        await self.set_episodes_monitored([e["id"] for e in missing if not e.get("monitored")], True)
+        watch = [e for e in eps if e.get("seasonNumber") in want and not e.get("hasFile")] if seasons else missing
+        await self.set_episodes_monitored([e["id"] for e in watch if not e.get("monitored")], True)
         # A season with every aired episode missing: season search, so Sonarr takes a season pack if there
         # is one. Partly missing seasons: only those episodes.
         aired = [e for e in eps if e.get("airDateUtc") and e["airDateUtc"] <= now]

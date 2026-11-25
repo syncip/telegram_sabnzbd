@@ -137,6 +137,14 @@ Außerdem:
 - **Überwachung (Admin):** Alle `MONITOR_MINUTES` Minuten prüft der Bot Radarr, Sonarr, SABnzbd, TMDB
   und Plex (ohne KI, kostet nichts). Fällt einer zweimal hintereinander aus, kommt „🚨 Sonarr ist nicht
   erreichbar“, wenn er zurück ist „✅ läuft wieder (war 12 Min. weg)“.
+- **Suche ohne Ergebnis:** Startet der Bot eine Suche, wartet er im Hintergrund, bis Sonarr/Radarr fertig
+  sind. Wurde nichts geladen, prüft er sofort selbst, warum, und sagt es (statt erst nach 30 Minuten):
+  Titel/Staffel nicht überwacht? Liefern die Indexer gar nichts (dann auch: sind nur Hauptkategorien wie
+  5000/5100 eingetragen, ohne Unterkategorien)? Oder gibt es Releases, die alle abgelehnt werden – mit
+  Qualität, Sprache und Grund („3× DVD (Deutsch), Qualität nicht im Profil“). Dazu die üblichen Buttons.
+- **Viele Folgen auf einmal:** Lädt Sonarr eine ganze Staffel oder Serie, kommt eine Meldung beim Start
+  und eine Zusammenfassung, wenn alles durch ist („✅ 24 von 24 Folgen fertig importiert (S01E01–S02E12)“) –
+  nicht eine pro Folge.
 - **Version:** /version zeigt die laufende Version und ob auf GitHub eine neuere liegt; einmal am Tag
   sagt der Bot dir von selbst Bescheid. Bei einem privaten Repo braucht er dafür `UPDATE_TOKEN`
   (GitHub → Settings → Developer settings → Fine-grained token, nur dieses Repo, „Contents: Read-only“). Nach einem Update meldet er „🆕 Bot aktualisiert: 1.6.0 → 1.7.0“
@@ -224,6 +232,8 @@ Für alle:
 - `/downloads` (auch `/status`) – deine Downloads mit Fortschritt
 - `/verbrauch` – deine Anfragen, Tokens und Kosten, mit Balken bis zum Limit
 - `/neu` – Gespräch zurücksetzen
+- `/stumm [30 | 2h | 1d]` – Download-Meldungen eine Weile stumm (Standard 60 Min., auch per Text: „Sei bis
+  morgen still“). Danach kommt eine kurze Zusammenfassung, was in der Zeit war. `/laut` – sofort wieder an
 - `/version` – laufende Version und welches KI-Modell der Bot nutzt (oder einfach fragen: „Welche Version hast du?“)
 - `/hilfe` – Beispiele
 
@@ -246,6 +256,11 @@ Nur für den Admin:
 - `/version` – Version, Update verfügbar?, Neuerungen
 - `/monatsbericht [jetzt]` – Monatsbericht (letzter oder laufender Monat)
 - `/rezepte` – selbstgebaute Werkzeuge
+- `/log [Name] [Anzahl]` – **Chat-Log**: was der Bot bei der letzten Nachricht (oder den letzten n) gemacht
+  hat – Nachricht, jeder KI-Schritt (Modell, Dauer, Tokens), jedes Werkzeug mit Argumenten und Ergebnis,
+  jede Anfrage an Sonarr/Radarr mit Status und Dauer, und was Sonarr/Radarr nach der Suche melden
+  („Season search completed. 0 reports downloaded.“). `/log Anna` zeigt Annas letzte Nachricht.
+- `/debug an|aus` – das Log kommt nach jeder Antwort mit, Suchergebnisse kommen, sobald sie fertig sind
 - `/limit WER ART WERT` – Limits setzen
   - WER: Name, Telegram-ID, `standard` (alle Nutzer ohne eigenes Limit) oder `gesamt` (ganzer Bot)
   - ART: `tag` (Anfragen/Tag), `monat` (Anfragen/Monat), `tokens` (pro Monat), `kosten` (Dollar/Monat)

@@ -33,6 +33,9 @@ class Tracked:
     no_release_notified: bool = False
     # [downloadId, polls waited] of grabbed downloads whose SABnzbd finish time is not announced yet
     pending_downloads: list = field(default_factory=list)
+    # Series: a running "job" (many episodes) is announced once and summed up when done:
+    # {"started": iso, "last": iso, "grabbed": [labels], "imported": [labels], "failed": n}
+    job: dict = field(default_factory=dict)
 
     @property
     def key(self) -> str:
@@ -51,6 +54,8 @@ class State:
     requests: list[dict] = field(default_factory=list)
     # Paused searches by key "radarr:7": {"title", "chat_ids", "until" (iso or None = until resumed)}
     paused: dict[str, dict] = field(default_factory=dict)
+    # Muted chats "chat_id" -> {"until": iso, "missed": n, "lines": [first lines of missed messages]}
+    muted: dict[str, dict] = field(default_factory=dict)
 
 
 class Store:
@@ -73,6 +78,7 @@ class Store:
                 finished=raw.get("finished", []),
                 requests=raw.get("requests", []),
                 paused=raw.get("paused", {}),
+                muted=raw.get("muted", {}),
             )
         except (ValueError, TypeError) as e:
             log.error("state.json unlesbar (%s), starte leer", e)
@@ -86,6 +92,7 @@ class Store:
             "finished": self.state.finished,
             "requests": self.state.requests,
             "paused": self.state.paused,
+            "muted": self.state.muted,
         }
         try:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
