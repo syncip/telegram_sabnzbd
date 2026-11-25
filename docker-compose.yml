@@ -3,10 +3,13 @@
 
 services:
   arrbot:
-    build: .
-    # Baut das Image bei jedem "up" neu, damit Code-Updates (git pull) wirklich ankommen.
-    # Ohne diese Zeile startet "Compose Up" einfach das alte Image weiter.
-    pull_policy: build
+    # Fertiges Image von GitHub (wird bei jedem Push automatisch gebaut, amd64 und arm64).
+    # "always" holt bei jedem "up" die neueste Version; feste Version z. B. ":1.8.1".
+    image: ghcr.io/syncip/telegram_sabnzbd:latest
+    pull_policy: always
+    # Stattdessen selbst bauen (aus dem geklonten Repo): die zwei Zeilen oben auskommentieren und
+    # build: .
+    # pull_policy: build
     container_name: arrbot
     restart: unless-stopped
     volumes:

@@ -191,11 +191,16 @@ OpenAI-kompatible (OpenRouter, Groq, lokal mit Ollama/LM Studio).
    `TMDB_API_KEY`. Jede Einstellung ist dort kommentiert.
    **Danach die Datei nicht mehr committen**, sonst landen die Keys im Repo.
    `PUID`/`PGID` müssen zum Besitzer des Daten-Ordners passen: Unraid `99`/`100`, sonst meist `1000`/`1000`.
-6. Starten:
+6. Starten – das fertige Image `ghcr.io/syncip/telegram_sabnzbd:latest` wird geholt, nichts muss gebaut werden:
    ```bash
-   docker compose up -d --build
+   docker compose up -d
    docker compose logs -f
    ```
+   **Update:** `docker compose up -d` holt die neueste Version (`pull_policy: always`). Eine feste Version
+   geht mit `:1.8.1` statt `:latest`. Das Image baut GitHub Actions bei jedem Push nach `main` – erst
+   laufen alle Tests, dann wird gebaut (amd64 und arm64).
+   Lieber selbst bauen? In `docker-compose.yml` `image`/`pull_policy` gegen `build: .` tauschen und
+   `docker compose up -d --build`.
 
 **Netzwerk:** Der Container muss Radarr, Sonarr und SABnzbd erreichen. Laufen die auch in Docker, häng
 den Bot ins gleiche Netzwerk (siehe Kommentar in `docker-compose.yml`) und nutze die Containernamen
