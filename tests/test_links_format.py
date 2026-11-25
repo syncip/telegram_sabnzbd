@@ -95,3 +95,18 @@ def test_chunks_keep_tables_together():
     parts = fmt.chunks(text, size=40)
     assert all("| x | y |" not in p or "| 3 | 4 |" in p for p in parts)
     assert "".join(parts).replace("\n", "") == text.replace("\n", "")
+
+
+def test_hint_from_url():
+    h = urlinfo.hint_from_url
+    assert h("https://trakt.tv/movies/project-hail-mary-2026") == {"title_from_url": "project hail mary", "year_from_url": 2026}
+    assert h("https://www.themoviedb.org/movie/687163-project-hail-mary")["title_from_url"] == "project hail mary"
+    assert h("https://www.justwatch.com/de/serie/dragon-ball-z")["title_from_url"] == "dragon ball z"
+    assert h("https://www.imdb.com/title/tt12042730/") == {}
+
+
+def test_generic_page_title_is_not_used_as_title():
+    page = "<html><head><title>Trakt Web: Track Your Shows &amp; Movies</title></head></html>"
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, text=page))
+    info = asyncio.run(urlinfo.identify("https://trakt.tv/movies/project-hail-mary-2026", transport, check_host=False))
+    assert info["title"] is None and info["title_from_url"] == "project hail mary" and info["year_from_url"] == 2026

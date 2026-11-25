@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -44,6 +45,7 @@ HELP = (
 )
 
 MAX_CHOICE_SETS = 200
+RESPONSE_TIMEOUT = 180  # seconds for one whole answer, including all AI steps
 
 
 def build_app(cfg: Config) -> Application:
@@ -75,13 +77,31 @@ def build_app(cfg: Config) -> Application:
         return bool(update.effective_user and update.effective_user.id in cfg.allowed_users)
 
     # ---- conversation -----------------------------------------------------
+    async def keep_typing(chat_id: int) -> None:
+        # Telegram shows "typing…" for 5 s only; refresh it until the answer is ready.
+        while True:
+            try:
+                await app.bot.send_chat_action(chat_id, ChatAction.TYPING)
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(4)
+
     async def respond(chat_id: int, text: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        log.info("chat %s: %r", chat_id, text[:200])
+        typing = asyncio.create_task(keep_typing(chat_id))
         try:
-            reply = await agent.handle(chat_id, text)
-        except Exception:  # noqa: BLE001
+            reply = await asyncio.wait_for(agent.handle(chat_id, text), RESPONSE_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.error("chat %s: keine Antwort nach %ss", chat_id, RESPONSE_TIMEOUT)
+            reply = (
+                f"⚠️ Ich habe nach {RESPONSE_TIMEOUT // 60} Minuten keine Antwort von der KI bekommen. "
+                "Meist ist das Kontingent kurz erschöpft. Versuch es gleich nochmal."
+            )
+        except Exception as e:  # noqa: BLE001
             log.exception("Fehler bei Nachricht")
-            reply = "⚠️ Da ist intern etwas schiefgelaufen. Details stehen im Log."
+            reply = f"⚠️ Da ist intern etwas schiefgelaufen ({type(e).__name__}: {e})."
+        finally:
+            typing.cancel()
 
         markup = None
         if options := tools.take_buttons(chat_id):
@@ -198,6 +218,16 @@ def build_app(cfg: Config) -> Application:
         if update.effective_message and user:
             await update.effective_message.reply_text(f"Kein Zugriff. Deine Telegram-ID ist {user.id}.")
 
+    async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        log.error("Unbehandelter Fehler", exc_info=ctx.error)
+        if isinstance(update, Update) and update.effective_chat and allowed_user(update):
+            try:
+                await app.bot.send_message(
+                    update.effective_chat.id, f"⚠️ Fehler: {type(ctx.error).__name__}: {ctx.error}"[:500]
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
     async def poll_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         await tracker.poll()
 
@@ -219,6 +249,7 @@ def build_app(cfg: Config) -> Application:
         .token(cfg.telegram_token)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
+        .concurrent_updates(True)  # a slow answer must not block buttons or other chats
         .build()
     )
     app.add_handler(CommandHandler(["start", "hilfe", "help"], on_start, filters=allowed))
@@ -229,4 +260,5 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^c:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(MessageHandler(~allowed, on_unauthorized))
+    app.add_error_handler(on_error)
     return app

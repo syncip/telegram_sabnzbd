@@ -14,9 +14,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import httpx
+
 from .config import LLMConfig
 
 log = logging.getLogger(__name__)
+
+LLM_TIMEOUT_SECONDS = 60
 
 
 @dataclass
@@ -70,9 +74,17 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self, cfg: LLMConfig):
         from google import genai
+        from google.genai import types
 
         self.model = cfg.model
-        self.client = genai.Client(api_key=cfg.api_key)
+        # Without these the SDK has no timeout and retries 429s for minutes, so the bot looks dead.
+        self.client = genai.Client(
+            api_key=cfg.api_key,
+            http_options=types.HttpOptions(
+                timeout=LLM_TIMEOUT_SECONDS * 1000,
+                retry_options=types.HttpRetryOptions(attempts=2, max_delay=10),
+            ),
+        )
 
     def _contents(self, history: list[Turn]) -> list:
         from google.genai import types
@@ -128,8 +140,13 @@ class GeminiProvider(LLMProvider):
             )
         except errors.APIError as e:
             if e.code == 429:
-                raise LLMError("Das Gemini-Kontingent ist gerade aufgebraucht. Bitte in einer Minute nochmal.") from e
+                raise LLMError(
+                    "Das Gemini-Kontingent ist gerade aufgebraucht (Limit pro Minute oder pro Tag). "
+                    "Bitte in einer Minute nochmal."
+                ) from e
             raise LLMError(f"Gemini-Fehler {e.code}: {e.message}") from e
+        except (httpx.HTTPError, TimeoutError) as e:
+            raise LLMError(f"Gemini antwortet nicht ({type(e).__name__}).") from e
 
         if not resp.candidates or resp.candidates[0].content is None:
             reason = getattr(resp.prompt_feedback, "block_reason", None) if resp.prompt_feedback else None
@@ -167,7 +184,9 @@ class AnthropicProvider(LLMProvider):
         import anthropic
 
         self.model = cfg.model
-        self.client = anthropic.AsyncAnthropic(api_key=cfg.api_key, base_url=cfg.base_url)
+        self.client = anthropic.AsyncAnthropic(
+            api_key=cfg.api_key, base_url=cfg.base_url, timeout=LLM_TIMEOUT_SECONDS * 2, max_retries=1
+        )
 
     def _messages(self, history: list[Turn]) -> list[dict]:
         out: list[dict] = []
@@ -254,7 +273,9 @@ class OpenAICompatProvider(LLMProvider):
         import openai
 
         self.model = cfg.model
-        self.client = openai.AsyncOpenAI(api_key=cfg.api_key or "not-needed", base_url=cfg.base_url)
+        self.client = openai.AsyncOpenAI(
+            api_key=cfg.api_key or "not-needed", base_url=cfg.base_url, timeout=LLM_TIMEOUT_SECONDS, max_retries=1
+        )
 
     def _messages(self, system: str, history: list[Turn]) -> list[dict]:
         out: list[dict] = [{"role": "system", "content": system}]

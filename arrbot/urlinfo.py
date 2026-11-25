@@ -26,6 +26,10 @@ RE_IMDB = re.compile(r"imdb\.com/(?:[a-z]{2}/)?title/(tt\d{5,10})")
 RE_TMDB = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
 RE_TVDB_ID = re.compile(r"thetvdb\.com/[^\s\"']*?[?&]id=(\d+)")
 RE_TT_ANY = re.compile(r"\b(tt\d{7,10})\b")
+GENERIC_SEGMENTS = {
+    "title", "movie", "movies", "film", "filme", "tv", "show", "shows", "series", "serie", "serien",
+    "wiki", "watch", "details", "info", "overview", "seasons", "season",
+}
 
 
 class UrlError(Exception):
@@ -68,8 +72,10 @@ def _json_ld(page: str) -> dict:
 def parse_page(page: str, url: str) -> dict:
     ld = _json_ld(page)
     title = ld.get("name") or _meta(page, "og:title")
+    page_title = None
     if not title and (m := re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)):
-        title = html.unescape(m.group(1)).strip()
+        # Plain <title> is often just the site name on app-like sites (e.g. Trakt), so keep it apart.
+        page_title = html.unescape(m.group(1)).strip()[:200] or None
     date = ld.get("datePublished") or ld.get("startDate") or ld.get("dateCreated") or ""
     year = int(date[:4]) if re.match(r"\d{4}", str(date)) else None
     og_type = (_meta(page, "og:type") or "").lower()
@@ -91,6 +97,7 @@ def parse_page(page: str, url: str) -> dict:
     desc = ld.get("description") or _meta(page, "og:description") or _meta(page, "description") or ""
     return {
         "title": (title or "")[:200] or None,
+        "page_title": page_title,
         "year": year,
         "kind": kind,
         "description": html.unescape(desc)[:300] or None,
@@ -137,13 +144,31 @@ async def fetch(url: str, transport: httpx.AsyncBaseTransport | None = None, che
         raise UrlError("Zu viele Weiterleitungen")
 
 
+def hint_from_url(url: str) -> dict:
+    """Guess title/year from the URL slug, e.g. /movies/project-hail-mary-2026 -> ("project hail mary", 2026)."""
+    segs = [
+        s for s in urlparse(url).path.split("/")
+        if s and not re.fullmatch(r"(tt)?\d+|[a-z]{2}(-[a-z]{2})?", s) and s.lower() not in GENERIC_SEGMENTS
+    ]
+    if not segs:
+        return {}
+    slug = re.sub(r"^\d+-", "", segs[-1])  # TMDB style "687163-project-hail-mary"
+    words = [w for w in re.split(r"[-_+]", slug) if w]
+    year = None
+    if words and re.fullmatch(r"(19|20)\d\d", words[-1]):
+        year = int(words.pop())
+    if not words:
+        return {}
+    return {"title_from_url": " ".join(words), "year_from_url": year}
+
+
 async def identify(url: str, transport: httpx.AsyncBaseTransport | None = None, check_host: bool = True) -> dict:
     url = url.strip()
     if "://" not in url:
         url = "https://" + url
     elif not re.match(r"https?://", url, re.I):
         raise UrlError("Nur http- und https-Links werden unterstützt")
-    result: dict = {"url": url, "ids": ids_from_text(url)}
+    result: dict = {"url": url, "ids": ids_from_text(url), **hint_from_url(url)}
     q = parse_qs(urlparse(url).query)
     if "thetvdb.com" in url and q.get("id", [""])[0].isdigit():
         result["ids"]["tvdb"] = int(q["id"][0])
@@ -152,6 +177,13 @@ async def identify(url: str, transport: httpx.AsyncBaseTransport | None = None, 
         info = parse_page(page, final)
         info["ids"] = {**info["ids"], **result["ids"]}  # IDs from the URL itself win
         info["url"] = final
+        hint = hint_from_url(final) or {k: v for k, v in result.items() if k.endswith("_from_url")}
+        info.update(hint)
+        if info["title"] and hint.get("title_from_url"):
+            # App-like sites put their own name into og:title; drop a title that shares no word with the URL.
+            words = {w for w in re.findall(r"\w{3,}", hint["title_from_url"].lower())}
+            if words and not words & set(re.findall(r"\w{3,}", info["title"].lower())):
+                info["page_title"], info["title"] = info["title"], None
         return info
     except (UrlError, httpx.HTTPError) as e:
         if result["ids"]:

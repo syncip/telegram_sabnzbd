@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -85,8 +86,10 @@ class Agent:
             work.append(Turn(role="user", text=text))
             replies: list[str] = []
             try:
-                for _ in range(MAX_STEPS):
+                for step in range(MAX_STEPS):
+                    started = time.monotonic()
                     turn = await self.provider.complete(SYSTEM_PROMPT, work, self.tools.specs)
+                    log.info("chat %s KI-Schritt %d: %.1fs", chat_id, step + 1, time.monotonic() - started)
                     work.append(turn)
                     if turn.text:
                         replies.append(turn.text)

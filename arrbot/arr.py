@@ -129,7 +129,9 @@ class Radarr(_ArrBase):
         return created
 
     async def search(self, movie_id: int) -> dict:
-        return await self.command("MoviesSearch", movieIds=[movie_id])
+        cmd = await self.command("MoviesSearch", movieIds=[movie_id])
+        log.info("Radarr: Suche für Film %s gestartet (Befehl %s)", movie_id, (cmd or {}).get("id"))
+        return cmd
 
 
 class Sonarr(_ArrBase):

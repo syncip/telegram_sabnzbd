@@ -4,6 +4,9 @@
 services:
   arrbot:
     build: .
+    # Baut das Image bei jedem "up" neu, damit Code-Updates (git pull) wirklich ankommen.
+    # Ohne diese Zeile startet "Compose Up" einfach das alte Image weiter.
+    pull_policy: build
     container_name: arrbot
     restart: unless-stopped
     volumes:
