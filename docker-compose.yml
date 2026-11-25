@@ -1,0 +1,16 @@
+services:
+  arrbot:
+    build: .
+    container_name: arrbot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    # If Radarr/Sonarr run in the same compose project or Docker network, join it
+    # and use their service names in RADARR_URL / SONARR_URL (e.g. http://radarr:7878).
+    # networks:
+    #   - media
+
+# networks:
+#   media:
+#     external: true
