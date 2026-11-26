@@ -14,9 +14,15 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 CHANGES = {
+    "1.14.0": "Medien-Manager für den Admin: aufräumen per Satz („Lösche alle Filme, die länger als 180 Tage da "
+              "sind und die ich nicht gesehen habe“) mit Liste und Bestätigung, bei Serien Folgen/Staffeln/ganze "
+              "Serie per Button, direkt über Radarr/Sonarr ohne Sperre; geschützt bleiben „Nie löschen“, was "
+              "andere gerade schauen oder neu angefragt haben. Speicher-Übersicht („Was frisst Platz?“). "
+              "Duplikat-Finder in Plex: gleicher Inhalt (Laufzeit, Ähnlichkeit einstellbar), behält die "
+              "bevorzugte Sprache und Auflösung",
     "1.13.0": "Bessere Vorschläge: Stimmung und Länge („was Lustiges unter 90 Minuten“), „wie X, aber …“, "
               "nur auf Deutsch, Abwechslung (ein Teil pro Filmreihe, 💎 Geheimtipp), Begründung pro Titel, "
               "„📼 Schon auf dem Server“; 👎/👁 pro Titel, „Wie fandest du’s?“ mit Sternen (auch nach Plex), "

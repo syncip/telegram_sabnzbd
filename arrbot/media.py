@@ -67,6 +67,10 @@ class Title:
     not_german: int = 0  # files whose audio track has no German (movie: 0/1, series: episodes)
     mislabelled: int = 0  # of those: the name says German
     mistagged: bool = False  # every file named German, no German-tagged track: probably only wrong tags
+    genres: list[str] = field(default_factory=list)  # as Radarr/Sonarr name them (English)
+    rating: float | None = None  # TMDB/IMDb rating 0-10
+    plex_keys: dict[int, str] = field(default_factory=dict)  # user id -> Plex ratingKey (for episodes)
+    viewed_by: dict[int, datetime] = field(default_factory=dict)  # user id -> their last view
 
     @property
     def name(self) -> str:
@@ -114,6 +118,16 @@ class Report:
         raise ValueError(name)
 
 
+def _rating(item: dict) -> float | None:
+    r = item.get("ratings") or {}
+    for src in ("tmdb", "imdb"):
+        v = (r.get(src) or {}).get("value") if isinstance(r.get(src), dict) else None
+        if v:
+            return float(v)
+    v = r.get("value")  # Sonarr: {"votes": .., "value": ..}
+    return float(v) if v else None
+
+
 async def _series_languages(sonarr: Any, series: list[Title], errors: list[str]) -> None:
     """Real audio language of every episode file (one quick Sonarr call per series)."""
     sem = asyncio.Semaphore(4)
@@ -144,6 +158,7 @@ async def collect(radarr: Any, sonarr: Any, plex_client: Any, accounts: list[Any
                     "movie", m["id"], m.get("title", "?"), m.get("year"), m.get("sizeOnDisk") or 0,
                     _dt(m.get("added")), bool(m.get("monitored")), 1 if m.get("hasFile") else 0,
                     1 if m.get("isAvailable", True) else 0, True, m.get("tmdbId"))
+                t.genres, t.rating = list(m.get("genres") or []), _rating(m)
                 if m.get("hasFile") and german_check:
                     check = file_check(m.get("movieFile"))
                     t.not_german = int(check in ("other", "mislabelled"))
@@ -155,10 +170,12 @@ async def collect(radarr: Any, sonarr: Any, plex_client: Any, accounts: list[Any
         try:
             for s in await sonarr.library():
                 st = s.get("statistics") or {}
-                titles.append(Title(
+                t = Title(
                     "series", s["id"], s.get("title", "?"), s.get("year"), st.get("sizeOnDisk") or 0,
                     _dt(s.get("added")), bool(s.get("monitored")), st.get("episodeFileCount") or 0,
-                    st.get("episodeCount") or 0, s.get("status") == "ended", s.get("tvdbId")))
+                    st.get("episodeCount") or 0, s.get("status") == "ended", s.get("tvdbId"))
+                t.genres, t.rating = list(s.get("genres") or []), _rating(s)
+                titles.append(t)
         except ArrError as e:
             errors.append(str(e))
         if german_check:
@@ -178,12 +195,14 @@ async def collect(radarr: Any, sonarr: Any, plex_client: Any, accounts: list[Any
             if not t:
                 continue
             t.in_plex = True
+            t.plex_keys[a.user_id] = it.rating_key
             if it.complete:
                 t.complete_by.append(a.user_id)
             if it.watched or it.started:
                 t.started_by.append(a.user_id)
             if it.last_viewed:
                 seen = datetime.fromtimestamp(it.last_viewed, timezone.utc)
+                t.viewed_by[a.user_id] = seen
                 t.last_viewed = max(filter(None, (t.last_viewed, seen)))
     viewers = [a.user_id for a in accounts]
     return Report(titles, viewers, plex_ok, errors)

@@ -87,6 +87,8 @@ ADMIN_HELP = (
     "/mediathek – was fehlt, was nicht in Plex ist, was gesehen oder lange ungesehen ist (aufräumen)\n"
     "/freigaben – Wünsche erst freigeben, z. B. „Wünsche von Anna erst freigeben, wenn es Horrorfilme sind“\n"
     "/regeln – Aufräumregeln, z. B. „Lösch Filme, die alle gesehen haben, nach 30 Tagen“\n"
+    "🗂 Aufräumen auf Befehl: „Lösche alle Filme, die ich gesehen habe“, „Filme über 180 Tage, nie geschaut“ – "
+    "erst Liste, dann Bestätigung; „Was frisst am meisten Platz?“, „Dune nie löschen“, „Such doppelte Filme“\n"
     "/version – Versionsnummer, ob es ein Update gibt und was neu ist\n"
     "/aktivitaet – was Nutzer fragen, was geklappt hat und wo es Probleme gab (<code>/aktivitaet Anna</code>)\n"
     "/check – alle APIs prüfen\n"
@@ -1007,7 +1009,9 @@ def build_app(cfg: Config) -> Application:
         await query.edit_message_text(notify.render(store, chat), reply_markup=notify_markup(chat))
 
     async def send_view(view: View, viewer: int) -> None:
-        if view.kind == "notify":
+        if view.kind == "html":
+            await app.bot.send_message(view.chat_id, view.arg, parse_mode=ParseMode.HTML)
+        elif view.kind == "notify":
             await send_notify(view.chat_id)
         elif view.kind == "downloads":
             await send_downloads(view.chat_id, viewer, view.finished, view.query)

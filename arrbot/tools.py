@@ -12,11 +12,11 @@ import logging
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import date, timedelta, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import debuglog, approval, collections_plex, german, manage, plex, profiles, qprofiles, recommend, sitewatch, together, urlinfo, watch, wishlist
+from . import debuglog, approval, collections_plex, dupes, german, manage, mediamgr, plex, profiles, qprofiles, recommend, sitewatch, together, urlinfo, watch, wishlist
 from . import recipes
 from . import users as users_mod
 from .arr import ArrError, Radarr, Sonarr
@@ -304,6 +304,44 @@ def build_admin_specs() -> list[ToolSpec]:
                  "kind": {"type": "string", "enum": ["movie", "series", "all"]},
                  "days": {"type": "integer"}, "low_space_gb": {"type": "integer"}, "auto": {"type": "boolean"},
                  "rule_id": {"type": "integer"}}, ["action"]),
+        ),
+        ToolSpec(
+            "admin_delete_media",
+            "Mediathek aufräumen AUF BEFEHL (\"lösche alle Filme, die länger als 180 Tage da sind und die ich nicht "
+            "gesehen habe\", \"lösche alle gesehenen Filme\", \"die 10 größten ungesehenen Serien weg\"). Zeigt "
+            "immer erst eine Liste mit Bestätigung. watched: true = ICH (Admin) habe es ganz gesehen, false = nie "
+            "angefangen; older_days: länger als N Tage auf dem Server; seen_days: zuletzt vor über N Tagen geschaut; "
+            "min_gb, max_rating (0-10), genres (deutsch), ended (nur beendete Serien), largest (nur die N größten). "
+            "scope für Serien nur, wenn genannt (episodes | seasons | series) – sonst fragt der Bot per Button. "
+            "Unklar, was gelöscht werden soll? Erst nachfragen.",
+            obj({"kind": {"type": "string", "enum": ["movie", "series", "all"]}, "watched": {"type": "boolean"},
+                 "older_days": {"type": "integer"}, "seen_days": {"type": "integer"}, "min_gb": {"type": "number"},
+                 "max_rating": {"type": "number"}, "genres": {"type": "array", "items": {"type": "string"}},
+                 "ended": {"type": "boolean"}, "scope": {"type": "string", "enum": ["episodes", "seasons", "series"]},
+                 "largest": {"type": "integer"}}),
+        ),
+        ToolSpec(
+            "admin_duplicates",
+            "Doppelte Filme/Folgen in Plex finden (Inhalt: gleicher Titel/gleiche Folge und ähnliche Laufzeit) und "
+            "die schlechtere Version löschen – erst Liste mit Bestätigung. action scan (Standard) oder settings: "
+            "similarity (Prozent gleiche Laufzeit, Standard 97), languages (Reihenfolge, z. B. [\"de\",\"en\"]), "
+            "resolutions (Text, z. B. \"1080p vor 4K\"), language_first (Sprache wichtiger als Auflösung).",
+            obj({"action": {"type": "string", "enum": ["scan", "settings"]},
+                 "kind": {"type": "string", "enum": ["movie", "series", "all"]},
+                 "similarity": {"type": "number"}, "languages": {"type": "array", "items": {"type": "string"}},
+                 "resolutions": {"type": "string"}, "language_first": {"type": "boolean"}}),
+        ),
+        ToolSpec(
+            "admin_storage",
+            "Speicher: wie viel frei ist, was am meisten Platz frisst, was weg könnte (gesehen / lange ungesehen).",
+            obj({"top": {"type": "integer"}}),
+        ),
+        ToolSpec(
+            "admin_keep",
+            "Titel nie löschen (\"🛡 Dune behalten\", \"Breaking Bad nie löschen\") oder wieder freigeben (off). "
+            "Ohne title: Liste der geschützten Titel.",
+            obj({"title": {"type": "string"}, "kind": {"type": "string", "enum": ["movie", "series"]},
+                 "off": {"type": "boolean"}}),
         ),
         ToolSpec(
             "admin_approval",
@@ -891,6 +929,18 @@ class ToolRunner:
         if flow.stage == "recipe":
             self.flows.pop(flow.id, None)
             flow.step = await self._recipe_step(flow, value)
+            if not flow.step.done:
+                self.flows[flow.id] = flow
+            return flow
+        if flow.stage == "dup":
+            self.flows.pop(flow.id, None)
+            flow.step = await self._dup_step(flow, value)
+            if not flow.step.done:
+                self.flows[flow.id] = flow
+            return flow
+        if flow.stage == "mm":
+            self.flows.pop(flow.id, None)
+            flow.step = await self._mm_step(flow, value)
             if not flow.step.done:
                 self.flows[flow.id] = flow
             return flow
@@ -1662,6 +1712,272 @@ class ToolRunner:
             return Final(f"🗑 Regel {rule_id} gelöscht.")
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "cleanup", arg=action == "run"))
         return Final("")
+
+    # ---- duplicates (admin) ------------------------------------------------------------------
+    def _dupe_prefs(self) -> dict:
+        return dupes.load_prefs(self.cleanup.setting("dupes") if self.cleanup else None)
+
+    async def _t_admin_duplicates(self, chat_id: int, action: str = "scan", kind: str = "all",
+                                  similarity: float | None = None, languages: list[str] | None = None,
+                                  resolutions: str | None = None, language_first: bool | None = None) -> Final:
+        prefs = self._dupe_prefs()
+        changed = False
+        if similarity is not None:
+            prefs["similarity"] = max(50.0, min(100.0, float(similarity)))
+            changed = True
+        if languages:
+            prefs["languages"] = [x for x in (dupes.norm_language(v) for v in languages) if x]
+            changed = True
+        if resolutions:
+            prefs["resolutions"] = dupes.parse_resolutions(resolutions)
+            changed = True
+        if language_first is not None:
+            prefs["language_first"] = bool(language_first)
+            changed = True
+        if changed and self.cleanup is not None:
+            self.cleanup.set_setting("dupes", json.dumps(prefs))
+        if action == "settings":
+            return Final("🧬 " + dupes.prefs_text(prefs))
+        acc = self._plex_of(chat_id)
+        if not (self.plex and acc):
+            raise ArrError("Der Duplikat-Finder braucht Plex – verbinde es mit /plex (als Server-Besitzer).")
+        metas: list[dict] = []
+        try:
+            for s in await self.plex.sections(acc):
+                if s.get("type") == "movie" and kind in ("all", "movie"):
+                    metas += await self.plex.section_items(acc, s["key"])
+                elif s.get("type") == "show" and kind in ("all", "series"):
+                    metas += await self.plex.section_items(acc, s["key"], episodes=True)
+        except plex.PlexError as e:
+            raise ArrError(str(e)) from e
+        # Audio languages only come with the details: fetch them for the titles that matter.
+        wanted = [m for g in dupes.groups(metas) for m in g][:400]
+        sem = asyncio.Semaphore(4)
+
+        async def detail(m: dict) -> dict:
+            async with sem:
+                try:
+                    full = (await self.plex.metadata(acc, str(m.get("ratingKey")))) or {}
+                except plex.PlexError:
+                    return m
+            return {**m, "Media": full.get("Media") or m.get("Media")}
+
+        job = dupes.find(list(await asyncio.gather(*(detail(m) for m in wanted))), prefs)
+        text, buttons = dupes.preview(job, prefs)
+        if not buttons:
+            return Final(text)
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Duplikate", None), stage="dup", data=job)
+        flow.step = Step(text, buttons)
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
+    async def _delete_dupes(self, chat_id: int, job: Any, items: list[Any]) -> None:
+        acc = self._plex_of(chat_id)
+        rescan: set[tuple] = set()
+        for d in items:
+            try:
+                await self.plex.delete_media(acc, d.drop.rating_key, d.drop.media_id)
+            except plex.PlexError as e:
+                job.failed.append(f"{d.name}: {e}")
+                continue
+            job.deleted.append(d)
+            if d.ext:
+                rescan.add(d.ext)
+        for kind, ext in rescan:  # Radarr/Sonarr: notice which file is left
+            try:
+                if kind == "movie" and self.radarr:
+                    hit = next((m for m in await self.radarr.library() if m.get("tmdbId") == ext), None)
+                    if hit:
+                        await self.radarr.command("RescanMovie", movieIds=[hit["id"]])
+                elif kind == "series" and self.sonarr:
+                    hit = next((s for s in await self.sonarr.library()
+                                if self._norm(s.get("title") or "") == self._norm(str(ext))), None)
+                    if hit:
+                        await self.sonarr.command("RescanSeries", seriesId=hit["id"])
+            except ArrError as e:
+                log.info("Neu einlesen nach Duplikat: %s", e)
+
+    async def _dup_step(self, flow: Flow, value: str) -> Step:
+        job = flow.data
+        if value == "no":
+            return Step(dupes.summary(job, cancelled=True), done=True)
+        if value == "all":
+            await self._delete_dupes(flow.chat_id, job, [d for d in job.items if d.sure])
+            return Step(dupes.summary(job), done=True)
+        if value in ("del", "skip") and job.pos < len(job.items):
+            if value == "del":
+                await self._delete_dupes(flow.chat_id, job, [job.items[job.pos]])
+            else:
+                job.skipped += 1
+            job.pos += 1
+        elif value == "one":
+            job.pos = 0
+        if value == "stop" or job.pos >= len(job.items):
+            return Step(dupes.summary(job), done=True)
+        text, buttons = dupes.one(job)
+        return Step(text, buttons)
+
+    # ---- media manager (admin): delete on command, storage, keep ------------------------------------
+    def _plex_of(self, chat_id: int) -> plex.Account | None:
+        if not self.plex_store:
+            return None
+        return self.plex_store.get(chat_id) or self.plex_admin()
+
+    async def _media_report(self) -> Any:
+        from . import media
+
+        accounts = [a for a in (self.plex_store.all() if self.plex_store else [])
+                    if self.users is None or self.users.is_allowed(a.user_id)]
+        return await media.collect(self.radarr, self.sonarr, self.plex if accounts else None, accounts,
+                                   german_check=False)
+
+    def _recent_requests(self) -> dict[tuple[str, int], int]:
+        cutoff = utcnow() - timedelta(days=mediamgr.PROTECT_DAYS)
+        out: dict[tuple[str, int], int] = {}
+        for r in self.store.state.requests:
+            try:
+                at = datetime.fromisoformat(r.get("at") or "")
+            except ValueError:
+                continue
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            ext = r.get("tmdb") if r["kind"] == "movie" else r.get("tvdb")
+            if at >= cutoff and ext:
+                out[(r["kind"], ext)] = r["chat_id"]
+        return out
+
+    async def _t_admin_delete_media(self, chat_id: int, kind: str = "all", watched: bool | None = None,
+                                    older_days: int | None = None, seen_days: int | None = None,
+                                    min_gb: float | None = None, max_rating: float | None = None,
+                                    genres: list[str] | None = None, ended: bool | None = None,
+                                    scope: str | None = None, largest: int | None = None) -> Final:
+        q = mediamgr.Query(kind or "all", watched, older_days, seen_days, min_gb, max_rating, list(genres or []),
+                           ended, scope or "", largest)
+        if q.kind == "movie" and not self.radarr or q.kind == "series" and not self.sonarr:
+            raise ArrError("Dafür fehlt Radarr bzw. Sonarr.")
+        acc = self._plex_of(chat_id)
+        if (watched is not None or seen_days) and not (self.plex and acc):
+            raise ArrError("Für „gesehen“ brauche ich deinen Plex-Verlauf – verbinde Plex mit /plex.")
+        if not any((watched is not None, older_days, seen_days, min_gb, max_rating, genres, largest, ended)):
+            raise ArrError("Das wäre ALLES. Was genau soll weg (gesehen, ungesehen, älter als …, die größten …)? "
+                           "Bitte nachfragen.")
+        report = await self._media_report()
+        kept = self.cleanup.kept() if self.cleanup else set()
+        name_of = (lambda u: self.users.name(u)) if self.users is not None else (lambda u: str(u))
+        hits, protected = mediamgr.select(report, q, acc.user_id if acc else None, kept, self._recent_requests(),
+                                          name_of)
+        job = mediamgr.Job(q, protected=protected)
+        series = [t for t in hits if t.kind == "series"]
+        job.items = [mediamgr.whole(t) for t in hits if t.kind == "movie"]
+        if series and not q.scope:
+            job.pending_series = series
+            text, buttons = mediamgr.scope_question(job)
+        else:
+            await self._plan_series(job, series, acc)
+            text, buttons = mediamgr.preview(job)
+        if not buttons:
+            return Final(text)
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Aufräumen", None), stage="mm", data=job)
+        flow.step = Step(text, buttons)
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
+    async def _plan_series(self, job: Any, series: list[Any], acc: plex.Account | None) -> None:
+        q = job.query
+        if q.scope in ("", "series"):
+            job.items += [mediamgr.whole(t) for t in series]
+        else:
+            for t in series:
+                try:
+                    eps = await self.sonarr.episodes(t.arr_id)
+                    key = t.plex_keys.get(acc.user_id) if acc else None
+                    leaves = await self.plex.episodes(acc, key) if (key and self.plex) else []
+                except (ArrError, plex.PlexError) as e:
+                    job.failed.append(f"{t.title}: {e}")
+                    continue
+                job.items += mediamgr.plan_parts(t, eps, leaves, q, acc.user_id if acc else None)
+        job.items.sort(key=lambda i: -i.size)
+        if q.largest:
+            job.items = job.items[: q.largest]
+
+    async def _mm_step(self, flow: Flow, value: str) -> Step:
+        job = flow.data
+        if value == "no":
+            return Step(mediamgr.summary(job, cancelled=True), done=True)
+        if value.startswith("sc:"):
+            job.query.scope = value[3:]
+            series, job.pending_series = job.pending_series, []
+            await self._plan_series(job, series, self._plex_of(flow.chat_id))
+            text, buttons = mediamgr.preview(job)
+            return Step(text, buttons, done=not buttons)
+        if value == "all":
+            for item in job.items:
+                err = await mediamgr.delete(self.radarr, self.sonarr, item)
+                (job.failed.append(err) if err else job.deleted.append(item))
+            return Step(mediamgr.summary(job), done=True)
+        if value in ("del", "skip", "keep") and job.pos < len(job.items):
+            item = job.items[job.pos]
+            if value == "del":
+                err = await mediamgr.delete(self.radarr, self.sonarr, item)
+                (job.failed.append(err) if err else job.deleted.append(item))
+            elif value == "keep" and self.cleanup is not None:
+                title = item.name.split(" – ")[0].split(": ")[0]
+                self.cleanup.keep(item.service, item.arr_id, title)
+                job.kept.append(title)
+                # the other parts of the same series are protected now, too
+                job.items = job.items[: job.pos + 1] + [i for i in job.items[job.pos + 1:]
+                                                        if (i.service, i.arr_id) != (item.service, item.arr_id)]
+            else:
+                job.skipped += 1
+            job.pos += 1
+        elif value == "one":
+            job.pos = 0
+        if value == "stop" or job.pos >= len(job.items):
+            return Step(mediamgr.summary(job), done=True)
+        text, buttons = mediamgr.one(job)
+        return Step(text, buttons)
+
+    async def _t_admin_storage(self, chat_id: int, top: int | None = None) -> Final:
+        from . import extras
+
+        report = await self._media_report()
+        disks = await extras.disks(self.radarr, self.sonarr)
+        acc = self._plex_of(chat_id)
+        self._outbox.setdefault(chat_id, []).append(
+            View(chat_id, "html", arg=mediamgr.storage_text(report, disks, acc.user_id if acc else None,
+                                                        max(3, min(int(top or 10), 25)))))
+        return Final("")
+
+    async def _t_admin_keep(self, chat_id: int, title: str | None = None, kind: str | None = None,
+                            off: bool = False) -> Final:
+        if self.cleanup is None:
+            raise ArrError("Nicht eingerichtet.")
+        if not title:
+            rows = self.cleanup.kept_titles()
+            if not rows:
+                return Final("🛡 Noch nichts geschützt. Z. B. „Dune nie löschen“.")
+            return Final("🛡 Nie löschen:\n" + "\n".join(f"{'🎬' if s == 'radarr' else '📺'} {t}" for s, _, t in rows))
+        kinds = [kind] if kind else [k for k, svc in (("movie", self.radarr), ("series", self.sonarr)) if svc]
+        found, errors = [], []
+        for k in kinds:
+            try:
+                found.append((k, await self._find_in_library(k, title)))
+            except ArrError as e:
+                errors.append(str(e))
+        if not found:
+            raise ArrError(errors[0] if errors else f"{title} nicht gefunden.")
+        if len(found) > 1:
+            raise ArrError(f"„{title}“ gibt es als Film und als Serie – welches meinst du?")
+        k, lib_id = found[0]
+        item = await self._svc(k).get(lib_id)
+        service = "radarr" if k == "movie" else "sonarr"
+        if off:
+            self.cleanup.unkeep(service, lib_id)
+            return Final(f"🔓 {item.get('title')} ist nicht mehr geschützt.")
+        self.cleanup.keep(service, lib_id, item.get("title") or title)
+        return Final(f"🛡 {item.get('title')} wird nie gelöscht – auch nicht von Aufräumregeln.")
 
     async def _t_admin_activity(self, chat_id: int, user: str | None = None, problems_only: bool = False,
                                 days: int = 7) -> Final:

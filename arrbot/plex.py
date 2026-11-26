@@ -304,6 +304,26 @@ class Plex:
             out += [i for i in (_item(m) for m in data.get("Metadata") or []) if i]
         return out
 
+    async def sections(self, a: Account) -> list[dict]:
+        return (await self._srv(a, "/library/sections")).get("Directory") or []
+
+    async def section_items(self, a: Account, key: str, episodes: bool = False) -> list[dict]:
+        """Every title of a library with its versions (Media); episodes=True: all episodes of a show library."""
+        params: dict[str, Any] = {"includeGuids": 1}
+        if episodes:
+            params["type"] = 4
+        return (await self._srv(a, f"/library/sections/{key}/all", **params)).get("Metadata") or []
+
+    async def delete_media(self, a: Account, rating_key: str, media_id: int) -> None:
+        """Delete one version (file) of a title. Needs "allow media deletion" on the server."""
+        try:
+            r = await self._http.delete(f"{a.server_url}/library/metadata/{rating_key}/media/{media_id}",
+                                        headers=self._headers(a.server_token))
+        except httpx.HTTPError as e:
+            raise PlexError(f"Plex nicht erreichbar: {type(e).__name__}") from e
+        if r.status_code >= 400:
+            raise PlexError(f"Plex lässt das Löschen nicht zu (HTTP {r.status_code})")
+
     async def refresh_libraries(self, a: Account) -> int:
         """Ask Plex to scan all movie and show libraries (finds files Radarr/Sonarr put there)."""
         sections = (await self._srv(a, "/library/sections")).get("Directory") or []

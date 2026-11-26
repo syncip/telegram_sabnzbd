@@ -127,6 +127,26 @@ Außerdem:
   (max. 4.000 Zeichen) an die KI, die nur Titel herausschreiben darf. Was schon da ist, abgelehnt wurde
   oder ein gemiedenes Genre hat, fällt weg; der Rest kommt als Buttons, sortiert nach Geschmack.
   „🙅 Nichts davon“ lernt mit. Max. 5 Seiten pro Nutzer. Seiten, die nur per JavaScript laden, gehen nicht.
+- **Medien-Manager (Admin):** Aufräumen auf Befehl, in deinen Worten: „Lösche alle Filme, die länger als
+  180 Tage da sind und die ich nicht gesehen habe“, „Lösche alle Filme, die ich gesehen habe“, „Die 10
+  größten Serien, die ich nie angefangen habe“, „Horrorfilme unter 6 Sterne“. „Gesehen“ heißt: von dir (dein
+  Plex-Verlauf). Die KI macht daraus nur einen Filter, welche Titel passen, rechnet der Bot selbst aus
+  Radarr/Sonarr und Plex. Immer zuerst eine Liste mit Größe: „🗑 Alle löschen“, „👆 Einzeln durchgehen“
+  (Löschen · Behalten · 🛡 Nie löschen) oder „Abbrechen“. Bei Serien fragt der Bot per Button, ob einzelne
+  Folgen, ganze Staffeln oder ganze Serien weg sollen. Gelöscht wird direkt über Radarr/Sonarr mit den
+  Dateien, aber **ohne Sperre**: alles kann jederzeit wieder hinzugefügt werden. Gelöschte Folgen und
+  Staffeln werden nicht mehr überwacht (sonst lädt Sonarr sie gleich wieder), „such nochmal“ holt sie zurück.
+  Nie in der Liste: „🛡 Nie löschen“-Titel („Dune nie löschen“), was jemand anderes gerade schaut und was
+  jemand anderes in den letzten 30 Tagen angefragt hat. „Was frisst am meisten Platz?“ zeigt freien
+  Speicher, die größten Titel und wie viel Gesehenes / lange Ungesehenes ausmacht.
+- **Duplikat-Finder (Admin):** „Such doppelte Filme“ findet in Plex denselben Film oder dieselbe Folge mehrfach
+  – geprüft wird der Inhalt, nicht Dateiname oder Größe: Plex hat die Versionen demselben Titel zugeordnet
+  (bzw. gleiche TMDB-ID, gleiche Staffel und Folge) und die Laufzeit ist gleich (Standard ab 97 %,
+  einstellbar: „Duplikate ab 95 % Ähnlichkeit“). Etwas weniger ähnlich (vielleicht Extended Cut): der Bot
+  fragt einzeln. Behalten wird zuerst die Sprache (Standard Deutsch vor Englisch), dann die Auflösung (Standard
+  die höchste) – änderbar: „Bei Duplikaten 1080p vor 4K behalten“, „Auflösung ist wichtiger als Sprache“.
+  Gelöscht wird über Plex (dort unter Einstellungen → Bibliothek „Löschen von Medien erlauben“ einschalten),
+  danach lesen Radarr/Sonarr den Titel neu ein.
 - **Aufräumregeln (Admin):** „Lösch Filme, die alle gesehen haben, nach 30 Tagen“, „Serien, die keiner
   nach einem Jahr angeschaut hat, nur wenn weniger als 100 GB frei sind“. Täglich um 11 Uhr kommt eine
   Liste mit „🗑 Alle löschen“ und „🛡 Behalten“ (wird nie wieder vorgeschlagen). Nur wenn du ausdrücklich

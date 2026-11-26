@@ -54,6 +54,7 @@ class RuleStore:
                 low_space_gb INTEGER, auto INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS cleanup_keep (service TEXT, arr_id INTEGER, title TEXT,
                 PRIMARY KEY (service, arr_id));
+            CREATE TABLE IF NOT EXISTS cleanup_settings (key TEXT PRIMARY KEY, value TEXT);
         """)
         self._db.commit()
 
@@ -81,6 +82,28 @@ class RuleStore:
     def keep(self, service: str, arr_id: int, title: str = "") -> None:
         with self._lock, self._db:
             self._db.execute("INSERT OR REPLACE INTO cleanup_keep VALUES (?,?,?)", (service, arr_id, title))
+
+    def unkeep(self, service: str, arr_id: int) -> bool:
+        with self._lock, self._db:
+            return self._db.execute("DELETE FROM cleanup_keep WHERE service=? AND arr_id=?",
+                                    (service, arr_id)).rowcount > 0
+
+    def kept_titles(self) -> list[tuple[str, int, str]]:
+        with self._lock:
+            return [(r["service"], r["arr_id"], r["title"] or "?")
+                    for r in self._db.execute("SELECT * FROM cleanup_keep ORDER BY title")]
+
+    def setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM cleanup_settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str | None) -> None:
+        with self._lock, self._db:
+            if value is None:
+                self._db.execute("DELETE FROM cleanup_settings WHERE key=?", (key,))
+            else:
+                self._db.execute("INSERT OR REPLACE INTO cleanup_settings VALUES (?,?)", (key, value))
 
     def kept(self) -> set[tuple[str, int]]:
         with self._lock:
