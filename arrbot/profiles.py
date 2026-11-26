@@ -13,6 +13,7 @@ and one short line of context for the AI (~30 tokens) so answers fit the person.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import sqlite3
 import threading
@@ -43,7 +44,10 @@ ARR_GENRES = {
 }
 GENRE_NAMES = sorted(set(TMDB_GENRES.values()))
 # Weight change per event.
-WEIGHTS = {"requested": 1.0, "finished": 0.5, "watched": 1.5, "deleted": -1.0, "not_interested": -0.3}
+WEIGHTS = {"requested": 1.0, "finished": 0.5, "watched": 1.5, "deleted": -1.0, "not_interested": -0.3,
+           "liked": 2.5, "disliked": -1.5, "abandoned": -0.7, "asked": 0.0}
+# How much a title says about someone's taste as a starting point for suggestions
+SEED_WEIGHT = {"liked": 2.0, "watched": 1.2, "finished": 0.8, "requested": 0.6}
 MAX_NOTES = 5
 DAY_NAMES = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
@@ -161,10 +165,14 @@ class ProfileStore:
         w = WEIGHTS.get(action, 0.0)
         try:
             with self._lock, self._db:
-                if action in ("requested", "finished", "watched"):  # same title again: only the newest entry
+                if action in ("requested", "finished", "watched", "liked", "disliked", "abandoned", "asked"):
+                    # same title again: only the newest entry; 👍 replaces 👎 and the other way round
+                    same = {"liked": ("liked", "disliked", "abandoned"), "disliked": ("liked", "disliked")}.get(
+                        action, (action,))
                     self._db.execute(
-                        "DELETE FROM events WHERE user_id=? AND action=? AND kind=? AND tmdb IS ? AND tvdb IS ?",
-                        (user_id, action, kind, tmdb, tvdb))
+                        f"DELETE FROM events WHERE user_id=? AND action IN ({','.join('?' * len(same))}) "
+                        "AND kind=? AND tmdb IS ? AND tvdb IS ?",
+                        (user_id, *same, kind, tmdb, tvdb))
                 self._db.execute(
                     "INSERT INTO events(user_id, action, kind, tmdb, tvdb, title, year, genres, at) "
                     "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -309,10 +317,35 @@ class ProfileStore:
                                     (user_id,)).fetchall()
         counts = Counter(r["action"] for r in rows)
         decades = Counter((r["year"] // 10) * 10 for r in rows if r["year"] and r["action"] in ("requested", "finished"))
-        rejected = {(r["kind"], r["tmdb"]) for r in rows if r["action"] == "not_interested" and r["tmdb"]}
-        seen = {(r["kind"], r["tmdb"]) for r in rows if r["action"] in ("requested", "deleted", "watched") and r["tmdb"]}
+        rejected = {(r["kind"], r["tmdb"]) for r in rows
+                    if r["action"] in ("not_interested", "disliked", "abandoned") and r["tmdb"]}
+        seen = {(r["kind"], r["tmdb"]) for r in rows
+                if r["action"] in ("requested", "deleted", "watched", "liked", "disliked", "asked") and r["tmdb"]}
         since = min((r["at"] for r in rows), default=None)
         return Profile(user_id, self.prefs(user_id), genres, dict(decades), dict(counts), since, rejected, seen)
+
+    def seeds(self, user_id: int, limit: int = 8) -> list[tuple[str, int, str, float]]:
+        """Best starting points for suggestions: (kind, tmdb, title, weight). Liked counts most, then
+        watched to the end, then requested; newer counts more; disliked/abandoned titles never."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT action, kind, tmdb, title FROM events WHERE user_id=? AND tmdb IS NOT NULL "
+                "ORDER BY id DESC LIMIT 400", (user_id,)).fetchall()
+        bad = {(r["kind"], r["tmdb"]) for r in rows if r["action"] in ("disliked", "abandoned", "deleted")}
+        best: dict[tuple[str, int], tuple[str, float]] = {}
+        for pos, r in enumerate(rows):
+            key = (r["kind"], r["tmdb"])
+            w = SEED_WEIGHT.get(r["action"])
+            if w is None or key in bad:
+                continue
+            w *= 1.0 / (1 + pos / 40)  # newer counts more
+            if w > best.get(key, ("", 0.0))[1]:
+                best[key] = (re.sub(r" \(\d{4}\)$", "", r["title"] or "?"), w)
+        ranked = sorted(best.items(), key=lambda x: -x[1][1])[:limit]
+        return [(k, tid, title, round(w, 3)) for (k, tid), (title, w) in ranked]
+
+    def asked(self, user_id: int) -> set[tuple[str, int]]:
+        return {(k, t) for k, t, _ in self.known(user_id, "asked") if t}
 
     def recent(self, user_id: int, limit: int = 8) -> list[dict]:
         with self._lock:

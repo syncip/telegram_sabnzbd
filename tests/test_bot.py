@@ -19,7 +19,7 @@ from arrbot.llm import (
     Turn,
 )
 from arrbot.state import Store, utcnow
-from arrbot.tools import ToolRunner
+from arrbot.tools import ToolRunner, View
 from arrbot.tracker import Tracker
 
 
@@ -661,6 +661,30 @@ def test_mute_collects_messages_and_sums_up(tmp_path):
     assert sent[-1][0] == 42 and "1 Meldung:" in sent[-1][1] and "Download gestartet: Dune" in sent[-1][1]
     assert "42" not in store.state.muted
     assert "nicht stummgeschaltet" in mute(store, 42, None)
+
+
+def test_notification_settings_skip_start_messages(tmp_path):
+    from arrbot.tracker import Tracker as Tr
+
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    sent = []
+
+    async def send(chat, text, kb=None):
+        sent.append((chat, text))
+
+    tools = ToolRunner(radarr, sonarr, store, "released")
+    res = asyncio.run(tools.run(ToolCall("1", "notification_settings", {"start": False, "done": True}), 42))
+    assert res.final == "" and tools.take_outbox(42) == [View(42, "notify")]
+    assert store.state.notify == {"42": {"start": False}}
+    tr = Tr(radarr, sonarr, store, send, no_release_minutes=30, track_days=30)
+    store.track("radarr", 7, "Dune: Part Two (2024)", 42)
+    store.track("radarr", 7, "Dune: Part Two (2024)", 43)
+    asyncio.run(tr.poll())
+    fr.history = [{"id": 1, "movieId": 7, "eventType": "grabbed", "date": utcnow().isoformat()}]
+    asyncio.run(tr.poll())
+    assert [c for c, _ in sent] == [43]  # 42 wants no "download started"
+    res = asyncio.run(tools.run(ToolCall("2", "mute_notifications", {"days": 3}), 42))
+    assert res.final.startswith("🔕 Stumm für 3 Tage.")
 
 
 def test_debug_log_records_message_tools_and_requests(tmp_path):

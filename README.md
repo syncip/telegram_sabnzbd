@@ -21,10 +21,19 @@ Außerdem:
   „Was läuft gerade?“ zeigt nur Aktuelles, fertige Downloads per Button „✅ Fertige“.
   „Wie ist der Status bei der Suche?“ direkt nach einer Anfrage zeigt nur diesen Titel: Der Bot
   behält nach jeder Aktion die letzte Frage und Antwort (~50 Tokens) für solche Rückfragen.
-- **Vorschläge:** „Was soll ich als Nächstes schauen?“ – passend zu dem, was du bisher geladen hast
-  (TMDB-Empfehlungen, ohne was ihr schon habt). Antippen = hinzufügen. Wünsche wie „nur Filme
-  neuer als 2000“ oder „ab 7 Sterne“ werden beachtet; gibt es zu wenig Passendes, füllt der Bot mit
-  den bestbewerteten Titeln dieser Jahre auf.
+- **Vorschläge:** „Was soll ich als Nächstes schauen?“ – passend zu deinem Geschmack (TMDB-Empfehlungen,
+  ohne was ihr schon habt). Ausgangspunkt ist, was dir gefallen hat: 👍 und ⭐4–5 zählen am meisten, dann in
+  Plex zu Ende Geschautes, dann Angefragtes. Antippen = hinzufügen. Wünsche werden beachtet: „nur Filme
+  neuer als 2000“, „ab 7 Sterne“, „was Lustiges“, „spannend, unter 90 Minuten“, „wie Dark, aber lustiger“,
+  „nur was es auf Deutsch gibt“. Gibt es zu wenig Passendes, füllt der Bot mit den bestbewerteten Titeln
+  der Genres oder Jahre auf. Für Abwechslung höchstens ein Teil pro Filmreihe, nicht nur ein Genre und
+  ein „💎 Geheimtipp“ (gut bewertet, kaum bekannt); zu jedem Titel steht, warum („wie Arrival“). Was schon
+  auf dem Server liegt und du noch nicht gesehen hast, kommt als „📼 Schon auf dem Server“ dazu.
+- **Bewerten:** Unter Vorschlägen „👎👁 Bewerten“: 👎 = nicht meins, 👁 = schon gesehen (dann fragt der
+  Bot „Wie fandest du’s?“ mit ⭐1–5). Nach einem frisch zu Ende geschauten Film oder einer Serie in Plex
+  fragt der Bot das auch (höchstens zwei am Tag, „🔕 Nicht mehr fragen“ beendet es). Sterne aus Plex zählen
+  mit, angefangene und lange liegen gelassene Titel etwas negativ. Per Text: „Inception fand ich super“.
+  Neue Nutzer bekommen beim ersten Vorschlag ein paar bekannte Titel zum 👍/👎 („Kurz zum Kennenlernen“).
 - **Nutzerprofil:** Der Bot merkt sich pro Nutzer dauerhaft, was er mag (SQLite-Datenbank
   `data/profiles.db`). Er lernt ohne KI-Kosten aus jeder Anfrage (Genres und Jahr aus Radarr/Sonarr),
   aus fertigen und gelöschten Titeln und aus „🙅 Nichts davon“ unter Vorschlägen. Dazu kommt, was du
@@ -137,6 +146,13 @@ Außerdem:
 - **Überwachung (Admin):** Alle `MONITOR_MINUTES` Minuten prüft der Bot Radarr, Sonarr, SABnzbd, TMDB
   und Plex (ohne KI, kostet nichts). Fällt einer zweimal hintereinander aus, kommt „🚨 Sonarr ist nicht
   erreichbar“, wenn er zurück ist „✅ läuft wieder (war 12 Min. weg)“.
+- **Sonarr/Radarr-Warnungen (Admin):** Bei jeder Überwachungsrunde liest der Bot die Warnungen von
+  Sonarr/Radarr (System → Status) und meldet neue einmal, mit Erklärung auf Deutsch; verschwindet eine,
+  kommt „✅ behoben“. Harmloses behebt er selbst: Ist ein Indexer oder Download-Client wegen Fehlern
+  gesperrt, testet er ihn neu und lässt Sonarr/Radarr den Status prüfen – und sagt, ob es geholfen hat.
+  Zusätzlich prüft er, ob Indexer nur Hauptkategorien (5000/5100) haben; dann gibt es den Button
+  „🔧 Unterkategorien eintragen“ (ändert die Indexer-Einstellung, deshalb nur auf Knopfdruck). `/check`
+  zeigt die aktuellen Warnungen mit.
 - **Suche ohne Ergebnis:** Startet der Bot eine Suche, wartet er im Hintergrund, bis Sonarr/Radarr fertig
   sind. Wurde nichts geladen, prüft er sofort selbst, warum, und sagt es (statt erst nach 30 Minuten):
   Titel/Staffel nicht überwacht? Liefern die Indexer gar nichts (dann auch: sind nur Hauptkategorien wie
@@ -232,8 +248,12 @@ Für alle:
 - `/downloads` (auch `/status`) – deine Downloads mit Fortschritt
 - `/verbrauch` – deine Anfragen, Tokens und Kosten, mit Balken bis zum Limit
 - `/neu` – Gespräch zurücksetzen
-- `/stumm [30 | 2h | 1d]` – Download-Meldungen eine Weile stumm (Standard 60 Min., auch per Text: „Sei bis
-  morgen still“). Danach kommt eine kurze Zusammenfassung, was in der Zeit war. `/laut` – sofort wieder an
+- `/stumm [30 | 2h | 1d]` – Download-Meldungen eine Weile stumm (Standard 60 Min., auch per Text: „Nerv mich
+  10 Minuten nicht“, „3 Tage Ruhe“). Danach kommt eine kurze Zusammenfassung, was in der Zeit war. `/laut` –
+  sofort wieder an
+- `/meldungen` – welche Download-Meldungen du dauerhaft bekommst, per Button an/aus: Start, fertig (Serien:
+  eine Zusammenfassung am Ende statt jeder Folge), Probleme, nichts gefunden. Geht auch per Text: „Keine Info
+  mehr, wenn ein Download startet, nur wenn er fertig ist“. Ist etwas unklar, fragt der Bot nach.
 - `/version` – laufende Version und welches KI-Modell der Bot nutzt (oder einfach fragen: „Welche Version hast du?“)
 - `/hilfe` – Beispiele
 
@@ -352,3 +372,7 @@ python -m venv .venv
 ```
 
 Die Tests laufen komplett offline mit nachgebautem Radarr/Sonarr/SABnzbd/TMDB und einer simulierten KI.
+
+## Lizenz
+
+MIT – siehe [LICENSE](LICENSE).

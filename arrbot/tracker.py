@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, tzinfo
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+from . import notify
 from .arr import ArrError, Radarr, Sonarr, _ArrBase
 from .sabnzbd import SABnzbd, SabError, SabQueue, eta_text, size_text
 from .state import Store, Tracked, utcnow
@@ -128,7 +129,7 @@ class Tracker:
             for download_id, waited in t.pending_downloads:
                 line = self.sab_line(download_id)
                 if line:
-                    await self._notify(t, f"{t.title}\n{line}")
+                    await self._notify(t, f"{t.title}\n{line}", kind="start")
                 elif waited + 1 < PENDING_POLLS:
                     still.append([download_id, waited + 1])
             t.pending_downloads = still
@@ -183,7 +184,7 @@ class Tracker:
                 t.completed = name == "radarr"
                 eps = self._episodes(recs)
                 self.store.finish(t, t.title + (f" ({eps})" if eps else ""))
-            await self._notify(t, msg)
+            await self._notify(t, msg, kind="start" if event == GRABBED else "problem" if event == FAILED else "done")
 
     def _job_event(self, t: Tracked, event: str, recs: list[dict], now: datetime) -> bool:
         """Series: the first grab starts a job (announced as usual), later grabs and imports only count.
@@ -226,7 +227,7 @@ class Tracker:
             t.job = {}
             if len(want) <= 1 and not failed and len(got) <= 1:
                 if got:  # one episode: the usual message
-                    await self._notify(t, f"✅ Fertig und importiert: {t.title} ({got[0]})")
+                    await self._notify(t, f"✅ Fertig und importiert: {t.title} ({got[0]})", kind="done")
                 continue
             n = len(want)
             lines = [f"✅ {t.title}: {len(got)} von {n} Folge{'n' if n != 1 else ''} fertig importiert"
@@ -236,7 +237,7 @@ class Tracker:
             missing = [x for x in want if x not in got]
             if missing and len(got) + failed < n:
                 lines.append(f"⏳ Nicht angekommen: {_span(missing)}. Details: /downloads")
-            await self._notify(t, "\n".join(lines))
+            await self._notify(t, "\n".join(lines), kind="done")
 
     @staticmethod
     def _episodes(recs: list[dict]) -> str:
@@ -288,6 +289,7 @@ class Tracker:
                 t,
                 f"⚠️ Problem beim Download: {queue_title(q)}\n{detail}\n"
                 "Ggf. in Radarr/Sonarr unter Aktivität → Warteschlange manuell eingreifen.",
+                kind="problem",
             )
 
     async def _check_paused(self) -> None:
@@ -336,7 +338,7 @@ class Tracker:
                     if extra:
                         msg += "\n" + extra
                 # One tap instead of typing: pause for a few days, delete, or just acknowledge.
-                await self._notify(t, msg, self.no_release_buttons(t.key))
+                await self._notify(t, msg, self.no_release_buttons(t.key), kind="nothing")
 
     @staticmethod
     def no_release_buttons(key: str) -> list[tuple[str, str]]:
@@ -348,9 +350,10 @@ class Tracker:
             ("👍 Okay", "n:ok"),
         ]
 
-    async def tell(self, chat_id: int, text: str, buttons: list[tuple[str, str]] | None = None) -> None:
+    async def tell(self, chat_id: int, text: str, buttons: list[tuple[str, str]] | None = None,
+                   kind: str = "info") -> None:
         """One chat; users only get the buttons meant for them."""
-        if self.muted(chat_id, text):
+        if not notify.wants(self.store, chat_id, kind) or self.muted(chat_id, text):
             return
         if buttons and not self.is_admin(chat_id):
             buttons = [b for b in buttons if b[1].startswith(self.USER_BUTTONS)]
@@ -405,9 +408,11 @@ class Tracker:
             except Exception:  # noqa: BLE001
                 log.exception("Nachricht an %s fehlgeschlagen", chat)
 
-    async def _notify(self, t: Tracked, text: str, buttons: list[tuple[str, str]] | None = None) -> None:
+    async def _notify(self, t: Tracked, text: str, buttons: list[tuple[str, str]] | None = None,
+                      kind: str = "info") -> None:
+        """kind: start | done | problem | nothing (each chat can switch them off) | info (always)."""
         for chat_id in t.chat_ids:
-            if self.muted(chat_id, text):
+            if not notify.wants(self.store, chat_id, kind) or self.muted(chat_id, text):
                 continue
             mine = buttons if not buttons or self.is_admin(chat_id) else                 [b for b in buttons if b[1].startswith(self.USER_BUTTONS)]
             try:

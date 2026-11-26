@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -17,7 +16,7 @@ from datetime import date, timedelta, tzinfo
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from . import debuglog, approval, collections_plex, german, manage, plex, profiles, qprofiles, sitewatch, together, urlinfo, watch, wishlist
+from . import debuglog, approval, collections_plex, german, manage, plex, profiles, qprofiles, recommend, sitewatch, together, urlinfo, watch, wishlist
 from . import recipes
 from . import users as users_mod
 from .arr import ArrError, Radarr, Sonarr
@@ -142,10 +141,23 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
         ),
         ToolSpec(
             "suggest",
-            "Vorschläge passend zu dem, was der Nutzer bisher geladen hat; zeigt Buttons. "
-            "from_year/to_year: Erscheinungsjahr (\"neuer als 2000\" = from_year 2001), min_rating 0-10.",
+            "Vorschläge passend zum Geschmack des Nutzers; zeigt Buttons. from_year/to_year: Erscheinungsjahr "
+            "(\"neuer als 2000\" = from_year 2001), min_rating 0-10. mood: Stimmung in seinen Worten "
+            "(\"was Lustiges\", \"spannend\"), genres: deutsche Genres. like: \"wie X\" (Titel), dazu ggf. mood "
+            "für \"wie X, aber lustiger\". max_minutes: \"kurz/unter 90 Minuten\" (Serien: pro Folge). "
+            "german_only: nur auf Deutsch verfügbar. calibrate: \"lern meinen Geschmack\".",
             obj({"kind": {"type": "string", "enum": ["movie", "series"]}, "from_year": {"type": "integer"},
-                 "to_year": {"type": "integer"}, "min_rating": {"type": "number"}}),
+                 "to_year": {"type": "integer"}, "min_rating": {"type": "number"}, "mood": {"type": "string"},
+                 "genres": {"type": "array", "items": {"type": "string"}}, "like": {"type": "string"},
+                 "max_minutes": {"type": "integer"}, "german_only": {"type": "boolean"},
+                 "calibrate": {"type": "boolean"}}),
+        ),
+        ToolSpec(
+            "title_feedback",
+            "Der Nutzer sagt, wie er einen Titel fand: \"X war super\" (liked), \"Y fand ich doof\" (disliked), "
+            "\"Z kenne ich schon\" (seen). Verbessert die Vorschläge.",
+            obj({"title": {"type": "string"}, "opinion": {"type": "string", "enum": ["liked", "disliked", "seen"]},
+                 "kind": {"type": "string", "enum": ["movie", "series"]}}, ["title", "opinion"]),
         ),
         ToolSpec(
             "remember",
@@ -228,10 +240,17 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
         ))
         specs.append(ToolSpec(
             "mute_notifications",
-            "Download-Meldungen an diesen Chat stummschalten (\"sei 30 Minuten still\", \"keine Nachrichten bis "
-            "morgen\") oder wieder an (off). Danach kommt eine kurze Zusammenfassung.",
-            obj({"minutes": {"type": "integer", "description": "Dauer in Minuten (1 Std. = 60, bis morgen ≈ 720)"},
+            "ALLE Download-Meldungen eine Zeit lang stumm (\"nerv mich 10 Minuten nicht\", \"3 Tage Ruhe\") oder "
+            "wieder an (off). Danach kommt eine kurze Zusammenfassung. Dauer unklar: nachfragen.",
+            obj({"minutes": {"type": "integer"}, "hours": {"type": "integer"}, "days": {"type": "integer"},
                  "off": {"type": "boolean", "description": "true = wieder laut"}}),
+        ))
+        specs.append(ToolSpec(
+            "notification_settings",
+            "WELCHE Download-Meldungen dieser Chat dauerhaft bekommt: start (Download gestartet), done (fertig; "
+            "Serien nur eine Zusammenfassung am Ende), problem (fehlgeschlagen/hängt), nothing (nichts gefunden). "
+            "Nur die genannten Arten setzen (true = an, false = aus); ohne Angaben: zeigt den Stand.",
+            obj({k: {"type": "boolean"} for k in ("start", "done", "problem", "nothing")}),
         ))
         specs.append(ToolSpec(
             "bot_info",
@@ -437,6 +456,9 @@ class Offer:
     text: str = "🔎 Welchen meinst du?"
     bulk: bool = False  # top lists: extra button "add all"
     suggest: bool = False  # suggestions: extra button "none of these" (learned)
+    calibrate: bool = False  # quick start: 👍/👎 per title, then "Fertig"
+    mode: str = ""  # "rate": buttons 👎/👁 per title instead of "add"
+    hidden: list[int] = field(default_factory=list)  # titles already rated (button gone)
 
 
 def DownloadsView(chat_id: int, finished: bool = False) -> "View":  # noqa: N802 - kept for readability
@@ -472,6 +494,7 @@ class ToolRunner:
         self.specs = build_specs(radarr is not None, sonarr is not None, tmdb is not None)
         self.flows: dict[str, Flow] = {}
         self.offers: dict[str, Offer] = {}
+        self.rating_asks: dict[str, Any] = {}  # "wie fandest du X?" -> the title
         self._outbox: dict[int, list[Flow | Offer | View]] = {}
         self.users: Any = None  # UserStore, set by the bot (admin tools)
         self.admin_specs = build_admin_specs()
@@ -1798,8 +1821,18 @@ class ToolRunner:
         return Final("🛠 Selbstgebaute Werkzeuge:\n" + "\n".join(lines) if lines
                      else "🛠 Noch keine selbstgebauten Werkzeuge.")
 
-    async def _t_mute_notifications(self, chat_id: int, minutes: int | None = None, off: bool = False) -> Final:
-        return Final(mute(self.store, chat_id, None if off else (minutes or 60)))
+    async def _t_mute_notifications(self, chat_id: int, minutes: int | None = None, off: bool = False,
+                                    hours: int | None = None, days: int | None = None) -> Final:
+        total = (minutes or 0) + (hours or 0) * 60 + (days or 0) * 1440
+        return Final(mute(self.store, chat_id, None if off else (total or 60)))
+
+    async def _t_notification_settings(self, chat_id: int, start: bool | None = None, done: bool | None = None,
+                                       problem: bool | None = None, nothing: bool | None = None) -> Final:
+        from . import notify
+
+        notify.change(self.store, chat_id, start=start, done=done, problem=problem, nothing=nothing)
+        self._outbox.setdefault(chat_id, []).append(View(chat_id, "notify"))
+        return Final("")
 
     async def _t_bot_info(self, chat_id: int) -> Final:
         if self.bot_info is None:
@@ -1854,20 +1887,31 @@ class ToolRunner:
         return Final(text)
 
     async def _t_suggest(self, chat_id: int, kind: str | None = None, from_year: int | None = None,
-                         to_year: int | None = None, min_rating: float | None = None) -> Final | dict:
+                         to_year: int | None = None, min_rating: float | None = None, mood: str | None = None,
+                         genres: list[str] | None = None, like: str | None = None, max_minutes: int | None = None,
+                         german_only: bool = False, calibrate: bool = False) -> Final | dict:
+        wanted = recommend.wanted_genres(mood, genres)
+
         def fits(r: Any) -> bool:
             if (r.kind, r.tmdb_id) in skip or avoid.intersection(r.genres):
+                return False
+            if wanted and not wanted.intersection(r.genres):
                 return False
             if (from_year or to_year) and not r.year:
                 return False
             return ((not from_year or r.year >= int(from_year)) and (not to_year or r.year <= int(to_year))
                     and (not min_rating or r.rating >= float(min_rating)))
 
-        wish = " ".join(x for x in (
-            f"ab {from_year}" if from_year and not to_year else "",
-            f"bis {to_year}" if to_year and not from_year else "",
-            f"{from_year}–{to_year}" if from_year and to_year else "",
-            f"ab ⭐ {float(min_rating):.1f}".replace(".", ",") if min_rating else "") if x)
+        def wish_text() -> str:
+            return " ".join(x for x in (
+                (mood or "").strip() or ", ".join(sorted(wanted)),
+                f"ab {from_year}" if from_year and not to_year else "",
+                f"bis {to_year}" if to_year and not from_year else "",
+                f"{from_year}–{to_year}" if from_year and to_year else "",
+                f"ab ⭐ {float(min_rating):g}".replace(".", ",") if min_rating else "",
+                f"bis {int(max_minutes)} Min." if max_minutes else "",
+                "auf Deutsch" if german_only else "") if x)
+
         kinds = [kind] if kind else [k for k, svc in (("movie", self.radarr), ("series", self.sonarr)) if svc]
         history = [r for r in reversed(self.store.state.requests) if r["chat_id"] == chat_id and r["kind"] in kinds]
         if not self.tmdb:
@@ -1875,22 +1919,39 @@ class ToolRunner:
             return {
                 "bisher": [r["title"] for r in history[:15]] or "nichts",
                 "hinweis": "Nenne 3-5 passende Titel (deutsche Titel), suche sie und biete sie per offer_titles an."
-                + (f" Nur: {wish}." if wish else ""),
+                + (f" Nur: {wish_text()}." if wish_text() else "") + (f" Ähnlich wie: {like}." if like else ""),
             }
         prof = self.profiles.profile(chat_id) if self.profiles else None
+        explicit = bool(wanted or from_year or to_year or min_rating or max_minutes or german_only or like)
         if prof:  # defaults the user told the bot once ("nur Filme ab 2000")
             from_year = from_year or prof.prefs.from_year
             min_rating = min_rating or prof.prefs.min_rating
-            wish = wish or " ".join(x for x in (f"ab {from_year}" if from_year else "",
-                                                f"ab ⭐ {float(min_rating):g}".replace(".", ",") if min_rating else "") if x)
         avoid = set(prof.prefs.avoid) if prof else set()
         skip = (prof.rejected | prof.seen) if prof else set()
         owned = await self._library_ids(kinds)
-        seeds = [(r["kind"], r.get("tmdb"), r["title"]) for r in history if r.get("tmdb")][:8]
-        if len(seeds) < 3:  # little history: the shared library shows the household's taste
-            seeds += owned["recent"][: 8 - len(seeds)]
+
+        like_title = None
+        if like:
+            hit = await self._resolve_title(kind, like)
+            if hit is None:
+                return Final(f"🤷 „{like}“ habe ich nicht gefunden – wie heißt der Titel genau (Film oder Serie)?")
+            like_title = hit["title"]
+            kinds = [hit["kind"]]
+            seeds = [(hit["kind"], hit["tmdb"], hit["title"])]
+        else:
+            personal = ([(k, t, title) for k, t, title, _ in self.profiles.seeds(chat_id, 10) if k in kinds]
+                        if self.profiles else [])
+            if not personal:
+                personal = [(r["kind"], r.get("tmdb"), r["title"]) for r in history if r.get("tmdb")]
+            if self.profiles and (calibrate or (not personal and not explicit
+                                                and not self.profiles.asked(chat_id))):
+                return await self._calibrate(chat_id, kinds)
+            seeds = list(dict.fromkeys(personal))[:8]
+            if len(seeds) < 3:  # little history: the shared library shows the household's taste
+                seeds += [s for s in owned["recent"] if s not in seeds][: 8 - len(seeds)]
 
         pool: dict[tuple[str, int], Any] = {}
+        on_server: dict[tuple[str, int], Any] = {}  # on the server, but this user has not seen it yet
         results = await asyncio.gather(
             *(self.tmdb.recommendations(k, tid) for k, tid, _ in seeds), return_exceptions=True
         )
@@ -1898,15 +1959,37 @@ class ToolRunner:
             if isinstance(res, BaseException):
                 continue
             for rank, r in enumerate(res[:20]):
-                if (k, r.tmdb_id) in owned["tmdb"] or not fits(r):
+                key = (k, r.tmdb_id)
+                if key in owned["tmdb"]:
+                    if key in owned["server"] and fits(r):
+                        tip = on_server.setdefault(key, r)
+                        tip.score += (20 - rank) / 20
+                        if title not in tip.because:
+                            tip.because.append(title)
                     continue
-                cur = pool.setdefault((k, r.tmdb_id), r)
+                if not fits(r):
+                    continue
+                cur = pool.setdefault(key, r)
                 cur.score += (20 - rank) / 20
                 if title not in cur.because:
                     cur.because.append(title)
-        if pool and (len(pool) >= 3 or not (from_year or to_year)):
+        if like_title and pool:
+            intro = f"💡 Wie {like_title}:"
+        elif pool and (len(pool) >= 3 or not explicit):
             reasons = list(dict.fromkeys(t for _, _, t in seeds))[:3]
-            intro = f"💡 Das könnte dir gefallen – weil du {', '.join(reasons)} hast:"
+            intro = f"💡 Das könnte dir gefallen – weil du {', '.join(reasons)} magst:"
+        elif wanted or max_minutes or min_rating:
+            # The recommendations have too little of it: well rated titles of the wanted genres.
+            for k in kinds:
+                try:
+                    found = await self.tmdb.discover(k, recommend.genre_ids(k, wanted), max_minutes,
+                                                     from_year, to_year, min_rating)
+                except TmdbError:
+                    continue
+                for r in found[:20]:
+                    if (k, r.tmdb_id) not in owned["tmdb"] and fits(r):
+                        pool.setdefault((k, r.tmdb_id), r)
+            intro = "🎯 Passend zu deinem Wunsch:"
         elif from_year or to_year:
             # Too few matches in the recommendations: the best rated titles of the wanted years.
             start = date(int(from_year or 1900), 1, 1)
@@ -1922,18 +2005,42 @@ class ToolRunner:
                     if (k, r.tmdb_id) not in owned["tmdb"] and fits(r):
                         pool.setdefault((k, r.tmdb_id), r)
             intro = "🔥 Gerade beliebt in Deutschland:"
-        if wish:
-            intro = intro.rstrip(":") + f" ({wish}):"
-        ranked = sorted(
-            pool.values(),
-            key=lambda r: r.score + r.rating / 10 * min(1.0, math.log10(r.votes + 1) / 3)
-            + (prof.genre_bonus(r.genres) if prof else 0.0),
-            reverse=True,
-        )
+        if wish_text():
+            intro = intro.rstrip(":") + f" ({wish_text()}):"
+        ranked = sorted(pool.values(), key=lambda r: recommend.score(r, prof.genre_bonus(r.genres) if prof else 0.0),
+                        reverse=True)
+
+        # Runtime and film series of the best ones: "unter 90 Minuten", not three parts of one series.
+        collections: dict[tuple[str, int], int] = {}
+        top = ranked[:16]
+        infos = await asyncio.gather(*(self.tmdb.details(r.kind, r.tmdb_id) for r in top), return_exceptions=True)
+        too_long = set()
+        for r, info in zip(top, infos):
+            if isinstance(info, BaseException):
+                continue
+            if info.get("collection"):
+                collections[(r.kind, r.tmdb_id)] = info["collection"]
+            if max_minutes and info.get("runtime") and info["runtime"] > int(max_minutes):
+                too_long.add((r.kind, r.tmdb_id))
+        ranked = [r for r in ranked if (r.kind, r.tmdb_id) not in too_long]
+        order = recommend.diversify(ranked, MAX_SUGGESTIONS, collections)
+        order += [r for r in ranked if r not in order]
+
         cands: list[Candidate] = []
-        for r in ranked:
+        lines: list[str] = []
+        checked = 0
+        for r in order:
             if len(cands) >= MAX_SUGGESTIONS:
                 break
+            if german_only:
+                if checked >= 18:
+                    break
+                checked += 1
+                try:
+                    if not recommend.german_available(await self.tmdb.german_info(r.kind, r.tmdb_id)):
+                        continue
+                except TmdbError:
+                    continue
             if r.kind == "movie":
                 c = Candidate("movie", r.tmdb_id, r.title, r.year)
             else:
@@ -1945,13 +2052,143 @@ class ToolRunner:
                     continue
                 c = Candidate("series", tvdb, r.title, r.year)
             c.rating = r.rating
-            c.tmdb_id, c.genres = r.tmdb_id, r.genres  # for "nichts davon"
+            c.tmdb_id, c.genres = r.tmdb_id, r.genres  # for "nichts davon" / 👎
             self._remember(chat_id, c)
             cands.append(c)
+            why = recommend.reason(r) if not like_title else ("💎 Geheimtipp" if "💎 Geheimtipp" in r.because else "")
+            if why:
+                lines.append(f"• {r.title}: {why}")
+        tips = sorted(on_server.values(), key=lambda r: recommend.score(r), reverse=True)[:2]
+        tip_lines = [f"📼 Schon auf dem Server: {r.title}" + (f" ({r.year})" if r.year else "")
+                     + (f" – wie {r.because[0]}" if r.because else "") for r in tips]
         if not cands:
+            if tip_lines:
+                return Final("Neues habe ich gerade nicht, aber:\n" + "\n".join(tip_lines))
+            if explicit:
+                return Final(f"🤷 Dazu ({wish_text() or like}) finde ich gerade nichts Neues. "
+                             "Magst du den Wunsch etwas lockern?")
             return Final("🤷 Mir fällt gerade nichts Neues ein – ihr habt schon alles Passende. 😄")
-        self._offer(chat_id, cands, intro + "\nTippe einen Titel an, um ihn hinzuzufügen.", suggest=True)
+        text = "\n".join([intro, *lines, *([""] + tip_lines if tip_lines else []), "",
+                          "Tippe einen Titel an, um ihn hinzuzufügen. 👎/👁 unter „Bewerten“."])
+        self._offer(chat_id, cands, text, suggest=True)
         return Final("")
+
+    async def _calibrate(self, chat_id: int, kinds: list[str]) -> Final:
+        """Quick start for someone the bot knows nothing about: well known titles to 👍/👎."""
+        pool: list[Any] = []
+        for k in kinds:
+            try:
+                pool += (await self.tmdb.trending(k))[:15]
+            except TmdbError:
+                continue
+        pool.sort(key=lambda r: r.votes, reverse=True)
+        cands: list[Candidate] = []
+        for r in recommend.diversify(pool, 8):
+            if r.kind == "movie":
+                c = Candidate("movie", r.tmdb_id, r.title, r.year)
+            else:
+                try:
+                    tvdb = await self.tmdb.tvdb_from_tv(r.tmdb_id)
+                except TmdbError:
+                    continue
+                if not tvdb:
+                    continue
+                c = Candidate("series", tvdb, r.title, r.year)
+            c.tmdb_id, c.genres, c.rating = r.tmdb_id, r.genres, r.rating
+            cands.append(c)
+            self._learn_cand(chat_id, "asked", c)  # shown once; never again as quick start
+        if not cands:
+            return Final("🤷 Gerade bekomme ich keine Titel von TMDB. Versuch es später nochmal.")
+        offer = self._offer(chat_id, cands, "👋 Kurz zum Kennenlernen, damit meine Tipps passen:\n"
+                            "Tippe 👍 bei Titeln, die dir gefallen haben, 👎 bei denen, die nicht dein Ding "
+                            "sind. Unbekannte einfach auslassen – dann „Fertig“.", suggest=True)
+        offer.calibrate = True
+        return Final("")
+
+    async def _resolve_title(self, kind: str | None, title: str) -> dict | None:
+        """A title the user named ("wie Inception") -> kind, tmdb id, German title, genres."""
+        kinds = [kind] if kind else ["movie", "series"]
+        best = None
+        for k in kinds:
+            svc = self.radarr if k == "movie" else self.sonarr
+            if not svc:
+                continue
+            try:
+                res = await svc.lookup(title)
+            except ArrError:
+                continue
+            res = [x for x in res if x.get("tmdbId")]
+            if not res:
+                continue
+            exact = next((x for x in res if self._norm(x.get("title") or "") == self._norm(title)), None)
+            hit = exact or res[0]
+            item = {"kind": k, "tmdb": hit["tmdbId"], "tvdb": hit.get("tvdbId") if k == "series" else None,
+                    "title": hit.get("title") or title, "year": hit.get("year") or None,
+                    "genres": hit.get("genres") or [], "exact": exact is not None}
+            if best is None or (item["exact"] and not best["exact"]):
+                best = item
+        return best
+
+    def _learn_cand(self, chat_id: int, action: str, c: Any) -> None:
+        if not self.profiles:
+            return
+        tmdb_id = c.ext_id if c.kind == "movie" else c.tmdb_id
+        self.profiles.learn(chat_id, action, c.kind, c.title, tmdb=tmdb_id,
+                            tvdb=c.ext_id if c.kind == "series" else None, year=c.year, genres=c.genres)
+
+    # ---- feedback on titles (👍/👎/👁, ratings) ---------------------------------------------------
+    def offer_mode(self, offer_id: str, mode: str) -> Offer | None:
+        offer = self.offers.get(offer_id)
+        if offer is not None:
+            offer.mode = mode
+        return offer
+
+    def offer_feedback(self, offer_id: str, idx: int, action: str, user_id: int) -> tuple[Offer, str, str | None] | None:
+        """👍 (l), 👎 (d) or 👁 seen (s) on one title of a suggestion list. Returns the offer, a short
+        answer and for 👁 the id of a rating question ("wie fandest du's?")."""
+        offer = self.offers.get(offer_id)
+        if offer is None or not 0 <= idx < len(offer.cands) or action not in ("l", "d", "s"):
+            return None
+        c = offer.cands[idx]
+        if idx not in offer.hidden:
+            offer.hidden.append(idx)
+        if action == "s":
+            return offer, f"👁 {c.title}", self.ask_rating(user_id, c)
+        self._learn_cand(user_id, "liked" if action == "l" else "disliked", c)
+        return offer, (f"👍 {c.title}" if action == "l" else f"👎 {c.title} – schlage ich nicht mehr vor"), None
+
+    def ask_rating(self, user_id: int, c: Any) -> str:
+        """Remember a question "wie fandest du X?" (buttons ⭐1–5). Returns its id."""
+        ask_id = uuid.uuid4().hex[:10]
+        self.rating_asks[ask_id] = c
+        while len(self.rating_asks) > 300:
+            self.rating_asks.pop(next(iter(self.rating_asks)))
+        self._learn_cand(user_id, "asked", c)
+        return ask_id
+
+    def rate(self, ask_id: str, stars: int, user_id: int) -> str | None:
+        c = self.rating_asks.pop(ask_id, None)
+        if c is None:
+            return None
+        if stars >= 4:
+            self._learn_cand(user_id, "liked", c)
+            return f"👍 {c.title}: {'⭐' * stars} – gemerkt, davon suche ich mehr."
+        if 1 <= stars <= 2:
+            self._learn_cand(user_id, "disliked", c)
+            return f"👎 {c.title}: {'⭐' * stars} – gemerkt, sowas schlage ich seltener vor."
+        return f"👌 {c.title}: gemerkt." if stars == 3 else "👌 Alles klar."
+
+    async def _t_title_feedback(self, chat_id: int, title: str, opinion: str, kind: str | None = None) -> Final:
+        hit = await self._resolve_title(kind, title)
+        if hit is None:
+            return Final(f"🤷 „{title}“ habe ich nicht gefunden – Film oder Serie, und wie heißt er genau?")
+        action = {"liked": "liked", "disliked": "disliked", "seen": "asked"}.get(opinion, "asked")
+        if self.profiles:
+            self.profiles.learn(chat_id, action, hit["kind"], hit["title"], tmdb=hit["tmdb"], tvdb=hit["tvdb"],
+                                year=hit["year"], genres=hit["genres"])
+        return Final({"liked": f"👍 Gemerkt: {hit['title']} gefällt dir – davon suche ich mehr.",
+                      "disliked": f"👎 Gemerkt: {hit['title']} ist nicht deins.",
+                      }.get(opinion, f"👁 Gemerkt: {hit['title']} kennst du schon – schlage ich nicht vor."))
 
     # ---- user profile --------------------------------------------------------------------------
     def _learn(self, chat_id: int, action: str, kind: str, item: dict, title: str | None = None) -> None:
@@ -1968,12 +2205,9 @@ class ToolRunner:
         offer = self.offers.pop(offer_id, None)
         if offer is None:
             return None
-        if self.profiles:
-            for c in offer.cands:
-                tmdb_id = c.ext_id if c.kind == "movie" else c.tmdb_id
-                self.profiles.learn(chat_id, "not_interested", c.kind, c.title, tmdb=tmdb_id,
-                                    tvdb=c.ext_id if c.kind == "series" else None, year=c.year,
-                                    genres=c.genres)
+        for i, c in enumerate(offer.cands):
+            if i not in offer.hidden:
+                self._learn_cand(chat_id, "not_interested", c)
         return "👍 Verstanden, die schlage ich nicht mehr vor. Frag einfach nochmal nach neuen Ideen."
 
     async def _t_remember(self, chat_id: int, like: list[str] | None = None, avoid: list[str] | None = None,
@@ -2162,18 +2396,23 @@ class ToolRunner:
 
     async def _library_ids(self, kinds: list[str]) -> dict:
         # tmdb: library + already requested (to skip in suggestions); library: only what Radarr has
-        owned: dict[str, Any] = {"tmdb": set(), "tvdb": set(), "library": set(), "recent": []}
+        # server: on disk (movie with file, series with at least one episode file)
+        owned: dict[str, Any] = {"tmdb": set(), "tvdb": set(), "library": set(), "server": set(), "recent": []}
         recent = []
         if "movie" in kinds and self.radarr:
             for m in await self.radarr.library():
                 owned["tmdb"].add(("movie", m.get("tmdbId")))
                 owned["library"].add(("movie", m.get("tmdbId")))
+                if m.get("hasFile"):
+                    owned["server"].add(("movie", m.get("tmdbId")))
                 recent.append((m.get("added") or "", "movie", m.get("tmdbId"), m.get("title")))
         if "series" in kinds and self.sonarr:
             for x in await self.sonarr.library():
                 owned["tvdb"].add(x.get("tvdbId"))
                 if x.get("tmdbId"):
                     owned["tmdb"].add(("series", x["tmdbId"]))
+                    if (x.get("statistics") or {}).get("episodeFileCount"):
+                        owned["server"].add(("series", x["tmdbId"]))
                     recent.append((x.get("added") or "", "series", x["tmdbId"], x.get("title")))
         for r in self.store.state.requests:
             if r.get("tmdb"):

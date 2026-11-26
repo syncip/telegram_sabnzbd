@@ -59,6 +59,7 @@ class Item:
     viewed_leaves: int = 0  # show: episodes this user has seen
     started: bool = False  # movie: started but not finished
     last_viewed: int | None = None  # unix time
+    user_rating: float | None = None  # this user's stars in Plex, 0–10
 
     @property
     def complete(self) -> bool:
@@ -212,7 +213,8 @@ def _item(meta: dict) -> Item | None:
     return Item("movie" if t == "movie" else "series", meta.get("title") or "?", meta.get("year"),
                 str(meta.get("ratingKey")), tmdb, tvdb, [g.get("tag") for g in meta.get("Genre") or [] if g.get("tag")],
                 watched, int(meta.get("leafCount") or 0), int(meta.get("viewedLeafCount") or 0),
-                bool(meta.get("viewOffset")) and not watched, meta.get("lastViewedAt"))
+                bool(meta.get("viewOffset")) and not watched, meta.get("lastViewedAt"),
+                float(meta["userRating"]) if meta.get("userRating") is not None else None)
 
 
 class Plex:
@@ -419,18 +421,45 @@ def on_deck_text(deck: list[dict]) -> str:
     return "\n".join(out)
 
 
-async def sync(plex: Plex, store: PlexStore, profiles: Any, a: Account) -> int:
-    """Learn what this user watched in Plex (only new titles count). Returns how many were new."""
-    known = profiles.known(a.user_id, "watched")
+ABANDONED_DAYS = 60  # started, then not touched for so long: probably not their thing
+FRESH_DAYS = 2  # watched so recently that "wie fandest du's?" still makes sense
+
+
+def abandoned(it: Item, now: int) -> bool:
+    if not it.last_viewed or now - it.last_viewed < ABANDONED_DAYS * 86400:
+        return False
+    if it.kind == "movie":
+        return it.started
+    return it.leaves >= 6 and 0 < it.viewed_leaves <= it.leaves * 0.25
+
+
+async def sync(plex: Plex, store: PlexStore, profiles: Any, a: Account, fresh: list[Item] | None = None,
+               now: int | None = None) -> int:
+    """Learn what this user watched in Plex (only new titles count), their stars (⭐4–5 = 👍, ⭐1–2 = 👎) and
+    what they gave up on. Returns how many were newly watched; fresh gets the ones seen in the last days."""
+    now = now or int(datetime.now(timezone.utc).timestamp())
+    known = {a_: profiles.known(a.user_id, a_) for a_ in ("watched", "liked", "disliked", "abandoned")}
     new = 0
     for it in await plex.library(a):
-        if not it.watched or (it.kind, it.tmdb, it.tvdb if it.kind == "series" else None) in known:
-            continue
         if not (it.tmdb or it.tvdb):
             continue
+        key = (it.kind, it.tmdb, it.tvdb if it.kind == "series" else None)
         name = f"{it.title} ({it.year})" if it.kind == "movie" and it.year else it.title
-        profiles.learn(a.user_id, "watched", it.kind, name, tmdb=it.tmdb,
-                       tvdb=it.tvdb if it.kind == "series" else None, year=it.year, genres=it.genres or [])
+        args = dict(tmdb=it.tmdb, tvdb=it.tvdb if it.kind == "series" else None, year=it.year,
+                    genres=it.genres or [])
+        if it.user_rating is not None:
+            stars = it.user_rating / 2
+            action = "liked" if stars >= 4 else "disliked" if stars <= 2 else None
+            if action and key not in known[action]:
+                profiles.learn(a.user_id, action, it.kind, name, **args)
+        elif abandoned(it, now) and key not in known["abandoned"] and key not in known["liked"]:
+            profiles.learn(a.user_id, "abandoned", it.kind, name, **args)
+        if not it.watched or key in known["watched"]:
+            continue
+        profiles.learn(a.user_id, "watched", it.kind, name, **args)
         new += 1
+        if (fresh is not None and it.user_rating is None and it.last_viewed
+                and now - it.last_viewed <= FRESH_DAYS * 86400 and (it.kind == "movie" or it.complete)):
+            fresh.append(it)
     store.mark_synced(a.user_id)
     return new

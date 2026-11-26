@@ -12,7 +12,7 @@ from arrbot.users import BLOCKED, PENDING, UserStore
 
 from .test_features import make
 
-NOW = datetime(2026, 11, 25, 18, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)  # usage counters roll by the real date
 TZ = ZoneInfo("Europe/Berlin")
 
 

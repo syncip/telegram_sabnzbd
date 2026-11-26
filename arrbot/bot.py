@@ -32,7 +32,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import debuglog, diagnose, downloads, fmt
+from . import arrhealth, debuglog, diagnose, downloads, fmt, notify
 from .agent import Agent
 from .arr import ArrError, Radarr, Sonarr
 from .config import Config
@@ -40,7 +40,7 @@ from .llm import ToolCall, make_provider
 from .sabnzbd import SABnzbd, SabError
 from .state import Store, Tracked, utcnow
 from .tmdb import TMDB
-from .tools import Flow, Offer, ToolRunner, View, mute, release_languages
+from .tools import Candidate, Flow, Offer, ToolRunner, View, mute, release_languages
 from .tracker import Tracker
 from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from . import admin as admin_view
@@ -62,16 +62,19 @@ HELP = (
     "• „Sag mir, wenn Dune 3 auf Deutsch kommt“ / „Wo war ich bei Dark?“\n"
     "• „Merk dir Avatar 4“ – ich lege es an, sobald es einen Termin gibt\n"
     "• „Was können Anna und ich zusammen schauen?“\n"
+    "• „Was Lustiges unter 90 Minuten“ / „Wie Dark, aber lustiger“ / „Inception fand ich super“\n"
     "• „Schick mir jeden Sonntag einen Wochenrückblick“\n"
     "• einen Link von IMDb, TMDB, Trakt, Letterboxd, JustWatch …\n\n"
-    "Ich sage Bescheid, wenn ein Download startet, wann er fertig ist und ob es Probleme gibt.\n\n"
+    "Ich sage Bescheid, wenn ein Download startet, wann er fertig ist und ob es Probleme gibt – "
+    "was davon, stellst du unter /meldungen ein („nur wenn fertig“ geht auch per Text).\n\n"
     "/downloads – deine Downloads mit Fortschritt\n"
     "/verbrauch – deine Anfragen und Limits\n"
     "/profil – was ich über deinen Geschmack weiß\n"
     "/kalender – was diese Woche kommt\n"
     "/plex – Plex verbinden (gesehen, weiterschauen)\n"
     "/neu – Gespräch zurücksetzen\n"
-    "/stumm 30 – Download-Meldungen 30 Min. stumm (auch 2h, 1d; „sei bis morgen still“), /laut – wieder an\n"
+    "/stumm 30 – Download-Meldungen 30 Min. stumm (auch 2h, 3d; „nerv mich 3 Tage nicht“), /laut – wieder an\n"
+    "/meldungen – welche Meldungen du bekommst (Start, fertig, Probleme, nichts gefunden)\n"
     "/version – welche Version und welche KI läuft („Welche Version hast du?“ geht auch)\n\n"
     "Du kannst Filme und Serien suchen und hinzufügen. Löschen, Pausieren oder Austauschen macht der Admin.\n\n"
     "Hinweis: Der Admin sieht, was du fragst und ob es geklappt hat – so kann er Probleme beheben."
@@ -350,7 +353,7 @@ def build_app(cfg: Config) -> Application:
         debuglog.LOG.late(chat_id, "🩺", text)
         if t := store.state.tracked.get(key):
             t.no_release_notified = True  # this replaces the notice after 30 minutes
-        await tracker.tell(chat_id, text, tracker.no_release_buttons(key))
+        await tracker.tell(chat_id, text, tracker.no_release_buttons(key), kind="nothing")
 
     for svc_ in (radarr, sonarr):
         if svc_ is not None:
@@ -508,14 +511,55 @@ def build_app(cfg: Config) -> Application:
             return None
         return InlineKeyboardMarkup([[InlineKeyboardButton(lbl, callback_data=f"{prefix}:{val}")] for lbl, val in buttons])
 
+    def offer_markup(offer: Offer) -> InlineKeyboardMarkup | None:
+        p, btn = f"o:{offer.id}", InlineKeyboardButton
+        shown = [(i, c) for i, c in enumerate(offer.cands) if i not in offer.hidden]
+        if offer.calibrate:
+            rows = [[btn(f"👍 {c.title[:30]}", callback_data=f"{p}:l{i}"), btn("👎", callback_data=f"{p}:d{i}")]
+                    for i, c in shown]
+            rows.append([btn("✅ Fertig – zeig mir Vorschläge", callback_data=f"{p}:go")])
+        elif offer.mode == "rate":
+            rows = [[btn(f"👎 {c.title[:26]}", callback_data=f"{p}:d{i}"),
+                     btn("👁 Schon gesehen", callback_data=f"{p}:s{i}")] for i, c in shown]
+            rows.append([btn("↩️ Fertig bewertet", callback_data=f"{p}:back")])
+        else:
+            rows = [[btn(c.label, callback_data=f"{p}:{i}")] for i, c in shown]
+            if offer.bulk and len(offer.cands) > 1:
+                rows.append([btn(f"⬇️ Alle {len(offer.cands)} hinzufügen", callback_data=f"{p}:all")])
+            if offer.suggest and shown:
+                rows.append([btn("🙅 Nichts davon", callback_data=f"{p}:none"),
+                             btn("👎👁 Bewerten", callback_data=f"{p}:rate")])
+        return InlineKeyboardMarkup(rows) if rows else None
+
     async def send_offer(offer: Offer) -> None:
-        buttons = [(c.label, str(i)) for i, c in enumerate(offer.cands)]
-        if offer.bulk and len(offer.cands) > 1:
-            buttons.append((f"⬇️ Alle {len(offer.cands)} hinzufügen", "all"))
-        if offer.suggest:
-            buttons.append(("🙅 Nichts davon", "none"))
-        msg = await app.bot.send_message(offer.chat_id, offer.text, reply_markup=markup_for(buttons, f"o:{offer.id}"))
+        msg = await app.bot.send_message(offer.chat_id, offer.text, reply_markup=offer_markup(offer))
         offer.message_id = msg.message_id
+
+    def rating_markup(ask_id: str) -> InlineKeyboardMarkup:
+        stars = [InlineKeyboardButton("⭐" * n if n < 4 else f"{n}⭐", callback_data=f"rt:{ask_id}:{n}")
+                 for n in range(1, 6)]
+        return InlineKeyboardMarkup([stars, [InlineKeyboardButton("🤷 Weiß nicht", callback_data=f"rt:{ask_id}:0"),
+                                             InlineKeyboardButton("🔕 Nicht mehr fragen", callback_data="rt:off:0")]])
+
+    async def ask_rating(chat_id: int, ask_id: str, title: str, intro: str = "🍿 Wie fandest du") -> None:
+        await app.bot.send_message(chat_id, f"{intro} <b>{html.escape(title)}</b>?", parse_mode=ParseMode.HTML,
+                                   reply_markup=rating_markup(ask_id))
+
+    async def on_rating_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not allowed_user(update):
+            await query.answer("Kein Zugriff.", show_alert=True)
+            return
+        _, ask_id, n = query.data.split(":")
+        uid = update.effective_user.id
+        if ask_id == "off":
+            plex_store.set_meta(f"rate_off:{uid}", "1")
+            await query.answer("🔕 Frage ich nicht mehr")
+            await query.edit_message_reply_markup(None)
+            return
+        text = tools.rate(ask_id, int(n), uid)
+        await query.answer("Gemerkt" if text else "Abgelaufen")
+        await query.edit_message_text(text or "⌛ Diese Frage ist abgelaufen.")
 
     async def show_flow(flow: Flow, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Send or update the flow's message with its current step."""
@@ -560,7 +604,33 @@ def build_app(cfg: Config) -> Application:
             await query.answer("Kein Zugriff.", show_alert=True)
             return
         _, offer_id, idx = query.data.split(":")
+        uid = update.effective_user.id
+        if idx in ("rate", "back") or (idx[:1] in ("l", "d", "s") and idx[1:].isdigit()):
+            if idx in ("rate", "back"):
+                offer, answer, ask = tools.offer_mode(offer_id, "rate" if idx == "rate" else ""), None, None
+            else:
+                res = tools.offer_feedback(offer_id, int(idx[1:]), idx[0], uid)
+                offer, answer, ask = res if res else (None, None, None)
+            if offer is None:
+                await query.answer("Abgelaufen")
+                await query.edit_message_reply_markup(None)
+                return
+            await query.answer(answer or "")
+            try:
+                await query.edit_message_reply_markup(offer_markup(offer))
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
+            if ask:
+                await ask_rating(query.message.chat_id, ask, offer.cands[int(idx[1:])].title)
+            return
         await query.answer()
+        if idx == "go":  # quick start done: now real suggestions
+            tools.offers.pop(offer_id, None)
+            await query.edit_message_reply_markup(None)
+            await tools.run(ToolCall("cal", "suggest", {}), uid)
+            await deliver_outbox(query.message.chat_id, uid, ctx)
+            return
         if idx == "none":
             text = tools.reject_offer(offer_id, update.effective_user.id)
             await query.edit_message_reply_markup(None)
@@ -725,6 +795,8 @@ def build_app(cfg: Config) -> Application:
         return plex_check if plex_store.all() else None
 
     monitor = health.Monitor()
+    arr_watch = arrhealth.HealthWatch(cfg.data_dir)
+    arr_services = {s.kind: s for s in (sonarr, radarr) if s is not None}
     update_state: dict = {"latest": None, "told": None}
 
     async def check_text() -> str:
@@ -736,6 +808,13 @@ def build_app(cfg: Config) -> Application:
         extra = [version.line(update_state["latest"]), *model_lines(True)]
         if cfg.monitor_minutes > 0:
             extra.append(monitor.status() + f" (alle {cfg.monitor_minutes} Min.)")
+        for svc in arr_services.values():
+            try:
+                found = await arrhealth.issues(svc)
+            except ArrError:
+                continue
+            extra.append(f"🩺 {svc.kind} meldet: " + ("nichts ✅" if not found else ""))
+            extra += [f"   {arrhealth.WEIGHT.get(i.kind, '⚠️')} {i.message}" for i in found]
         return health.render(checks) + "\n\n" + "\n".join(html.escape(x) for x in extra)
 
     async def monitor_job(_: ContextTypes.DEFAULT_TYPE) -> None:
@@ -744,6 +823,42 @@ def build_app(cfg: Config) -> Application:
         for msg in monitor.update(checks):
             log.warning("Überwachung: %s", msg)
             await tell_admins(msg)
+        await arr_health_round()
+
+    async def arr_health_round() -> None:
+        """Sonarr/Radarr warnings: new ones (fixed if harmless), and what is gone."""
+        new, gone = await arr_watch.poll(list(arr_services.values()))
+        for issue in new:
+            text = issue.text()
+            svc = arr_services.get(issue.service)
+            if svc is not None and issue.source in arrhealth.AUTO_FIX:
+                if fix := await arrhealth.auto_fix(svc, issue):
+                    text += "\n" + fix
+            rows = []
+            if issue.source == "IndexerCategories" and issue.indexer_id is not None:
+                rows.append([InlineKeyboardButton("🔧 Unterkategorien eintragen",
+                                                  callback_data=f"h:cat:{issue.service}:{issue.indexer_id}")])
+            log.warning("%s meldet: %s", issue.service, issue.message)
+            await tell_admins(text, InlineKeyboardMarkup(rows) if rows else None)
+        for g in gone:
+            await tell_admins(f"✅ {g.get('service')}: behoben – {g.get('message')}")
+
+    async def on_health_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not (update.effective_user and users.is_admin(update.effective_user.id)):
+            await query.answer("Nur für den Admin.", show_alert=True)
+            return
+        _, action, service, raw = query.data.split(":", 3)
+        await query.answer()
+        svc = arr_services.get(service)
+        if action != "cat" or svc is None:
+            return
+        try:
+            text = await arrhealth.add_subcategories(svc, int(raw))
+        except ArrError as e:
+            text = f"❌ Ging nicht: {e}\nBitte in {service} unter Settings → Indexers von Hand anhaken."
+        await query.edit_message_reply_markup(None)
+        await app.bot.send_message(query.message.chat_id, text)
 
     async def update_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         latest = await version.latest(cfg.update_repo, token=cfg.update_token)
@@ -868,8 +983,33 @@ def build_app(cfg: Config) -> Application:
     async def on_check(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await send_check(update.effective_chat.id)
 
+    def notify_markup(chat_id: int) -> InlineKeyboardMarkup:
+        b = notify.buttons(store, chat_id)
+        rows = [[InlineKeyboardButton(lbl, callback_data=d) for lbl, d in b[i:i + 2]] for i in range(0, len(b), 2)]
+        return InlineKeyboardMarkup(rows)
+
+    async def send_notify(chat_id: int) -> None:
+        await app.bot.send_message(chat_id, notify.render(store, chat_id), reply_markup=notify_markup(chat_id))
+
+    async def on_notify_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        await send_notify(update.effective_chat.id)
+
+    async def on_notify_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not allowed_user(update):
+            await query.answer("Kein Zugriff.", show_alert=True)
+            return
+        kind = query.data.split(":", 1)[1]
+        chat = query.message.chat_id
+        cur = notify.prefs(store, chat)
+        notify.change(store, chat, **{kind: not cur.get(kind, True)})
+        await query.answer("Gespeichert")
+        await query.edit_message_text(notify.render(store, chat), reply_markup=notify_markup(chat))
+
     async def send_view(view: View, viewer: int) -> None:
-        if view.kind == "downloads":
+        if view.kind == "notify":
+            await send_notify(view.chat_id)
+        elif view.kind == "downloads":
             await send_downloads(view.chat_id, viewer, view.finished, view.query)
         elif view.kind == "stats" and users.is_admin(viewer):
             await send_stats(view.chat_id)
@@ -1355,14 +1495,27 @@ def build_app(cfg: Config) -> Application:
         return (f"✅ Plex verbunden als <b>{html.escape(a.username)}</b> mit „{html.escape(a.server_name)}“{when}.\n"
                 "Ich lerne, was du schaust, und beantworte „Wo war ich bei …?“.")
 
-    async def plex_sync(a: plex.Account) -> int:
+    async def plex_sync(a: plex.Account, ask: bool = False) -> int:
+        """ask: after the regular sync, "wie fandest du X?" for up to 2 titles just watched."""
+        fresh: list[plex.Item] = []
         try:
-            n = await plex.sync(plex_client, plex_store, profile_db, a)
+            n = await plex.sync(plex_client, plex_store, profile_db, a, fresh)
             log.info("Plex-Abgleich %s: %d neu gesehen", a.username, n)
-            return n
         except plex.PlexError as e:
             log.warning("Plex-Abgleich %s: %s", a.username, e)
             raise
+        if ask and fresh and users.is_allowed(a.user_id) and not plex_store.get_meta(f"rate_off:{a.user_id}"):
+            asked = profile_db.asked(a.user_id)
+            for it in [x for x in fresh if (x.kind, x.tmdb) not in asked][:2]:
+                c = Candidate(it.kind, it.tmdb if it.kind == "movie" else (it.tvdb or 0), it.title, it.year)
+                c.tmdb_id, c.genres = it.tmdb, list(it.genres or [])
+                try:
+                    await ask_rating(a.user_id, tools.ask_rating(a.user_id, c), it.title,
+                                     "🍿 Du hast gerade gesehen:" if it.kind == "movie" else "🍿 Durchgeschaut:")
+                except (BadRequest, Forbidden) as e:
+                    log.info("Bewertungsfrage an %s nicht zugestellt: %s", a.user_id, e)
+                    break
+        return n
 
     async def start_plex_link(chat_id: int, uid: int) -> None:
         acc = plex_store.get(uid)
@@ -1486,7 +1639,7 @@ def build_app(cfg: Config) -> Application:
     async def plex_sync_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         for a in plex_store.all():
             try:
-                await plex_sync(a)
+                await plex_sync(a, ask=True)
             except plex.PlexError:
                 pass
         if plex_store.get_meta("auto_collections"):
@@ -1762,6 +1915,7 @@ def build_app(cfg: Config) -> Application:
             BotCommand("plex", "Plex verbinden"),
             BotCommand("stumm", "Download-Meldungen stumm (z. B. /stumm 30)"),
             BotCommand("laut", "Meldungen wieder an"),
+            BotCommand("meldungen", "Welche Download-Meldungen du bekommst"),
             BotCommand("version", "Version und KI-Modell"),
             BotCommand("hilfe", "Was kann ich?"),
         ]
@@ -1846,6 +2000,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("plex", on_plex, filters=allowed))
     app.add_handler(CommandHandler(["stumm", "ruhe", "mute"], on_mute, filters=allowed))
     app.add_handler(CommandHandler(["laut", "unmute"], on_unmute, filters=allowed))
+    app.add_handler(CommandHandler(["meldungen", "benachrichtigungen"], on_notify_cmd, filters=allowed))
+    app.add_handler(CallbackQueryHandler(on_notify_button, pattern=r"^nt:"))
     app.add_handler(CommandHandler("nutzer", on_users, filters=is_admin))
     app.add_handler(CommandHandler("limit", on_limit, filters=is_admin))
     app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
@@ -1859,10 +2015,12 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["monatsbericht", "bericht"], on_monthly, filters=is_admin))
     app.add_handler(CommandHandler(["admin", "verwaltung", "uebersicht"], on_admin, filters=is_admin))
     app.add_handler(CommandHandler(["log", "protokoll"], on_log, filters=is_admin))
+    app.add_handler(CallbackQueryHandler(on_health_button, pattern=r"^h:"))
     app.add_handler(CommandHandler("debug", on_debug, filters=is_admin))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^f:"))
     app.add_handler(CallbackQueryHandler(on_offer_button, pattern=r"^o:"))
+    app.add_handler(CallbackQueryHandler(on_rating_button, pattern=r"^rt:"))
     app.add_handler(CallbackQueryHandler(on_downloads_button, pattern=r"^d:"))
     app.add_handler(CallbackQueryHandler(on_user_button, pattern=r"^u:"))
     app.add_handler(CallbackQueryHandler(on_notice_button, pattern=r"^n:"))

@@ -253,6 +253,40 @@ class TMDB:
         data = await self._get(f"/discover/{'movie' if kind == 'movie' else 'tv'}", **params)
         return [_rec(kind, r) for r in data.get("results") or []]
 
+    async def details(self, kind: str, tmdb_id: int) -> dict:
+        """Runtime (minutes; series: per episode) and film series (collection id) of a title."""
+        data = await self._get(f"/{'movie' if kind == 'movie' else 'tv'}/{tmdb_id}", language=LANG)
+        if kind == "movie":
+            runtime = data.get("runtime") or None
+        else:
+            runs = data.get("episode_run_time") or []
+            runtime = min(runs) if runs else None
+        coll = (data.get("belongs_to_collection") or {}).get("id")
+        return {"runtime": runtime, "collection": coll, "overview": data.get("overview") or ""}
+
+    async def discover(self, kind: str, genre_ids: list[int], max_runtime: int | None = None,
+                       from_year: int | None = None, to_year: int | None = None,
+                       min_rating: float | None = None, page: int = 1) -> list[Recommendation]:
+        """Well rated titles of some genres ("was Lustiges unter 90 Minuten")."""
+        f_from, f_to = (("primary_release_date.gte", "primary_release_date.lte") if kind == "movie"
+                        else ("first_air_date.gte", "first_air_date.lte"))
+        params: dict[str, Any] = {"sort_by": "vote_average.desc", "vote_count.gte": 300, "language": LANG,
+                                  "include_adult": "false", "page": page}
+        if genre_ids:
+            params["with_genres"] = "|".join(map(str, genre_ids))
+        if max_runtime:
+            params["with_runtime.lte"] = int(max_runtime)
+        if from_year:
+            params[f_from] = f"{int(from_year)}-01-01"
+        if to_year:
+            params[f_to] = f"{int(to_year)}-12-31"
+        if min_rating:
+            params["vote_average.gte"] = float(min_rating)
+        if kind != "movie":
+            params["without_genres"] = "10763,10767"
+        data = await self._get(f"/discover/{'movie' if kind == 'movie' else 'tv'}", **params)
+        return [_rec(kind, r) for r in data.get("results") or []]
+
     async def trending(self, kind: str) -> list[Recommendation]:
         data = await self._get(f"/trending/{'movie' if kind == 'movie' else 'tv'}/week", language=LANG)
         return [_rec(kind, r) for r in data.get("results") or []]

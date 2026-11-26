@@ -14,9 +14,17 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.11.0"
+__version__ = "1.13.0"
 
 CHANGES = {
+    "1.13.0": "Bessere Vorschläge: Stimmung und Länge („was Lustiges unter 90 Minuten“), „wie X, aber …“, "
+              "nur auf Deutsch, Abwechslung (ein Teil pro Filmreihe, 💎 Geheimtipp), Begründung pro Titel, "
+              "„📼 Schon auf dem Server“; 👎/👁 pro Titel, „Wie fandest du’s?“ mit Sternen (auch nach Plex), "
+              "Plex-Sterne zählen, Kennenlernen für neue Nutzer. Meldungen: /meldungen (z. B. nur „fertig“), "
+              "/stumm auch für Stunden und Tage; der Bot fragt nach, wenn etwas unklar ist",
+    "1.12.0": "Sonarr/Radarr-Warnungen: neue werden gemeldet (mit Erklärung), behobene auch; gesperrte "
+              "Indexer/Download-Clients testet der Bot selbst neu; Indexer nur mit Hauptkategorien: Button "
+              "„Unterkategorien eintragen“; /check zeigt die Warnungen. MIT-Lizenz",
     "1.11.0": "Chat-Log: /log und /debug an zeigen jeden Schritt (KI, Werkzeuge, Sonarr/Radarr-Anfragen, "
               "Suchergebnis). Suche ohne Ergebnis: der Bot sagt sofort, warum (nicht überwacht, Indexer-Kategorien, "
               "abgelehnte Releases mit Qualität und Grund). Staffel einer vorhandenen Serie laden schaltet die "

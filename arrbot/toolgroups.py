@@ -16,8 +16,11 @@ CORE = {"search_movies", "search_series", "add_movie", "add_series", "offer_titl
         "download_status", "open_url", "list_quality_profiles", "more_tools"}
 
 GROUPS: dict[str, tuple[set[str], str]] = {
-    "discover": ({"suggest", "top_titles", "remember", "my_profile", "wishlist", "suggest_together"},
-                 r"vorschl|studio|marvel|pixar|empfiehl|empfehl|was soll ich|schau(en)?\b|tipp|top|chart|beste|liste|trend|beliebt|"
+    "discover": ({"suggest", "top_titles", "remember", "my_profile", "wishlist", "suggest_together",
+                  "title_feedback"},
+                 r"vorschl|lustig|witzig|spannend|gruselig|romantisch|stimmung|laune|unter \d+ min|"
+                 r"fand ich|war (super|toll|gut|mies|schlecht|doof|langweilig)|kenn(e)? ich|geschmack|"
+                 r"studio|marvel|pixar|empfiehl|empfehl|was soll ich|schau(en)?\b|tipp|top|chart|beste|liste|trend|beliebt|"
                  r"ähnlich|wie .* (film|serie)|mag\b|mögen|hasse|merk|vergiss|profil|über mich|weißt du|vorlieb|"
                  r"genre|horror|komödie|action|thriller|doku|anime|neu(e|es|en)? (film|serie)|"
                  r"wunschliste|vormerk|erschein|rauskomm|termin|zusammen|gemeinsam|mit (mir|uns|anna|\w+) schau"),
@@ -27,8 +30,10 @@ GROUPS: dict[str, tuple[set[str], str]] = {
     "manage": ({"remove_title", "pause_title", "resume_title", "clean_episodes"},
                r"lösch|entfern|\bweg\b|raus|pausier|später|nochmal suchen|in \d+ tag|weiter\b|fortsetz|stopp|"
                r"abbrech|nicht mehr"),
-    "extras": ({"calendar", "disk_space", "weekly_digest", "plex_status", "bot_info", "mute_notifications"},
-               r"stumm|mute|still|ruhe|keine (nachricht|meldung|benachrichtigung)|meldungen|nerv|laut\b|"
+    "extras": ({"calendar", "disk_space", "weekly_digest", "plex_status", "bot_info", "mute_notifications",
+                "notification_settings"},
+               r"stumm|mute|still|ruhe|keine (nachricht|meldung|benachrichtigung|info)|meldung|nerv|laut\b|"
+               r"benachrichtig|bescheid|info (wenn|bei|nur)|nur (noch )?(wenn|info)|"
                r"version|modell|\bki\b|update|bist du aktuell|kalender|woche|kommt|wann|heute|morgen|speicher|platz|festplatte|voll|rückblick|plex|gesehen|"
                r"geschaut|weiterschau|fortschritt|verknüpf|verbind"),
     "sites": ({"watch_site"}, r"überwach|beobacht|webseite|website|im auge|seiten?\b"),

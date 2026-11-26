@@ -56,6 +56,8 @@ class State:
     paused: dict[str, dict] = field(default_factory=dict)
     # Muted chats "chat_id" -> {"until": iso, "missed": n, "lines": [first lines of missed messages]}
     muted: dict[str, dict] = field(default_factory=dict)
+    # Message kinds a chat switched off: "chat_id" -> {"start": False, ...} (see notify.py)
+    notify: dict[str, dict] = field(default_factory=dict)
 
 
 class Store:
@@ -79,6 +81,7 @@ class Store:
                 requests=raw.get("requests", []),
                 paused=raw.get("paused", {}),
                 muted=raw.get("muted", {}),
+                notify=raw.get("notify", {}),
             )
         except (ValueError, TypeError) as e:
             log.error("state.json unlesbar (%s), starte leer", e)
@@ -93,6 +96,7 @@ class Store:
             "requests": self.state.requests,
             "paused": self.state.paused,
             "muted": self.state.muted,
+            "notify": self.state.notify,
         }
         try:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
