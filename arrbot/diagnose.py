@@ -101,7 +101,7 @@ def category_hint(indexers: list[dict]) -> str | None:
 
 
 async def why_nothing(arr: Any, kind: str, item_id: int, season: int | None = None,
-                      episode_id: int | None = None) -> str:
+                      episode_id: int | None = None, keep: list | None = None) -> str:
     """Text for "the search loaded nothing": monitoring, indexer categories, available releases."""
     lines: list[str] = []
     item = await arr.get(item_id)
@@ -124,6 +124,8 @@ async def why_nothing(arr: Any, kind: str, item_id: int, season: int | None = No
         releases = None
         lines.append(f"⚠️ Die Indexer-Abfrage ging nicht: {e}")
     if releases is not None:
+        if keep is not None:
+            keep.extend(releases)  # the caller looks at them again (only other languages?)
         if releases:
             lines += summarize_releases(releases)
         else:

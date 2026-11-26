@@ -7,6 +7,7 @@ quality happens through buttons handled here in code, without further AI calls.
 from __future__ import annotations
 
 import asyncio
+from builtins import max as builtins_max
 import json
 import logging
 import re
@@ -17,7 +18,7 @@ from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from . import debuglog, approval, collections_plex, dupes, german, manage, mediamgr, plex, profiles, qprofiles, recommend, sitewatch, together, urlinfo, watch, wishlist
-from . import recipes
+from . import recipes, watchask
 from . import users as users_mod
 from .arr import ArrError, Radarr, Sonarr
 from .llm import ToolCall, ToolResult, ToolSpec
@@ -374,6 +375,14 @@ def build_admin_specs() -> list[ToolSpec]:
             "stunde|tag|woche|monat (\"Sarah max. 3 Filme pro Tag\" = filme_tag 3). value: Zahl oder 'aus'.",
             obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": sorted(users_mod.LIMIT_KEYS)},
                  "value": {"type": "string"}}, ["who", "kind", "value"]),
+        ),
+        ToolSpec(
+            "admin_watch_questions",
+            "Nachfragen zu Gesehenem: Hat der Admin einen Film / Staffeln in Plex gesehen, fragt der Bot hin und "
+            "wieder, ob es weg kann. Ohne Angaben: Einstellung zeigen. on=false aus. every_days: alle N Tage, "
+            "max: Fragen pro Runde, after_days: frühestens N Tage nach dem Anschauen. now=true: jetzt fragen.",
+            obj({"on": {"type": "boolean"}, "every_days": {"type": "integer"}, "max": {"type": "integer"},
+                 "after_days": {"type": "integer"}, "now": {"type": "boolean"}}),
         ),
         ToolSpec(
             "admin_limit_advice",
@@ -762,6 +771,12 @@ class ToolRunner:
         if flow.stage == "extend":
             return await self._extend_step(flow)
         if c.kind == "series" and flow.monitor is None and not flow.seasons:
+            if not c.seasons and self.sonarr and c.ext_id:
+                # Suggestions and top lists come from TMDB without seasons: ask Sonarr, else it'd be "all".
+                try:
+                    c.seasons = _series_cand(await self.sonarr.lookup_tvdb(int(c.ext_id))).seasons
+                except ArrError as e:
+                    log.info("Staffeln von %s nicht gefunden: %s", c.label, e)
             if len(c.seasons) > 1:
                 flow.stage = "seasons"
                 return Step(f"📺 Welche Staffeln von {c.label}?", _season_buttons(c.seasons))
@@ -1000,6 +1015,9 @@ class ToolRunner:
             flow.step = await self._recipe_step(flow, value)
             if not flow.step.done:
                 self.flows[flow.id] = flow
+            return flow
+        if flow.stage == "wa":
+            flow.step = await self._wa_step(flow, value)
             return flow
         if flow.stage == "adv":
             from . import limitadvice
@@ -2279,6 +2297,89 @@ class ToolRunner:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "usercard", arg=uid))
         return Final("")
 
+    async def _t_admin_watch_questions(self, chat_id: int, on: bool | None = None, every_days: int | None = None,
+                                       max: int | None = None, after_days: int | None = None,
+                                       now: bool = False) -> Final:
+        if self.cleanup is None:
+            raise ArrError("Nicht eingerichtet.")
+        s = watchask.load(self.cleanup)
+        changed = False
+        for attr, val, lo, hi in (("every", every_days, 1, 60), ("max", max, 1, 10), ("after", after_days, 0, 90)):
+            if val is not None:
+                setattr(s, attr, min(hi, builtins_max(lo, int(val))))
+                changed = True
+        if on is not None:
+            s.on, changed = bool(on), True
+        if changed:
+            watchask.save(self.cleanup, s)
+        if not now:
+            return Final(s.text())
+        n = await self.watch_questions(chat_id)
+        return Final("" if n else "👍 Gerade nichts: Kein Titel, den du gesehen hast und nach dem ich noch nicht gefragt habe.")
+
+    async def watch_questions(self, chat_id: int) -> int:
+        """Questions about titles the admin saw in Plex ("Dune gesehen – löschen?"), into the outbox."""
+        acc = self.plex_store.get(chat_id) if self.plex_store else None
+        if not (self.cleanup and self.plex and acc and (self.radarr or self.sonarr)):
+            return 0
+        s = watchask.load(self.cleanup)
+        now = utcnow()
+        report = await self._media_report()
+        movies, series = watchask.candidates(report, acc.user_id, self.cleanup.kept(), self._recent_requests(),
+                                             s.after, now)
+        titles = sorted(movies + series, key=lambda t: t.viewed_by.get(acc.user_id) or now, reverse=True)
+        asks: list[watchask.Ask] = []
+        for t in titles:
+            if len(asks) >= s.max:
+                break
+            if t.kind == "movie":
+                a: watchask.Ask | None = watchask.Ask(t, [mediamgr.whole(t)])
+            else:
+                if not self.sonarr:
+                    continue
+                try:
+                    eps = await self.sonarr.episodes(t.arr_id)
+                    key = t.plex_keys.get(acc.user_id)
+                    leaves = await self.plex.episodes(acc, key) if key else []
+                except (ArrError, plex.PlexError) as e:
+                    log.info("Nachfrage %s: %s", t.title, e)
+                    continue
+                a = watchask.series_ask(t, eps, leaves, acc.user_id, now)
+            if a is not None and not watchask._answered(self.cleanup, a.key, now):
+                asks.append(a)
+        for a in asks:
+            flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate(a.title.kind, 0, a.title.title, None), stage="wa",
+                        data=a)
+            flow.step = Step(*watchask.question(a))
+            self.flows[flow.id] = flow
+            self._outbox.setdefault(chat_id, []).append(flow)
+        return len(asks)
+
+    async def _wa_step(self, flow: Flow, value: str) -> Step:
+        a = flow.data
+        t = a.title
+        self.flows.pop(flow.id, None)
+        if value in ("del", "whole"):
+            items = [a.whole] if value == "whole" and a.whole is not None else a.items
+            errors = [e for i in items if (e := await mediamgr.delete(self.radarr, self.sonarr, i))]
+            watchask.answer(self.cleanup, a.key, "deleted")
+            if errors:
+                return Step("⚠️ Nicht gelöscht: " + "; ".join(errors[:3]), done=True)
+            freed = sum(i.size for i in items)
+            from .media import size_text
+
+            return Step(f"🗑 Gelöscht ({size_text(freed)} frei). Gesperrt ist nichts – einfach wieder hinzufügen, "
+                        "wenn du es doch nochmal sehen willst.", done=True)
+        if value == "keep":
+            self.cleanup.keep(t.service, t.arr_id, t.title)
+            return Step(f"🛡 {t.title} wird nie gelöscht – ich frage auch nicht mehr.", done=True)
+        if value == "later":
+            watchask.answer(self.cleanup, a.key, "later")
+            return Step(f"⏰ Okay, ich frage in {watchask.LATER_DAYS} Tagen nochmal.", done=True)
+        watchask.answer(self.cleanup, a.key, "no")
+        return Step("➡️ Bleibt. Dazu frage ich nicht mehr" + (" (erst wieder bei neuen gesehenen Staffeln)."
+                                                             if t.kind == "series" else "."), done=True)
+
     async def _t_admin_limit_advice(self, chat_id: int) -> Final:
         from . import limitadvice
 
@@ -2609,6 +2710,8 @@ class ToolRunner:
             return self.may(uid, "admin_delete_media")
         if stage == "remove":
             return self.may(uid, "remove_title")
+        if stage == "wa":
+            return self.may(uid, "admin_delete_media")
         if stage == "adv":
             return self._admin(uid) and self.users is not None and self.is_admin(uid)
         return True

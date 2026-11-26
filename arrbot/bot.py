@@ -10,6 +10,7 @@ import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -44,6 +45,7 @@ from .tools import Candidate, Flow, Offer, ToolRunner, View, mute, release_langu
 from .tracker import Tracker
 from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from . import admin as admin_view
+from . import langpick, qprofiles
 from .profiles import ProfileStore
 from .agent import PRICES, UsageStats
 from .users import ADMIN, BLOCKED, PENDING, USER, UserStore, limit_text, quality_label
@@ -325,6 +327,7 @@ def build_app(cfg: Config) -> Application:
 
     # ---- 🩺 search done, nothing loaded: say why right away ----------------------------------
     diagnosed: dict[str, float] = {}  # key -> when last explained (several commands per request)
+    lang_offers: dict[str, tuple[langpick.LangOffer, int]] = {}  # "only in Korean": offer, wanted resolution
 
     async def on_search_done(chat_id: int, name: str, body: dict, state: dict) -> None:
         svc = radarr if name.startswith("Movie") or "movieIds" in body else sonarr
@@ -358,14 +361,32 @@ def build_app(cfg: Config) -> Application:
         if now - diagnosed.get(key, -1e9) < 600:
             return
         diagnosed[key] = now
-        why = await diagnose.why_nothing(svc, kind, item_id, season, episode_id)
+        rels: list[dict] = []
+        why = await diagnose.why_nothing(svc, kind, item_id, season, episode_id, keep=rels)
         item = await svc.get(item_id)
         what = item.get("title", "?") + (f" (Staffel {season})" if season is not None else "")
         text = f"🔍 {svc.kind} hat für {what} gesucht, aber nichts geladen.\n{why}"
         debuglog.LOG.late(chat_id, "🩺", text)
         if t := store.state.tracked.get(key):
             t.no_release_notified = True  # this replaces the notice after 30 minutes
-        await tracker.tell(chat_id, text, tracker.no_release_buttons(key), kind="nothing")
+        buttons = tracker.no_release_buttons(key)
+        offer = None
+        if not episode_id:  # a single episode is not worth the question
+            try:
+                profile = next((p for p in await svc.quality_profiles() if p.get("id") == item.get("qualityProfileId")), {})
+            except ArrError:
+                profile = {}
+            offer = langpick.build(kind, item_id, season, chat_id, item.get("title", "?"), profile.get("name", ""), rels)
+        if offer is not None:
+            oid = format(abs(hash((key, season, now))) % 16**8, "08x")
+            lang_offers[oid] = (offer, qprofiles.max_resolution(profile) or 1080)
+            while len(lang_offers) > 200:
+                lang_offers.pop(next(iter(lang_offers)))
+            text = offer.text()
+            buttons = ([(f"⬇️ Auf {lbl} laden", f"n:lg:{oid}:{i}") for i, lbl in enumerate(offer.groups)]
+                       + [("🔔 Auf Deutsch warten", f"n:w:{key}"), ("🗑 Wieder löschen", f"n:rm:{key}"),
+                          ("👍 Okay", "n:ok")])
+        await tracker.tell(chat_id, text, buttons, kind="nothing")
 
     for svc_ in (radarr, sonarr):
         if svc_ is not None:
@@ -674,6 +695,39 @@ def build_app(cfg: Config) -> Application:
         else:
             await query.edit_message_text(nxt.text)
 
+    async def on_lang_pick(query: Any, oid: str, idx: int) -> None:
+        """'Auf Koreanisch laden': grab the best release of that language, past the profile."""
+        entry = lang_offers.get(oid)
+        if entry is None or entry[0].chat_id != query.message.chat_id or idx >= len(entry[0].groups):
+            await query.answer("Abgelaufen – sag einfach „such nochmal“.", show_alert=True)
+            return
+        offer, target = entry
+        lang = list(offer.groups)[idx]
+        svc = radarr if offer.kind == "movie" else sonarr
+        await query.answer(f"Lade auf {lang} …")
+        await query.edit_message_reply_markup(None)
+        grabbed, failed = 0, []
+        for r in langpick.pick(offer.groups[lang], target):
+            try:
+                await svc.grab(r)
+                grabbed += 1
+            except ArrError as e:
+                failed.append(str(e))
+        lang_offers.pop(oid, None)
+        if not grabbed:
+            text = f"❌ Auf {lang} ging es nicht: {failed[0] if failed else 'kein passendes Release'}"
+        else:
+            what = offer.title + (f" (Staffel {offer.season})" if offer.season is not None else "")
+            text = (f"⬇️ {what}: {grabbed} Release{'s' if grabbed > 1 else ''} auf {lang} geholt. "
+                    "Ich melde mich, wenn der Download startet.")
+            if offer.kind == "series":
+                text += (f"\nℹ️ Weitere Staffeln und neue Folgen sucht Sonarr weiter mit "
+                         f"„{offer.profile or 'deinem Profil'}“ – also auf Deutsch. Willst du alles auf {lang}, "
+                         "stell die Serie in Sonarr auf ein Profil ohne Deutsch-Pflicht.")
+            if failed:
+                text += f"\n⚠️ {len(failed)} nicht geholt: {failed[0]}"
+        await app.bot.send_message(query.message.chat_id, text)
+
     async def on_notice_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Buttons under 'nothing found yet': pause 3/7 days, delete, okay."""
         query = update.callback_query
@@ -685,9 +739,12 @@ def build_app(cfg: Config) -> Application:
             await query.answer("👍")
             await query.edit_message_reply_markup(None)
             return
+        uid = update.effective_user.id
+        if parts[1] == "lg":
+            await on_lang_pick(query, parts[2], int(parts[3]))
+            return
         action, service, raw_id = parts[1], parts[2], int(parts[3])
         kind = "movie" if service == "radarr" else "series"
-        uid = update.effective_user.id
         try:
             if action.startswith("p") and action[1:].isdigit():
                 text = await tools.pause(uid, kind, raw_id, int(action[1:]))
@@ -1191,6 +1248,26 @@ def build_app(cfg: Config) -> Application:
         now = bool(ctx.args) and ctx.args[0].lower() in ("jetzt", "aktuell", "diesen")
         month = today.strftime("%Y-%m") if now else monthly.previous_month(today)
         await update.effective_message.reply_text(monthly_text(month), parse_mode=ParseMode.HTML)
+
+    async def watch_ask_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Now and then: 'Du hast Dune gesehen – löschen?' (admins with a linked Plex)."""
+        from . import watchask
+
+        s = watchask.load(rules)
+        if not watchask.due(rules, s):
+            return
+        sent = 0
+        for admin in users.admins():
+            try:
+                n = await tools.watch_questions(admin)
+            except (ArrError, plex.PlexError) as e:
+                log.info("Nachfragen zu Gesehenem: %s", e)
+                continue
+            if n:
+                await deliver_outbox(admin, admin, ctx)
+                sent += n
+        if sent:
+            watchask.mark_round(rules)
 
     async def unusual_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         """Evening: anyone with far more requests today than the others (admins only hear about it)."""
@@ -1979,6 +2056,7 @@ def build_app(cfg: Config) -> Application:
         application.job_queue.run_daily(wish_job, time(9, 30, tzinfo=tz), name="wunschliste")
         application.job_queue.run_daily(monthly_job, time(9, 15, tzinfo=tz), name="monatsbericht")
         application.job_queue.run_daily(unusual_job, time(20, 0, tzinfo=tz), name="auffaellig")
+        application.job_queue.run_daily(watch_ask_job, time(19, 0, tzinfo=tz), name="gesehen")
         application.job_queue.run_repeating(save_buttons_job, interval=300, first=300, name="buttons")
         if cfg.site_hours > 0:
             application.job_queue.run_repeating(sites_job, interval=cfg.site_hours * 3600, first=900, name="seiten")

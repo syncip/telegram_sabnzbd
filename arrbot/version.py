@@ -14,9 +14,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.16.0"
+__version__ = "1.17.0"
 
 CHANGES = {
+    "1.17.0": "Serien aus Vorschlägen und Toplisten fragen wieder nach den Staffeln (alle, Staffel X, nur neue). "
+              "Nachfragen zu Gesehenem: Film oder Staffeln in Plex fertig geschaut, dann fragt der Bot hin und "
+              "wieder, ob es weg kann (Löschen, Behalten, Später, Nie löschen). Nur in anderer Sprache: Der Bot "
+              "sagt, welche Sprachen es gibt und dass dein Profil im Zweifel nicht passt, und lädt per Button "
+              "auf Koreanisch, Englisch oder Multi",
     "1.16.0": "Gesamtlimits pro Tag: Tokens und Kosten für den ganzen Bot (oder pro Nutzer), Warnung an den "
               "Admin bei 80 % und 100 %. Limit-Empfehlung („Welches Limit sollte ich setzen?“, /limit empfehlung): "
               "aus dem Verbrauch der letzten 30 Tage und der Zahl aktiver Nutzer, mit Sicherheitsaufschlag, "

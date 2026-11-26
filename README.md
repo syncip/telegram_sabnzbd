@@ -127,6 +127,12 @@ Außerdem:
   (max. 4.000 Zeichen) an die KI, die nur Titel herausschreiben darf. Was schon da ist, abgelehnt wurde
   oder ein gemiedenes Genre hat, fällt weg; der Rest kommt als Buttons, sortiert nach Geschmack.
   „🙅 Nichts davon“ lernt mit. Max. 5 Seiten pro Nutzer. Seiten, die nur per JavaScript laden, gehen nicht.
+- **Nachfragen zu Gesehenem (Admin):** Hast du in Plex einen Film oder Staffeln einer Serie zu Ende
+  geschaut, fragt der Bot hin und wieder (Standard: alle 3 Tage höchstens 3 Fragen, frühestens 2 Tage nach
+  dem Anschauen, abends um 19 Uhr): „Du hast Dune gesehen – löschen?“ Buttons: Löschen (bei Serien die
+  gesehenen Staffeln, bei beendeten und komplett gesehenen auch die ganze Serie), Behalten (fragt dazu nicht
+  mehr), Später fragen (in 14 Tagen), 🛡 Nie löschen. Ohne Sperre, wie beim Medien-Manager. Ändern: „Frag mich
+  nur alle 7 Tage“, „Frag mich nicht mehr nach Gesehenem“, „Was habe ich gesehen, das weg kann?“ (sofort).
 - **Medien-Manager (Admin):** Aufräumen auf Befehl, in deinen Worten: „Lösche alle Filme, die länger als
   180 Tage da sind und die ich nicht gesehen habe“, „Lösche alle Filme, die ich gesehen habe“, „Die 10
   größten Serien, die ich nie angefangen habe“, „Horrorfilme unter 6 Sterne“. „Gesehen“ heißt: von dir (dein
@@ -178,6 +184,12 @@ Außerdem:
   Titel/Staffel nicht überwacht? Liefern die Indexer gar nichts (dann auch: sind nur Hauptkategorien wie
   5000/5100 eingetragen, ohne Unterkategorien)? Oder gibt es Releases, die alle abgelehnt werden – mit
   Qualität, Sprache und Grund („3× DVD (Deutsch), Qualität nicht im Profil“). Dazu die üblichen Buttons.
+- **Nur in anderer Sprache:** Gibt es einen Titel bei deinen Indexern nur z. B. auf Koreanisch und
+  Englisch, sagt der Bot das direkt – und dass dein gewähltes Profil (etwa „1080p Deutsch“) dafür im
+  Zweifel nicht passt. Buttons: „⬇️ Auf Koreanisch laden“, „⬇️ Auf Englisch laden“, „⬇️ Auf Multi laden“,
+  „🔔 Auf Deutsch warten“, „🗑 Wieder löschen“. Geladen wird das beste Release der Sprache, möglichst nah an
+  deiner Qualität (nie darüber), bei Serien das Staffelpaket. Weitere Staffeln sucht Sonarr weiter mit dem
+  Profil – willst du alles in der Sprache, stell die Serie in Sonarr auf ein Profil ohne Deutsch-Pflicht.
 - **Viele Folgen auf einmal:** Lädt Sonarr eine ganze Staffel oder Serie, kommt eine Meldung beim Start
   und eine Zusammenfassung, wenn alles durch ist („✅ 24 von 24 Folgen fertig importiert (S01E01–S02E12)“) –
   nicht eine pro Folge.

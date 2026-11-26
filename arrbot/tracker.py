@@ -377,7 +377,7 @@ class Tracker:
         st.finished = [f for f in st.finished if _parse(f["at"]) > keep]
 
     is_admin = staticmethod(lambda _uid: True)  # set by the bot: users get no pause/delete buttons
-    USER_BUTTONS = ("n:w:", "n:ok")
+    USER_BUTTONS = ("n:w:", "n:ok", "n:lg:")
 
     def muted(self, chat_id: int, text: str) -> bool:
         """Muted chat: count the message for the summary afterwards instead of sending it."""
