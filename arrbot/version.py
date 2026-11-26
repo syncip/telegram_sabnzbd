@@ -14,9 +14,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 CHANGES = {
+    "1.15.0": "Sicherheit: Nicht freigegebene Nutzer bekommen genau eine Antwort („Admin ist gefragt“), dann "
+              "nichts mehr – nichts erreicht die KI, keine Werkzeuge, keine Buttons; Bescheid bei Freigabe. "
+              "Buttons gelten nur im eigenen Chat. Titel-Limits: Filme/Serien/Staffeln/Folgen pro Stunde, Tag, "
+              "Woche, Monat (auch für „such nochmal“). Rechte pro Nutzer: „Sarah darf ihre Filme und Serien "
+              "löschen“, pausieren, Reparatur, Medien-Manager, keine Limits",
     "1.14.0": "Medien-Manager für den Admin: aufräumen per Satz („Lösche alle Filme, die länger als 180 Tage da "
               "sind und die ich nicht gesehen habe“) mit Liste und Bestätigung, bei Serien Folgen/Staffeln/ganze "
               "Serie per Button, direkt über Radarr/Sonarr ohne Sperre; geschützt bleiben „Nie löschen“, was "

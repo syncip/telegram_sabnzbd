@@ -46,7 +46,7 @@ from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, w
 from . import admin as admin_view
 from .profiles import ProfileStore
 from .agent import PRICES, UsageStats
-from .users import ADMIN, BLOCKED, LIMIT_KEYS, PENDING, USER, UserStore, limit_text, quality_label
+from .users import ADMIN, BLOCKED, PENDING, USER, UserStore, limit_text, quality_label
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +109,10 @@ ADMIN_HELP = (
     "<code>/limit standard tag 10</code>\n"
     "<code>/limit Anna monat 50</code>\n"
     "<code>/limit gesamt kosten 1</code>\n"
-    "<code>/limit 123456 tokens aus</code>\n\n"
+    "<code>/limit 123456 tokens aus</code>\n"
+    "<code>/limit Sarah filme_tag 3</code> · <code>/limit standard folgen_woche 40</code> (Titel pro "
+    "Stunde/Tag/Woche/Monat)\n"
+    "Rechte: „Sarah darf ihre Filme und Serien löschen“, „Was darf Sarah?“, „Sarah darf nicht mehr löschen“\n\n"
     "Oder einfach schreiben: „Zeig mir die Statistik“, „Setz Annas Tageslimit auf 5“, "
     "„Sperr Bob“, „Prüf die APIs“, „Was kann weg?“, "
     "„Neues Qualitätsprofil 4K nur Englisch“, „Profil 1080p Deutsch und Englisch + Originalsprache“."
@@ -585,6 +588,9 @@ def build_app(cfg: Config) -> Application:
             await query.answer("Kein Zugriff.", show_alert=True)
             return
         _, flow_id, value = query.data.split(":", 2)
+        if not tools.owner_ok("flow", flow_id, update.effective_user.id, query.message.chat_id):
+            await query.answer("Das ist nicht deine Auswahl.", show_alert=True)
+            return
         for job in ctx.job_queue.get_jobs_by_name(f"f:{flow_id}"):
             job.schedule_removal()
         await query.answer()
@@ -607,6 +613,9 @@ def build_app(cfg: Config) -> Application:
             return
         _, offer_id, idx = query.data.split(":")
         uid = update.effective_user.id
+        if not tools.owner_ok("offer", offer_id, uid, query.message.chat_id):
+            await query.answer("Das ist nicht deine Auswahl.", show_alert=True)
+            return
         if idx in ("rate", "back") or (idx[:1] in ("l", "d", "s") and idx[1:].isdigit()):
             if idx in ("rate", "back"):
                 offer, answer, ask = tools.offer_mode(offer_id, "rate" if idx == "rate" else ""), None, None
@@ -1716,7 +1725,7 @@ def build_app(cfg: Config) -> Application:
         if role == BLOCKED:
             return  # silently ignored
         if role == PENDING:
-            await update.effective_message.reply_text("⏳ Deine Anfrage liegt beim Admin. Du bekommst eine Nachricht, sobald er entschieden hat.")
+            # Told once already: no answer to every further message (and never anything for the AI).
             return
         name = _display_name(update)
         if users.request(user.id, name):
@@ -1727,9 +1736,10 @@ def build_app(cfg: Config) -> Application:
                 InlineKeyboardButton("❌ Ablehnen", callback_data=f"u:no:{user.id}"),
             ]])
             await tell_admins(f"🙋 {name}{uname} möchte den Bot nutzen.\nTelegram-ID: {user.id}", kb)
-        await update.effective_message.reply_text(
-            "👋 Hallo! Ich habe den Admin gefragt, ob du mich nutzen darfst. Du bekommst Bescheid."
-        )
+            await update.effective_message.reply_text(
+                "👋 Hallo! Ich habe den Admin gefragt, ob du mich nutzen darfst. Du bekommst Bescheid, sobald "
+                "er entschieden hat – bis dahin antworte ich nicht."
+            )
 
     def users_text() -> str:
         lines = ["<b>👥 Nutzer</b>"]
@@ -1821,7 +1831,10 @@ def build_app(cfg: Config) -> Application:
         usage = (
             "So geht's: <code>/limit WER ART WERT</code>\n"
             "WER: Name, Telegram-ID, <code>standard</code> (alle Nutzer) oder <code>gesamt</code> (ganzer Bot)\n"
-            f"ART: {', '.join(f'<code>{k}</code> ({v})' for k, v in LIMIT_KEYS.items())}\n"
+            "ART: KI-Nachrichten <code>tag</code>, <code>monat</code>, <code>tokens</code>, <code>kosten</code> – "
+            "oder Titel: <code>filme_</code>, <code>serien_</code>, <code>staffeln_</code>, <code>folgen_</code> + "
+            "<code>stunde</code>/<code>tag</code>/<code>woche</code>/<code>monat</code> "
+            "(z. B. <code>/limit Sarah filme_tag 3</code>)\n"
             "WERT: Zahl oder <code>aus</code>"
         )
         if len(args) != 3:

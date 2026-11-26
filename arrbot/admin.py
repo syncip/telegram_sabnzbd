@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 from . import activity, guard
-from .users import ADMIN, BLOCKED, PENDING, USER, limit_text, quality_label
+from .users import ADMIN, BLOCKED, PENDING, PERMS, USER, limit_text, quality_label
 
 # Models OpenAI shuts down (date shown as a warning wherever the model is named).
 SHUTDOWN = {"gpt-4o-mini": "14.01.2027", "gpt-4o": "14.01.2027", "gpt-4.1": "14.01.2027",
@@ -136,6 +136,8 @@ def user_card(u: Any, users: Any, requests: list[dict], entries: list[activity.E
         cap = users.max_quality(u.id)
         cap_txt = quality_label(cap) + ("" if u.quality else " (Standard)") if cap else "unbegrenzt"
         out.append(f"🎚 Limits: {html.escape(lim_txt)}\n📺 Höchstqualität: {cap_txt}")
+        perms = [PERMS.get(p, p) for p in getattr(u, "perms", [])]
+        out.append("🔐 Darf zusätzlich: " + (html.escape("; ".join(perms)) if perms else "nichts (nur suchen und hinzufügen)"))
     mine = [r for r in requests if r.get("chat_id") == u.id]
     if mine:
         kinds = Counter(r["kind"] for r in mine)

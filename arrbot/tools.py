@@ -369,9 +369,23 @@ def build_admin_specs() -> list[ToolSpec]:
         ),
         ToolSpec(
             "admin_set_limit",
-            "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot). value: Zahl oder 'aus'.",
-            obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": ["tag", "monat", "tokens", "kosten"]},
+            "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot, nur KI-Limits). "
+            "kind: KI-Nachrichten tag/monat, tokens, kosten – oder Titel: filme_|serien_|staffeln_|folgen_ + "
+            "stunde|tag|woche|monat (\"Sarah max. 3 Filme pro Tag\" = filme_tag 3). value: Zahl oder 'aus'.",
+            obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": sorted(users_mod.LIMIT_KEYS)},
                  "value": {"type": "string"}}, ["who", "kind", "value"]),
+        ),
+        ToolSpec(
+            "admin_permissions",
+            "Einem Nutzer Rechte geben oder nehmen (\"Sarah darf ihre Filme und Serien löschen\" = grant "
+            "delete_own). delete_own: nur selbst Angefragtes löschen; delete: alles löschen; pause: eigene Titel "
+            "pausieren; repair: Deutsch-Reparatur/Folgen aufräumen; media: Medien-Manager (alles!); sites: "
+            "Webseiten beobachten; no_limits: keine Limits. Ohne grant/revoke: zeigt die Rechte. Unklar, welches "
+            "Recht gemeint ist (eigene oder alle)? Nachfragen.",
+            obj({"who": {"type": "string"},
+                 "grant": {"type": "array", "items": {"type": "string", "enum": list(users_mod.PERMS)}},
+                 "revoke": {"type": "array", "items": {"type": "string", "enum": list(users_mod.PERMS)}}},
+                ["who"]),
         ),
         ToolSpec(
             "admin_overview",
@@ -569,15 +583,32 @@ class ToolRunner:
         """Without user management (single-user setup) whoever may use the bot is the admin."""
         return self.users is None or self.is_admin(uid)
 
+    # Tools a user may get with an extra right from the admin ("Sarah darf ihre Filme löschen").
+    TOOL_PERMS = {"remove_title": ("delete", "delete_own"), "pause_title": ("pause",), "resume_title": ("pause",),
+                  "german_fix": ("repair",), "clean_episodes": ("repair",), "watch_site": ("sites",),
+                  "admin_delete_media": ("media",), "admin_storage": ("media",), "admin_duplicates": ("media",),
+                  "admin_keep": ("media",)}
+
     def _admin_only(self, name: str) -> bool:
         return name in self.ADMIN_ONLY or name.startswith(("admin_", "recipe_"))
+
+    def may(self, uid: int, name: str) -> bool:
+        """May uid run this tool? Admins: everything. Users: search/add, plus what the admin allowed them."""
+        if self._admin(uid):
+            return True
+        if self.users is None or not self.users.is_allowed(uid):
+            return False
+        perms = self.TOOL_PERMS.get(name)
+        if perms:
+            return any(self.users.has_perm(uid, p) for p in perms)
+        return not self._admin_only(name)
 
     def specs_for(self, user_id: int) -> list[ToolSpec]:
         if self.users is not None and self.is_admin(user_id):
             return self.specs + self.admin_specs + self.recipe_specs()
         if self.users is None:
             return self.specs
-        return [s for s in self.specs if not self._admin_only(s.name)]
+        return [s for s in self.specs + self.admin_specs if self.may(user_id, s.name)]
 
     def recipe_specs(self) -> list[ToolSpec]:
         return [r.spec() for r in self.recipes.all()] if self.recipes else []
@@ -665,9 +696,9 @@ class ToolRunner:
                 return await self.run_recipe(chat_id, name, args)
         if fn is None:
             return ToolResult(call.id, call.name, f"Unbekanntes Werkzeug {call.name}", is_error=True)
-        if call.name.startswith("admin_") and not (self.users is not None and self.is_admin(chat_id)):
-            return ToolResult(call.id, call.name, "Nur für Admins.", is_error=True)
-        if self._admin_only(call.name) and not self._admin(chat_id):
+        if not self.may(chat_id, call.name):
+            if call.name.startswith("admin_") and call.name not in self.TOOL_PERMS:
+                return ToolResult(call.id, call.name, "Nur für Admins.", is_error=True)
             return ToolResult(call.id, call.name, "Das darf nur der Admin. Du kannst Filme und Serien suchen und "
                               "hinzufügen – für alles andere frag den Admin.", is_error=True)
         try:
@@ -832,8 +863,37 @@ class ToolRunner:
             await self.on_approval(p)
         raise Held("wartet auf Freigabe durch den Admin. Ich sage dir Bescheid.")
 
+    def _wants_limit(self, uid: int, what: str) -> bool:
+        if self.users is None:
+            return False
+        return any(k.startswith(what + "_") for k in self.users.limits_for(uid))
+
+    async def _check_title_limit(self, uid: int, **counts: int) -> None:
+        if self.users is None:
+            return
+        reason = self.users.title_limit(uid, **counts)
+        if reason:
+            raise ArrError(f"⛔ {reason}")
+
+    async def _series_counts(self, flow: Flow) -> dict:
+        c = flow.cand
+        seasons = flow.seasons or [s for s in c.seasons if s > 0]
+        counts = {"serien": 1, "staffeln": len(seasons) or 1}
+        if self._wants_limit(flow.chat_id, "folgen") and self.tmdb:
+            try:
+                tmdb_id = c.tmdb_id or (await self._need(self.sonarr, "Sonarr").lookup_tvdb(c.ext_id)).get("tmdbId")
+                per = await self.tmdb.season_episodes(int(tmdb_id)) if tmdb_id else {}
+            except (ArrError, TmdbError, ValueError):
+                per = {}
+            counts["folgen"] = sum(n for s, n in per.items() if s in seasons) if seasons else sum(
+                n for s, n in per.items() if s > 0)
+        return counts
+
     async def _add(self, flow: Flow, approved: bool = False) -> None:
         c = flow.cand
+        counts = {"filme": 1} if c.kind == "movie" else await self._series_counts(flow)
+        if not approved:  # the admin said yes: no limit
+            await self._check_title_limit(flow.chat_id, **counts)
         flow.profile = await self._capped_profile(flow)
         rule = None if approved else await self._hold_rule(flow)
         if rule and not rule.min_gb:
@@ -865,6 +925,8 @@ class ToolRunner:
             self.store.track("sonarr", series["id"], title, flow.chat_id)
             self.store.record_request(flow.chat_id, "series", title, series.get("tmdbId"), c.ext_id)
             self._learn(flow.chat_id, "requested", "series", series, title)
+        if self.users is not None:
+            self.users.record_adds(flow.chat_id, **counts)
         await self._added(flow.chat_id, f"➕ {_what(flow)}")
 
     async def decide(self, pid: str, ok: bool) -> tuple[approval.Pending | None, str]:
@@ -1169,6 +1231,15 @@ class ToolRunner:
         return hits[0]["id"]
 
     async def _search_again(self, chat_id: int, kind: str, lib_id: int, seasons: list[int] | None) -> Final:
+        counts: dict = {}
+        if self.users is not None and not self._admin(chat_id):
+            if kind == "movie":
+                counts = {"filme": 1}
+            else:
+                missing, _ = await self._need(self.sonarr, "Sonarr").search_missing(lib_id, seasons, dry=True)
+                counts = {"folgen": len(missing), "staffeln": len({e.get("seasonNumber") for e in missing})}
+            await self._check_title_limit(chat_id, **counts)
+            self.users.record_adds(chat_id, **counts)
         if kind == "movie":
             radarr: Radarr = self._need(self.radarr, "Radarr")
             movie = await radarr.get(lib_id)
@@ -1221,16 +1292,44 @@ class ToolRunner:
         return await self._search_again(chat_id, "series", series["id"], seasons)
 
     # ---- delete / pause / resume ---------------------------------------------------------
-    async def _managed(self, chat_id: int, kind: str, lib_id: int, delete: bool = False) -> tuple[dict, str, str]:
-        """(item, key, title) if chat_id may change this title. Users: only what they asked for."""
+    def owns(self, uid: int, kind: str, item: dict) -> bool:
+        """Did uid request this title (via the bot)?"""
+        for r in self.store.state.requests:
+            if r["chat_id"] != uid or r["kind"] != kind:
+                continue
+            if kind == "movie" and r.get("tmdb") and r["tmdb"] == item.get("tmdbId"):
+                return True
+            if kind == "series" and ((r.get("tvdb") and r["tvdb"] == item.get("tvdbId"))
+                                     or (r.get("tmdb") and r["tmdb"] == item.get("tmdbId"))):
+                return True
+        return False
+
+    async def _managed(self, chat_id: int, kind: str, lib_id: int, delete: bool = False,
+                       perm: str | None = None) -> tuple[dict, str, str]:
+        """(item, key, title) if chat_id may change this title. perm: delete | pause | repair.
+        Admin: always. Users: only with that right from the admin; delete_own / pause only their own titles."""
         svc = self._svc(kind)
         item = await svc.get(int(lib_id))
         service = "radarr" if kind == "movie" else "sonarr"
         key = f"{service}:{item['id']}"
         title = f"{item.get('title')} ({item.get('year')})" if kind == "movie" and item.get("year") else item.get("title", "?")
-        if not self._admin(chat_id):
-            raise ArrError(f"{title} ändern oder löschen kann nur der Admin.")
-        return item, key, title
+        if self._admin(chat_id):
+            return item, key, title
+        perm = perm or ("delete" if delete else "repair")
+        has = (lambda p: self.users is not None and self.users.has_perm(chat_id, p))
+        if perm == "delete" and has("delete"):
+            return item, key, title
+        if perm == "delete" and has("delete_own"):
+            if self.owns(chat_id, kind, item):
+                return item, key, title
+            raise ArrError(f"{title} hast nicht du angefragt – löschen darfst du nur deine eigenen Titel.")
+        if perm == "pause" and has("pause"):
+            if self.owns(chat_id, kind, item):
+                return item, key, title
+            raise ArrError(f"{title} hast nicht du angefragt – pausieren darfst du nur deine eigenen Titel.")
+        if perm == "repair" and has("repair"):
+            return item, key, title
+        raise ArrError(f"{title} ändern oder löschen kann nur der Admin.")
 
     async def start_remove(self, chat_id: int, kind: str, lib_id: int) -> Flow:
         item, key, title = await self._managed(chat_id, kind, lib_id, delete=True)
@@ -1282,7 +1381,7 @@ class ToolRunner:
         return Final("")
 
     async def pause(self, chat_id: int, kind: str, lib_id: int, days: int | None) -> str:
-        item, key, title = await self._managed(chat_id, kind, lib_id)
+        item, key, title = await self._managed(chat_id, kind, lib_id, perm="pause")
         await self._svc(kind).set_monitored(item["id"], False)
         until = (utcnow() + timedelta(days=days)) if days else None
         entry = self.store.state.paused.get(key) or {"title": title, "chat_ids": []}
@@ -1297,7 +1396,7 @@ class ToolRunner:
         return f"⏸ Suche nach {title} pausiert. Sag „weiter mit {item.get('title')}“, wenn ich wieder suchen soll."
 
     async def resume(self, chat_id: int, kind: str, lib_id: int) -> str:
-        item, key, title = await self._managed(chat_id, kind, lib_id)
+        item, key, title = await self._managed(chat_id, kind, lib_id, perm="pause")
         await resume_search(self._svc(kind), item["id"])
         entry = self.store.state.paused.pop(key, None)
         for chat in (entry or {}).get("chat_ids") or [chat_id]:
@@ -1333,7 +1432,7 @@ class ToolRunner:
         cand = await self._candidate(chat_id, "series", int(tvdb_id))
         if not cand.lib_id:
             raise ArrError(f"{cand.title} ist nicht in der Bibliothek. Erst hinzufügen (add_series).")
-        await self._managed(chat_id, "series", cand.lib_id, delete=delete)
+        await self._managed(chat_id, "series", cand.lib_id, perm="repair")
         return cand.lib_id
 
     async def _t_german_fix(self, chat_id: int, tvdb_id: int | None = None, season: int | None = None,
@@ -1373,7 +1472,7 @@ class ToolRunner:
         cand = await self._candidate(chat_id, "movie", tmdb_id)
         if not cand.lib_id:
             raise ArrError(f"{cand.title} ist nicht in Radarr.")
-        await self._managed(chat_id, "movie", cand.lib_id, delete=False)
+        await self._managed(chat_id, "movie", cand.lib_id, perm="repair")
         radarr: Radarr = self._need(self.radarr, "Radarr")
         fix = await manage.plan_movie(radarr, cand.lib_id)
         text, buttons = manage.render_movie(fix)
@@ -2166,6 +2265,19 @@ class ToolRunner:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "usercard", arg=uid))
         return Final("")
 
+    async def _t_admin_permissions(self, chat_id: int, who: str, grant: list[str] | None = None,
+                                   revoke: list[str] | None = None) -> Final:
+        try:
+            text = self.users.apply_perms(who, grant, revoke)
+        except ValueError as e:
+            raise ArrError(str(e)) from e
+        uid = self.users.find(who)
+        if (grant or revoke) and uid and self.notify_user and uid != chat_id:
+            u = self.users.users.get(uid)
+            if u is not None:
+                await self.notify_user(uid, users_mod.perms_text(u).replace(f"🔐 {u.name} darf", "🔐 Du darfst"))
+        return Final(text)
+
     async def _t_admin_max_quality(self, chat_id: int, who: str, quality: str) -> Final:
         try:
             return Final(self.users.apply_quality(who, quality))
@@ -2453,6 +2565,21 @@ class ToolRunner:
                             tvdb=c.ext_id if c.kind == "series" else None, year=c.year, genres=c.genres)
 
     # ---- feedback on titles (👍/👎/👁, ratings) ---------------------------------------------------
+    def owner_ok(self, kind: str, obj_id: str, uid: int, chat_id: int) -> bool:
+        """A button may only be pressed in the chat it was sent to, by someone allowed there. Unknown ids
+        (expired) are fine: the handlers answer "abgelaufen" themselves."""
+        obj = (self.flows if kind == "flow" else self.offers).get(obj_id)
+        if obj is None:
+            return True
+        if obj.chat_id != chat_id:
+            return False
+        stage = getattr(obj, "stage", "")
+        if stage in ("mm", "dup"):  # media manager: the right is needed again at the moment of deleting
+            return self.may(uid, "admin_delete_media")
+        if stage == "remove":
+            return self.may(uid, "remove_title")
+        return True
+
     def offer_mode(self, offer_id: str, mode: str) -> Offer | None:
         offer = self.offers.get(offer_id)
         if offer is not None:

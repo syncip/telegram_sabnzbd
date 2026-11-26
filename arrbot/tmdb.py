@@ -253,6 +253,11 @@ class TMDB:
         data = await self._get(f"/discover/{'movie' if kind == 'movie' else 'tv'}", **params)
         return [_rec(kind, r) for r in data.get("results") or []]
 
+    async def season_episodes(self, tmdb_id: int) -> dict[int, int]:
+        """Episodes per season of a show (for episode limits)."""
+        data = await self._get(f"/tv/{tmdb_id}", language=LANG)
+        return {int(s.get("season_number") or 0): int(s.get("episode_count") or 0) for s in data.get("seasons") or []}
+
     async def details(self, kind: str, tmdb_id: int) -> dict:
         """Runtime (minutes; series: per episode) and film series (collection id) of a title."""
         data = await self._get(f"/{'movie' if kind == 'movie' else 'tv'}/{tmdb_id}", language=LANG)

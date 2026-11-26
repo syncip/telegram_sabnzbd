@@ -7,7 +7,7 @@ import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .state import utcnow
@@ -17,9 +17,27 @@ log = logging.getLogger(__name__)
 ADMIN, USER, PENDING, BLOCKED = "admin", "user", "pending", "blocked"
 
 # Limit keys (German, as typed in /limit): requests per day/month, USD and tokens per month.
-LIMIT_KEYS = {"tag": "Anfragen pro Tag", "monat": "Anfragen pro Monat", "kosten": "Kosten pro Monat ($)",
-              "tokens": "Tokens pro Monat"}
+AI_KEYS = {"tag": "Anfragen pro Tag", "monat": "Anfragen pro Monat", "kosten": "Kosten pro Monat ($)",
+           "tokens": "Tokens pro Monat"}
+# What a user may add, per period: "filme_tag" = movies per day, "folgen_woche" = episodes per week, …
+TITLE_WHAT = {"filme": "Filme", "serien": "Serien", "staffeln": "Staffeln", "folgen": "Folgen"}
+PERIODS = {"stunde": ("Stunde", 3600), "tag": ("Tag", 86400), "woche": ("Woche", 7 * 86400),
+           "monat": ("Monat", 30 * 86400)}
+TITLE_KEYS = {f"{w}_{p}": f"{lw} pro {lp}" for w, lw in TITLE_WHAT.items() for p, (lp, _) in PERIODS.items()}
+LIMIT_KEYS = {**AI_KEYS, **TITLE_KEYS}
 TOTAL = "gesamt"
+ADDS_KEEP_DAYS = 31
+
+# What an admin can allow single users ("Sarah darf ihre Filme und Serien löschen").
+PERMS = {
+    "delete_own": "eigene Filme/Serien löschen (nur, was sie/er selbst angefragt hat)",
+    "delete": "alle Filme/Serien löschen",
+    "pause": "Suche pausieren und fortsetzen (eigene Titel)",
+    "repair": "Deutsch-Reparatur und Folgen aufräumen",
+    "media": "Medien-Manager: aufräumen, Duplikate, Speicher (alle Titel!)",
+    "sites": "Webseiten beobachten",
+    "no_limits": "keine Limits (Anfragen und Titel)",
+}
 
 
 def _period() -> tuple[str, str]:
@@ -75,6 +93,8 @@ class User:
     limits: dict = field(default_factory=dict)  # own limits; missing keys fall back to the defaults
     usage: Usage = field(default_factory=Usage)
     quality: int = 0  # max resolution (720/1080/2160) for this user; 0 = the standard for all users
+    perms: list[str] = field(default_factory=list)  # extra rights, see PERMS
+    adds: list[dict] = field(default_factory=list)  # {"at": iso, "filme": 1, ...} of the last ADDS_KEEP_DAYS
 
 
 class UserStore:
@@ -210,16 +230,84 @@ class UserStore:
         base.update(u.limits)
         return {k: v for k, v in base.items() if v is not None}
 
+    # ---- rights -------------------------------------------------------------------
+    def has_perm(self, uid: int, perm: str) -> bool:
+        u = self.users.get(uid)
+        if not u or u.role not in (ADMIN, USER):
+            return False
+        return u.role == ADMIN or perm in u.perms
+
+    def apply_perms(self, who: str, grant: list[str] | None = None, revoke: list[str] | None = None) -> str:
+        uid = self.find(who)
+        if uid is None:
+            raise ValueError(f"Nutzer „{who}“ kenne ich nicht. /nutzer zeigt alle.")
+        u = self.users[uid]
+        if u.role == ADMIN:
+            return f"👑 {u.name} ist Admin und darf ohnehin alles."
+        bad = [p for p in (grant or []) + (revoke or []) if p not in PERMS]
+        if bad:
+            raise ValueError(f"Unbekannte Erlaubnis: {', '.join(bad)}. Möglich: {', '.join(PERMS)}")
+        for p in grant or []:
+            if p not in u.perms:
+                u.perms.append(p)
+        u.perms = [p for p in u.perms if p not in (revoke or [])]
+        self.save()
+        return perms_text(u)
+
+    # ---- limits for titles ("3 Filme pro Tag") ------------------------------------------
+    def title_limit(self, uid: int, now: datetime | None = None, **want: int) -> str | None:
+        """Reason text if uid may not add this now. want: filme / serien / staffeln / folgen counts."""
+        u = self.users.get(uid)
+        if not u or u.role == ADMIN or "no_limits" in u.perms:
+            return None
+        now = now or datetime.now(timezone.utc)
+        for key, limit in self.limits_for(uid).items():
+            if key not in TITLE_KEYS:
+                continue
+            what, period = key.split("_")
+            new = int(want.get(what) or 0)
+            if not new:
+                continue
+            seconds = PERIODS[period][1]
+            recent = [a for a in u.adds if a.get(what) and _ts(a["at"]) > now - timedelta(seconds=seconds)]
+            used = sum(int(a[what]) for a in recent)
+            if used + new <= limit:
+                continue
+            label = TITLE_KEYS[key]
+            if used >= limit:
+                oldest = min(_ts(a["at"]) for a in recent) if recent else now
+                wait = oldest + timedelta(seconds=seconds) - now
+                return (f"Dein Limit ist erreicht: höchstens {limit:g} {label} (schon {used}). "
+                        f"Wieder möglich in {_wait_text(wait)}.")
+            return (f"Das sind {new} {TITLE_WHAT[what]} – dein Limit erlaubt gerade noch {int(limit - used)} "
+                    f"({limit:g} {label}). Weniger auswählen, z. B. nur eine Staffel?")
+        return None
+
+    def record_adds(self, uid: int, now: datetime | None = None, **counts: int) -> None:
+        u = self.users.get(uid)
+        if not u:
+            return
+        now = now or datetime.now(timezone.utc)
+        entry = {k: int(v) for k, v in counts.items() if k in TITLE_WHAT and v}
+        if not entry:
+            return
+        entry["at"] = now.isoformat()
+        cutoff = now - timedelta(days=ADDS_KEEP_DAYS)
+        u.adds = [a for a in u.adds if _ts(a["at"]) > cutoff] + [entry]
+        self.save()
+
     def blocked_by_limit(self, uid: int) -> str | None:
         """Reason text if uid may not send another AI request right now."""
         for key, limit in self.total_limits.items():
-            if self.total.value(key) >= limit:
+            if key in AI_KEYS and self.total.value(key) >= limit:
                 return f"Das Gesamtbudget des Bots ist für diesen Monat aufgebraucht ({_fmt(key, limit)})."
         u = self.users.get(uid)
         if not u:
             return None
+        if "no_limits" in u.perms:
+            return None
         for key, limit in self.limits_for(uid).items():
-            if u.usage.value(key) >= limit:
+            if key in AI_KEYS and u.usage.value(key) >= limit:
                 when = "heute" if key == "tag" else "diesen Monat"
                 return f"Dein Limit ist {when} erreicht: {_fmt(key, limit)}."
         return None
@@ -257,6 +345,8 @@ class UserStore:
         if target == "standard":
             d = self.defaults
         elif target == TOTAL:
+            if key not in AI_KEYS:
+                raise ValueError("Titel-Limits gibt es pro Nutzer oder als Standard für alle, nicht für den ganzen Bot.")
             d = self.total_limits
         else:
             u = self.users.get(int(target))
@@ -348,11 +438,34 @@ class UserStore:
         return hits[0] if len(hits) == 1 else None
 
 
+def _ts(raw: str) -> datetime:
+    d = datetime.fromisoformat(raw)
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _wait_text(td: timedelta) -> str:
+    s = max(60, int(td.total_seconds()))
+    if s < 3600:
+        return f"{s // 60} Min."
+    if s < 2 * 86400:
+        return f"{round(s / 3600)} Std."
+    return f"{round(s / 86400)} Tagen"
+
+
+def perms_text(u: User) -> str:
+    if not u.perms:
+        return f"🔐 {u.name} darf suchen und hinzufügen – sonst nichts Besonderes."
+    return f"🔐 {u.name} darf zusätzlich:\n" + "\n".join(f"• {PERMS.get(p, p)}" for p in u.perms)
+
+
 def _fmt(key: str, value: float) -> str:
     if key == "kosten":
         return f"{value:.2f} $ pro Monat".replace(".", ",")
     if key == "tokens":
         return f"{int(value):,} Tokens pro Monat".replace(",", ".")
+    if key in TITLE_KEYS:
+        what, period = key.split("_")
+        return f"höchstens {int(value)} {TITLE_WHAT[what]} pro {PERIODS[period][0]}"
     return f"{int(value)} Anfragen pro {'Tag' if key == 'tag' else 'Monat'}"
 
 

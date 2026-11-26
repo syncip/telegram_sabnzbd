@@ -419,7 +419,7 @@ class Sonarr(_ArrBase):
             await self.command("SeriesSearch", seriesId=series_id)
 
     async def search_missing(self, series_id: int, seasons: list[int] | None = None,
-                             now: str | None = None) -> tuple[list[dict], bool]:
+                             now: str | None = None, dry: bool = False) -> tuple[list[dict], bool]:
         """Search the aired episodes without a file again ("such nochmal").
 
         Sonarr's own SeriesSearch skips unmonitored series and episodes without a word, so the missing
@@ -432,6 +432,8 @@ class Sonarr(_ArrBase):
         missing = [e for e in eps if not e.get("hasFile") and not e.get("episodeFileId")
                    and (e.get("seasonNumber") in seasons if seasons else e.get("seasonNumber", 0) > 0)
                    and (e.get("airDateUtc") or "") <= now and e.get("airDateUtc")]
+        if dry:  # only count (limits): change nothing
+            return missing, False
         series = await self.get(series_id)
         was_off = not series.get("monitored", True)
         # Named seasons are monitored even if nothing has aired yet (Sonarr loads them when they come).

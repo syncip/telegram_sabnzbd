@@ -192,14 +192,27 @@ Außerdem:
   Radarr/Sonarr still weiter, die nächste Nachricht kommt erst, wenn ein Download startet.
   `NO_RELEASE_NOTICE_MINUTES: "0"` schaltet sie ganz ab.
 - **Nutzerverwaltung:** Du bist Admin. Wer dem Bot schreibt, landet als Anfrage bei dir
-  (✅ Freigeben / ❌ Ablehnen). Du bekommst eine Nachricht, wenn andere etwas hinzufügen.
-- **Limits:** pro Nutzer oder für alle Anfragen pro Tag/Monat, Tokens oder Kosten pro Monat, dazu ein
-  Gesamtbudget für den ganzen Bot.
+  (✅ Freigeben / ❌ Ablehnen) und bekommt **einmal** die Antwort, dass der Admin gefragt ist. Bis zur
+  Freigabe antwortet der Bot nicht mehr, nichts davon erreicht die KI (kostet also nichts), und auch
+  Buttons gehen nicht. Nach der Freigabe bekommt der Nutzer Bescheid. Gesperrte hören gar nichts.
+  Du bekommst eine Nachricht, wenn andere etwas hinzufügen.
+- **Limits:** pro Nutzer oder für alle: KI-Nachrichten pro Tag/Monat, Tokens oder Kosten pro Monat, dazu ein
+  Gesamtbudget für den ganzen Bot. Und was jemand hinzufügen darf: Filme, Serien, Staffeln oder Folgen pro
+  Stunde, Tag, Woche oder Monat („Sarah höchstens 3 Filme pro Tag“, „Standard 40 Folgen pro Woche“,
+  `/limit Sarah filme_tag 3`). Das gilt auch für „such nochmal“. Ist ein Wunsch zu groß (eine Serie mit
+  mehr Folgen, als noch gehen), sagt der Bot, wie viel noch geht, und schlägt z. B. nur eine Staffel vor.
+  Was der Admin freigibt, zählt nicht gegen das Limit.
+- **Rechte verteilen:** „Sarah darf ihre Filme und Serien löschen“ – sie darf dann löschen, was sie selbst
+  angefragt hat, sonst nichts. Weitere Rechte: alles löschen, eigene Titel pausieren, Deutsch-Reparatur und
+  Folgen aufräumen, Medien-Manager (Achtung: alle Titel), Webseiten beobachten, keine Limits. „Was darf
+  Sarah?“ oder ihre Nutzerkarte zeigt es, „Sarah darf nicht mehr löschen“ nimmt es zurück. Der Nutzer
+  bekommt eine Nachricht, wenn sich seine Rechte ändern. Admin-Ansichten (Statistik, Nutzer, Regeln,
+  Freigaben …) bleiben immer beim Admin.
 - **Wer darf was:** Nutzer suchen und **fügen hinzu** (Filme, Serien, fehlende Staffeln), dazu alles, was
   nur zeigt: Vorschläge, Top-Listen, Deutsch-Info, Kalender, eigene Downloads, Wunschliste, Plex.
   Löschen, Pausieren, Folgen austauschen, Webseiten beobachten und selbstgebaute Werkzeuge gibt es nur
-  für Admins – die KI bekommt diese Werkzeuge bei Nutzern gar nicht erst, und der Code prüft es noch
-  einmal. Unter „Nichts gefunden“ sehen Nutzer nur „🔔 Bei Deutsch melden“ und „👍 Okay“.
+  für Admins (oder mit einem Recht, s. o.) – die KI bekommt diese Werkzeuge bei Nutzern gar nicht erst, der
+  Code prüft es bei jedem Aufruf noch einmal, und Buttons gelten nur in dem Chat, für den sie gedacht sind. Unter „Nichts gefunden“ sehen Nutzer nur „🔔 Bei Deutsch melden“ und „👍 Okay“.
 - **Höchstqualität:** „Anna darf höchstens 1080p“ oder „Standard höchstens 1080p“ (gilt für alle Nutzer
   ohne eigene Grenze; SD, 720, 1080, 4K oder „aus“). Nutzer sehen dann nur Qualitätsprofile bis zu dieser
   Auflösung; ist das Standardprofil höher, nimmt der Bot das beste erlaubte. Admins haben keine Grenze.

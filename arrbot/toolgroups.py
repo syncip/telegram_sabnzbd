@@ -41,7 +41,7 @@ GROUPS: dict[str, tuple[set[str], str]] = {
               r"statistik|übersicht|dashboard|verwaltung|wie steht|was macht|zeig mir|nutzer|user|limit|check|api|mediathek|aufräum|qualität|profil|aktivit|anfrag|"
               r"sammlung|collection|problem|fehler|freigab|kosten|tokens|sperr|erlaub|admin|gesehen|ungesehen|platz|speicher|lösch|regel|"
               r"untertitel|überwach|webseite|website|behalt|schütz|nie löschen|frisst|größt|groß|duplikat|doppel|"
-              r"version(en)?\b|auflösung|\bgb\b|tage (alt|da)|älter als"),
+              r"version(en)?\b|auflösung|\bgb\b|tage (alt|da)|älter als|darf|dürfen|recht|pro (stunde|tag|woche|monat)"),
 }
 
 MORE = ToolSpec("more_tools", "Nur aufrufen, wenn für die Anfrage ein Werkzeug fehlt: dann gibt es alle.",
