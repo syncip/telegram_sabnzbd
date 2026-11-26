@@ -18,7 +18,9 @@ ADMIN, USER, PENDING, BLOCKED = "admin", "user", "pending", "blocked"
 
 # Limit keys (German, as typed in /limit): requests per day/month, USD and tokens per month.
 AI_KEYS = {"tag": "Anfragen pro Tag", "monat": "Anfragen pro Monat", "kosten": "Kosten pro Monat ($)",
-           "tokens": "Tokens pro Monat"}
+           "tokens": "Tokens pro Monat", "tokens_tag": "Tokens pro Tag", "kosten_tag": "Kosten pro Tag ($)"}
+DAYS_KEEP = 60
+WARN_AT = 0.8  # the admins hear about it when the bot's total use passes 80 % of a limit
 # What a user may add, per period: "filme_tag" = movies per day, "folgen_woche" = episodes per week, …
 TITLE_WHAT = {"filme": "Filme", "serien": "Serien", "staffeln": "Staffeln", "folgen": "Folgen"}
 PERIODS = {"stunde": ("Stunde", 3600), "tag": ("Tag", 86400), "woche": ("Woche", 7 * 86400),
@@ -52,6 +54,8 @@ MONTHS_KEEP = 12
 class Usage:
     day: str = ""
     day_requests: int = 0
+    day_tokens: int = 0
+    day_cost: float = 0.0
     month: str = ""
     month_requests: int = 0
     month_tokens: int = 0
@@ -64,11 +68,18 @@ class Usage:
     last_active: str = ""
     # finished months: {"2026-10": {"requests": 80, "tokens": 250000, "cost": 0.05, "calls": 170}}
     months: dict = field(default_factory=dict)
+    # finished days (for limit advice): {"2026-11-25": {"requests": 12, "tokens": 40000, "cost": 0.01}}
+    days: dict = field(default_factory=dict)
 
     def roll(self) -> None:
         day, month = _period()
         if self.day != day:
-            self.day, self.day_requests = day, 0
+            if self.day and (self.day_requests or self.day_tokens):
+                self.days[self.day] = {"requests": self.day_requests, "tokens": self.day_tokens,
+                                       "cost": round(self.day_cost, 6)}
+                for old in sorted(self.days)[:-DAYS_KEEP]:
+                    del self.days[old]
+            self.day, self.day_requests, self.day_tokens, self.day_cost = day, 0, 0, 0.0
         if self.month != month:
             if self.month and (self.month_requests or self.month_tokens):
                 self.months[self.month] = {"requests": self.month_requests, "tokens": self.month_tokens,
@@ -81,7 +92,7 @@ class Usage:
     def value(self, key: str) -> float:
         self.roll()
         return {"tag": self.day_requests, "monat": self.month_requests, "kosten": self.month_cost,
-                "tokens": self.month_tokens}[key]
+                "tokens": self.month_tokens, "tokens_tag": self.day_tokens, "kosten_tag": self.day_cost}[key]
 
 
 @dataclass
@@ -108,6 +119,7 @@ class UserStore:
         self.total_limits: dict = {}  # whole bot, e.g. {"kosten": 1.0}
         self.total = Usage()
         self.default_quality = 0  # max resolution for all users (0 = no limit)
+        self.warned: set[str] = set()  # total limit warnings already sent (in memory)
         self.users: dict[int, User] = self._load()
         # The configured admin is always admin; IDs from ALLOWED_USER_IDS are plain users.
         self._ensure(admin_id, ADMIN)
@@ -300,7 +312,8 @@ class UserStore:
         """Reason text if uid may not send another AI request right now."""
         for key, limit in self.total_limits.items():
             if key in AI_KEYS and self.total.value(key) >= limit:
-                return f"Das Gesamtbudget des Bots ist für diesen Monat aufgebraucht ({_fmt(key, limit)})."
+                when = "heute" if _daily(key) else "diesen Monat"
+                return f"Das Gesamtbudget des Bots ist für {when} aufgebraucht ({_fmt(key, limit)})."
         u = self.users.get(uid)
         if not u:
             return None
@@ -308,9 +321,31 @@ class UserStore:
             return None
         for key, limit in self.limits_for(uid).items():
             if key in AI_KEYS and u.usage.value(key) >= limit:
-                when = "heute" if key == "tag" else "diesen Monat"
+                when = "heute" if _daily(key) else "diesen Monat"
                 return f"Dein Limit ist {when} erreicht: {_fmt(key, limit)}."
         return None
+
+    def total_warnings(self) -> list[str]:
+        """Once per day/month and limit: the bot's total use passed 80 % or 100 %."""
+        out = []
+        for key, limit in self.total_limits.items():
+            if key not in AI_KEYS or not limit:
+                continue
+            used = self.total.value(key)
+            period = self.total.day if _daily(key) else self.total.month
+            for level in (1.0, WARN_AT):
+                mark = f"{key}:{period}:{level}"
+                if used >= limit * level:
+                    if mark not in self.warned:
+                        self.warned.add(mark)
+                        if level == WARN_AT and f"{key}:{period}:1.0" in self.warned:
+                            break
+                        when = "heute" if _daily(key) else "diesen Monat"
+                        out.append(f"{'⛔' if level == 1.0 else '⚠️'} Gesamtbudget {when}: {int(used / limit * 100)} % "
+                                   f"von {_fmt(key, limit)} verbraucht"
+                                   + (" – der Bot antwortet bis dahin niemandem mehr." if level == 1.0 else "."))
+                    break
+        return out
 
     def count_request(self, uid: int) -> None:
         now = utcnow().isoformat()
@@ -328,6 +363,8 @@ class UserStore:
             usage.roll()
             usage.month_tokens += tokens
             usage.month_cost += cost or 0.0
+            usage.day_tokens += tokens
+            usage.day_cost += cost or 0.0
             usage.month_calls += 1
             usage.total_tokens += tokens
             usage.total_cost += cost or 0.0
@@ -438,6 +475,10 @@ class UserStore:
         return hits[0] if len(hits) == 1 else None
 
 
+def _daily(key: str) -> bool:
+    return key == "tag" or key.endswith("_tag")
+
+
 def _ts(raw: str) -> datetime:
     d = datetime.fromisoformat(raw)
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
@@ -459,10 +500,10 @@ def perms_text(u: User) -> str:
 
 
 def _fmt(key: str, value: float) -> str:
-    if key == "kosten":
-        return f"{value:.2f} $ pro Monat".replace(".", ",")
-    if key == "tokens":
-        return f"{int(value):,} Tokens pro Monat".replace(",", ".")
+    if key in ("kosten", "kosten_tag"):
+        return f"{value:.2f} $ pro {'Tag' if key == 'kosten_tag' else 'Monat'}".replace(".", ",")
+    if key in ("tokens", "tokens_tag"):
+        return f"{int(value):,} Tokens pro {'Tag' if key == 'tokens_tag' else 'Monat'}".replace(",", ".")
     if key in TITLE_KEYS:
         what, period = key.split("_")
         return f"höchstens {int(value)} {TITLE_WHAT[what]} pro {PERIODS[period][0]}"

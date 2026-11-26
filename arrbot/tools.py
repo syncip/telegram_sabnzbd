@@ -370,10 +370,17 @@ def build_admin_specs() -> list[ToolSpec]:
         ToolSpec(
             "admin_set_limit",
             "Limit setzen. who: Name/ID, 'standard' (alle Nutzer) oder 'gesamt' (ganzer Bot, nur KI-Limits). "
-            "kind: KI-Nachrichten tag/monat, tokens, kosten – oder Titel: filme_|serien_|staffeln_|folgen_ + "
+            "kind: KI-Nachrichten tag/monat, tokens/kosten (pro Monat), tokens_tag/kosten_tag (pro Tag) – oder Titel: filme_|serien_|staffeln_|folgen_ + "
             "stunde|tag|woche|monat (\"Sarah max. 3 Filme pro Tag\" = filme_tag 3). value: Zahl oder 'aus'.",
             obj({"who": {"type": "string"}, "kind": {"type": "string", "enum": sorted(users_mod.LIMIT_KEYS)},
                  "value": {"type": "string"}}, ["who", "kind", "value"]),
+        ),
+        ToolSpec(
+            "admin_limit_advice",
+            "Empfiehlt Limits aus dem Verbrauch der letzten Tage (\"welches Limit sollte ich setzen?\", \"wie viele "
+            "Tokens pro Tag sind sicher?\"): Gesamt Tokens/Kosten pro Tag und Monat, Standard pro Nutzer – mit "
+            "Buttons zum Übernehmen.",
+            obj({}),
         ),
         ToolSpec(
             "admin_permissions",
@@ -993,6 +1000,13 @@ class ToolRunner:
             flow.step = await self._recipe_step(flow, value)
             if not flow.step.done:
                 self.flows[flow.id] = flow
+            return flow
+        if flow.stage == "adv":
+            from . import limitadvice
+
+            self.flows.pop(flow.id, None)
+            flow.step = Step("👍 Limits bleiben wie sie sind." if value == "no"
+                             else limitadvice.apply(flow.data, self.users, value), done=True)
             return flow
         if flow.stage == "dup":
             self.flows.pop(flow.id, None)
@@ -2265,6 +2279,23 @@ class ToolRunner:
         self._outbox.setdefault(chat_id, []).append(View(chat_id, "usercard", arg=uid))
         return Final("")
 
+    async def _t_admin_limit_advice(self, chat_id: int) -> Final:
+        from . import limitadvice
+
+        a = limitadvice.advise(self.users)
+        text = limitadvice.render(a, self.users)
+        if not a.total:
+            return Final(text)
+        buttons = [("✅ Alles übernehmen", "all"), ("Nur Gesamt", "total")]
+        if a.standard:
+            buttons.append(("Nur Standard pro Nutzer", "standard"))
+        buttons.append(("✖️ Nein danke", "no"))
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Limits", None), stage="adv", data=a)
+        flow.step = Step(text, buttons)
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
     async def _t_admin_permissions(self, chat_id: int, who: str, grant: list[str] | None = None,
                                    revoke: list[str] | None = None) -> Final:
         try:
@@ -2578,6 +2609,8 @@ class ToolRunner:
             return self.may(uid, "admin_delete_media")
         if stage == "remove":
             return self.may(uid, "remove_title")
+        if stage == "adv":
+            return self._admin(uid) and self.users is not None and self.is_admin(uid)
         return True
 
     def offer_mode(self, offer_id: str, mode: str) -> Offer | None:

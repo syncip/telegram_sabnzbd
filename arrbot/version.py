@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 CHANGES = {
+    "1.16.0": "Gesamtlimits pro Tag: Tokens und Kosten für den ganzen Bot (oder pro Nutzer), Warnung an den "
+              "Admin bei 80 % und 100 %. Limit-Empfehlung („Welches Limit sollte ich setzen?“, /limit empfehlung): "
+              "aus dem Verbrauch der letzten 30 Tage und der Zahl aktiver Nutzer, mit Sicherheitsaufschlag, "
+              "per Button übernehmen",
     "1.15.0": "Sicherheit: Nicht freigegebene Nutzer bekommen genau eine Antwort („Admin ist gefragt“), dann "
               "nichts mehr – nichts erreicht die KI, keine Werkzeuge, keine Buttons; Bescheid bei Freigabe. "
               "Buttons gelten nur im eigenen Chat. Titel-Limits: Filme/Serien/Staffeln/Folgen pro Stunde, Tag, "

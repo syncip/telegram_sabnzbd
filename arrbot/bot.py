@@ -112,6 +112,8 @@ ADMIN_HELP = (
     "<code>/limit 123456 tokens aus</code>\n"
     "<code>/limit Sarah filme_tag 3</code> · <code>/limit standard folgen_woche 40</code> (Titel pro "
     "Stunde/Tag/Woche/Monat)\n"
+    "<code>/limit gesamt tokens_tag 200000</code> (Tokens pro Tag, ganzer Bot) · "
+    "<code>/limit empfehlung</code> (ich schlage Limits aus dem Verbrauch vor)\n"
     "Rechte: „Sarah darf ihre Filme und Serien löschen“, „Was darf Sarah?“, „Sarah darf nicht mehr löschen“\n\n"
     "Oder einfach schreiben: „Zeig mir die Statistik“, „Setz Annas Tageslimit auf 5“, "
     "„Sperr Bob“, „Prüf die APIs“, „Was kann weg?“, "
@@ -144,6 +146,11 @@ def build_app(cfg: Config) -> Application:
     def on_usage(uid: int, tokens: int, cost: float | None) -> None:
         users.add_usage(uid, tokens, cost)
         turn_tokens[uid] = turn_tokens.get(uid, 0) + tokens
+        for warning in users.total_warnings():  # 80 % / 100 % of a total limit: tell the admins once
+            task = asyncio.get_running_loop().create_task(
+                tell_admins(warning + "\nÄndern: /limit oder „Empfiehl mir ein Limit“."))
+            background.add(task)
+            task.add_done_callback(background.discard)
 
     agent.on_usage = on_usage
     activity_db = activity.ActivityStore(cfg.data_dir)
@@ -1831,14 +1838,20 @@ def build_app(cfg: Config) -> Application:
         usage = (
             "So geht's: <code>/limit WER ART WERT</code>\n"
             "WER: Name, Telegram-ID, <code>standard</code> (alle Nutzer) oder <code>gesamt</code> (ganzer Bot)\n"
-            "ART: KI-Nachrichten <code>tag</code>, <code>monat</code>, <code>tokens</code>, <code>kosten</code> – "
+            "ART: KI-Nachrichten <code>tag</code>, <code>monat</code>, <code>tokens</code>, <code>kosten</code> "
+            "(pro Monat), <code>tokens_tag</code>, <code>kosten_tag</code> (pro Tag) – "
             "oder Titel: <code>filme_</code>, <code>serien_</code>, <code>staffeln_</code>, <code>folgen_</code> + "
             "<code>stunde</code>/<code>tag</code>/<code>woche</code>/<code>monat</code> "
             "(z. B. <code>/limit Sarah filme_tag 3</code>)\n"
             "WERT: Zahl oder <code>aus</code>"
         )
+        if args and args[0].lower().startswith(("empf", "tipp", "vorschlag")):
+            await tools.run(ToolCall("adv", "admin_limit_advice", {}), update.effective_user.id)
+            await deliver_outbox(update.effective_chat.id, update.effective_user.id, ctx)
+            return
         if len(args) != 3:
-            await app.bot.send_message(update.effective_chat.id, usage, parse_mode=ParseMode.HTML)
+            await app.bot.send_message(update.effective_chat.id, usage + "\n\n💡 <code>/limit empfehlung</code> – "
+                                       "ich schlage Limits aus dem bisherigen Verbrauch vor.", parse_mode=ParseMode.HTML)
             return
         try:
             await update.effective_message.reply_text(users.apply_limit(args[0], args[1], args[2]))

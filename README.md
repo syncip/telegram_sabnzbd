@@ -196,8 +196,13 @@ Außerdem:
   Freigabe antwortet der Bot nicht mehr, nichts davon erreicht die KI (kostet also nichts), und auch
   Buttons gehen nicht. Nach der Freigabe bekommt der Nutzer Bescheid. Gesperrte hören gar nichts.
   Du bekommst eine Nachricht, wenn andere etwas hinzufügen.
-- **Limits:** pro Nutzer oder für alle: KI-Nachrichten pro Tag/Monat, Tokens oder Kosten pro Monat, dazu ein
-  Gesamtbudget für den ganzen Bot. Und was jemand hinzufügen darf: Filme, Serien, Staffeln oder Folgen pro
+- **Limits:** pro Nutzer oder für alle: KI-Nachrichten pro Tag/Monat, Tokens oder Kosten pro Tag oder Monat,
+  dazu ein Gesamtbudget für den ganzen Bot (z. B. „gesamt max. 200.000 Tokens pro Tag“). Ab 80 % und bei
+  100 % eines Gesamtlimits bekommst du einmal Bescheid.
+- **Limit-Empfehlung:** „Welches Limit sollte ich setzen?“ oder `/limit empfehlung` – der Bot schaut sich
+  den Verbrauch der letzten 30 Tage an (Schnitt, Spitzentag, aktive Nutzer) und schlägt Gesamt- und
+  Standardlimits mit Sicherheitsaufschlag vor (×1,5, bei weniger als 14 Tagen Daten ×2, unter 7 Tagen ×3,
+  plus 0,1 je weiterem aktiven Nutzer). Per Button übernimmst du alles, nur Gesamt oder nur Standard. Und was jemand hinzufügen darf: Filme, Serien, Staffeln oder Folgen pro
   Stunde, Tag, Woche oder Monat („Sarah höchstens 3 Filme pro Tag“, „Standard 40 Folgen pro Woche“,
   `/limit Sarah filme_tag 3`). Das gilt auch für „such nochmal“. Ist ein Wunsch zu groß (eine Serie mit
   mehr Folgen, als noch gehen), sagt der Bot, wie viel noch geht, und schlägt z. B. nur eine Staffel vor.
@@ -316,7 +321,8 @@ Nur für den Admin:
 - `/debug an|aus` – das Log kommt nach jeder Antwort mit, Suchergebnisse kommen, sobald sie fertig sind
 - `/limit WER ART WERT` – Limits setzen
   - WER: Name, Telegram-ID, `standard` (alle Nutzer ohne eigenes Limit) oder `gesamt` (ganzer Bot)
-  - ART: `tag` (Anfragen/Tag), `monat` (Anfragen/Monat), `tokens` (pro Monat), `kosten` (Dollar/Monat)
+  - ART: `tag` (Anfragen/Tag), `monat` (Anfragen/Monat), `tokens` (pro Monat), `kosten` (Dollar/Monat),
+    `tokens_tag` (Tokens/Tag), `kosten_tag` (Dollar/Tag), Titel wie `filme_tag`, `folgen_woche`
   - WERT: Zahl oder `aus`
 
 ```
@@ -324,6 +330,8 @@ Nur für den Admin:
 /limit Anna monat 50
 /limit gesamt kosten 1
 /limit 123456 tokens aus
+/limit gesamt tokens_tag 200000
+/limit empfehlung
 ```
 
 Als Admin kannst du das alles auch einfach schreiben: „Zeig mir die Statistik“, „Setz Annas
