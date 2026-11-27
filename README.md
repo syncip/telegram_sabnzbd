@@ -412,7 +412,8 @@ Dauer und Token-Zahl.
 Telegram ─► bot.py ─► agent.py ─► llm.py (OpenAI / Gemini / Claude)
               │           │
               │           ▼
-              │       tools.py ─► arr.py ─► Radarr / Sonarr
+              │       tools.py (+ tools_media / tools_admin / tools_discover / tools_german)
+              │           ├─────► arr.py ─► Radarr / Sonarr
               │           └─────► tmdb.py ─► TMDB
               ├─► downloads.py (Übersicht)  ◄── sabnzbd.py ◄── SABnzbd
 tracker.py ── alle 60 s: /history/since + /queue + SABnzbd ──► Nachricht an den Chat
@@ -431,6 +432,13 @@ python -m venv .venv
 ```
 
 Die Tests laufen komplett offline mit nachgebautem Radarr/Sonarr/SABnzbd/TMDB und einer simulierten KI.
+
+Wo was liegt, steht kurz in [CLAUDE.md](CLAUDE.md): welche Datei wofür zuständig ist, die Abschnitte in
+`bot.py` und eine Checkliste für neue Werkzeuge. Die Werkzeuge der KI sind nach Thema aufgeteilt:
+`toolspecs.py` (was die KI sieht), `tools.py` (Kern: Rechte, Buttons, Hinzufügen/Suchen/Löschen),
+`tools_media.py` (Mediathek, Duplikate, Gesehenes), `tools_admin.py` (Nutzer, Limits, Rechte, Rezepte),
+`tools_discover.py` (Vorschläge, Toplisten, Geschmack), `tools_german.py` (deutsche Tonspur), `tooltypes.py`
+(gemeinsame Datentypen).
 
 ## Lizenz
 

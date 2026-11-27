@@ -14,9 +14,11 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.18.0"
+__version__ = "1.18.1"
 
 CHANGES = {
+    "1.18.1": "Intern aufgeräumt, gleiche Funktionen: die Werkzeuge sind nach Thema auf mehrere Dateien verteilt "
+              "(Mediathek, Admin, Vorschläge, Deutsch), dazu eine Übersicht, wo was liegt",
     "1.18.0": "Duplikate anzeigen: „Zeig mir die Duplikate“ bzw. „📋 Alle anzeigen“ – die ganze Liste seitenweise "
               "mit Dateinamen, was weg soll und was bleibt; große Bibliotheken werden nicht mehr abgeschnitten. "
               "„Arbeitest du noch?“ beantwortet der Bot sofort, auch mitten in langen Vorgängen: woran, seit "
