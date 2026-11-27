@@ -217,3 +217,26 @@ def test_book_suggestions_with_buttons(tmp_path):
     assert not flow.step.done and "welchem Format" in flow.step.text  # no edition question
     flow = asyncio.run(tools.choose(flow.id, "f:epub"))
     assert flow.step.done and "Hier ist „Limit" in flow.step.text
+
+
+def test_book_library_lists_and_sends(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    lib = [{"id": 7, "title": "Limit", "author": {"authorName": "Frank Schätzing"}, "hasFiles": True,
+            "added": "2026-11-27T10:00:00Z"},
+           {"id": 8, "title": "Metro 2033", "authorTitle": "Dmitry Glukhovsky", "statistics": {"bookFileCount": 1},
+            "added": "2026-11-27T16:12:00Z"},
+           {"id": 9, "title": "Der Schwarm", "monitored": True}]
+
+    async def library(media="ebook"):
+        return lib
+
+    tools.chaptarr.library = library
+    asyncio.run(tools.run(ToolCall("1", "book_library", {}), CHAT))
+    flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
+    assert "Da sind 2 Bücher" in flow.step.text and "🔎 Noch gesucht (1): Der Schwarm" in flow.step.text
+    assert flow.step.text.index("Metro 2033") < flow.step.text.index("Limit")  # newest first
+    assert flow.step.buttons[0][0].startswith("📗 Metro 2033")
+    flow = asyncio.run(tools.choose(flow.id, "b1"))  # Limit, format epub is known
+    assert flow.step.done and "Hier ist „Limit" in flow.step.text
+    res = asyncio.run(tools.run(ToolCall("2", "book_library", {"query": "king"}), CHAT))
+    assert "keine Bücher" in res.final

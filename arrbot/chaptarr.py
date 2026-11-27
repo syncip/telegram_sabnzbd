@@ -30,6 +30,10 @@ class Chaptarr(_ArrBase):
     async def lookup(self, term: str, media: str = MEDIA) -> list[dict]:
         return await self._req("GET", "/book/lookup", params={"term": term, "mediaType": media}, timeout=60.0) or []
 
+    async def library(self, media: str = MEDIA) -> list[dict]:
+        """All books in Chaptarr (with and without file)."""
+        return await self._req("GET", "/book", params={"mediaType": media}, timeout=60.0) or []
+
     async def book(self, book_id: int) -> dict:
         return await self._req("GET", f"/book/{book_id}") or {}
 

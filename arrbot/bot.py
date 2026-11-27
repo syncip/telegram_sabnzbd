@@ -659,6 +659,8 @@ def build_app(cfg: Config) -> Application:
             await app.bot.send_message(query.message.chat_id, "⌛ Diese Auswahl ist abgelaufen. Schreib mir einfach nochmal.")
             return
         await show_flow(flow, ctx)
+        if flow.step.done:
+            agent.note(query.message.chat_id, flow.step.text)
         await deliver_outbox(query.message.chat_id, update.effective_user.id, ctx)  # e.g. a 📚 book file
 
     async def send_files(chat_id: int, files: list) -> None:
@@ -673,6 +675,7 @@ def build_app(cfg: Config) -> Application:
     async def book_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         """📚 Requested books that arrived in Chaptarr: send the file."""
         for chat_id, text, files in await tools.book_deliveries():
+            agent.note(chat_id, text)
             try:
                 await app.bot.send_message(chat_id, text)
                 await send_files(chat_id, files)

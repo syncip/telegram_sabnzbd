@@ -790,3 +790,18 @@ def test_search_command_is_watched_until_done(tmp_path):
     assert done == [(555, "SeasonSearch", {"seriesId": 5, "seasonNumber": 1},
                      "Season search completed. 0 reports downloaded.")]
     assert any("0 reports downloaded" in e.text for e in debuglog.LOG.entries(555))
+
+
+def test_agent_knows_what_it_sent_outside_the_chat(tmp_path):
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released")
+    llm = ScriptedLLM([Turn("assistant", text="ok"), Turn("assistant", text="ok")])
+    agent = Agent(llm, tools, 30, 40)
+    for i in range(5):
+        agent.note(42, f"Nachricht {i}")
+    agent.note(42, "📚 „Metro 2033 – Dmitry Glukhovsky“ ist da:")
+    asyncio.run(agent.handle(42, "schick mir das letzte Buch nochmal"))
+    sent = llm.seen[0][-1].text
+    assert "Metro 2033" in sent and "Nachricht 2" not in sent and sent.endswith("schick mir das letzte Buch nochmal")
+    asyncio.run(agent.handle(42, "danke"))
+    assert "Metro" not in llm.seen[1][-1].text  # said once, not again and again

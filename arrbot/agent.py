@@ -63,6 +63,7 @@ sollte ich setzen?" / "Empfiehl mir ein Limit": admin_limit_advice.
 - Vorschläge: Denk mit. WOBEI/WO/MIT WEM jemand schaut ("beim Sport", "auf dem Rad", "nebenbei", "zum \
 Einschlafen", "mit den Kindern") gehört in suggest situation – nicht seine Lieblingsgenres als genres raten. \
 Bücher/E-Books ("schick mir das Buch X", "ich will X lesen"): book – die Datei kommt in den Chat. \
+Welche Bücher schon da sind ("welche Bücher haben wir", "was ist heruntergeladen"): book_library. \
 Buch-EMPFEHLUNGEN ("Bücher wie X", "ähnliche Bücher", "was soll ich lesen"): book_suggest mit deinen eigenen \
 5 Vorschlägen – nicht book (das holt nur genau einen Titel) und nicht suggest (das ist für Filme/Serien). \
 Hörbücher kann der Bot (noch) nicht.
@@ -157,6 +158,15 @@ class Agent:
         # Short profile line for the user (~30 tokens), set by the bot. Goes in front of the message,
         # not into the system prompt, so the cached prompt prefix stays the same for everybody.
         self.context_for: Callable[[int], str] | None = None
+        # What the bot wrote outside the conversation (button results, "📚 ist da", notices): goes in front
+        # of the next message, so "schick mir das letzte Buch nochmal" knows what is meant.
+        self.notes: dict[int, list[str]] = {}
+
+    NOTES = 3
+
+    def note(self, chat_id: int, text: str) -> None:
+        if text.strip():
+            self.notes[chat_id] = (self.notes.get(chat_id, []) + [text.strip()[:300]])[-self.NOTES:]
 
     def reset(self, chat_id: int) -> None:
         self.convs.pop(chat_id, None)
@@ -195,6 +205,9 @@ class Agent:
 
             work = list(conv.history)
             ctx = self.context_for(user_id or chat_id) if self.context_for else ""
+            if notes := self.notes.pop(chat_id, None):
+                said = " | ".join(f"„{n}“" for n in notes)
+                ctx = (f"{ctx}\n" if ctx else "") + f"[Zuletzt hat der Bot dir außerhalb des Gesprächs geschrieben: {said}]"
             work.append(Turn(role="user", text=f"{ctx}\n{text}" if ctx else text))
             replies: list[str] = []
             try:

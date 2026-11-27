@@ -46,6 +46,10 @@ Außerdem:
     Calibre um (ist im Image) und schickt es, wenn es unter 50 MB bleibt; sonst kommt das Original.
   - **Empfehlungen:** „Ich mag die Metro-Bücher, empfiehl mir ähnliche“ – fünf Bücher mit kurzem Grund, je ein
     Button „📥 holen“.
+  - „Welche Bücher haben wir?“ – die Liste aus Chaptarr (neueste zuerst, was noch gesucht wird) mit Buttons
+    zum Schicken; „haben wir was von King?“ filtert.
+  - „Schick mir das letzte Buch nochmal“ versteht er: Was er ohne Nachfrage geschickt hat (Buch ist da,
+    Ergebnis nach einem Button), bekommt die KI bei deiner nächsten Nachricht mit.
 - **Bewerten:** Unter Vorschlägen „👎👁 Bewerten“: 👎 = nicht meins, 👁 = schon gesehen (dann fragt der
   Bot „Wie fandest du’s?“ mit ⭐1–5). Nach einem frisch zu Ende geschauten Film oder einer Serie in Plex
   fragt der Bot das auch (höchstens zwei am Tag, „🔕 Nicht mehr fragen“ beendet es). Sterne aus Plex zählen

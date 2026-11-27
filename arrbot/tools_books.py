@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 MAX_HITS = 5
 MAX_SUGGEST = 6
+LIST = 30  # books listed in "welche Bücher haben wir?"
 NOT_SET_UP = ("📚 Bücher sind nicht eingerichtet: Der Admin trägt CHAPTARR_URL und CHAPTARR_API_KEY "
               "in der docker-compose.yml ein.")
 
@@ -73,6 +74,36 @@ class BookTools:
         flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Buch", None), stage="book", data=data)
         flow.step = Step("\n".join(lines), [(f"📥 {i}. {b['title']}"[:60], f"s{i - 1}") for i, b in enumerate(picks, 1)]
                          + [("✖️ Keins", "no")])
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+        return Final("")
+
+    async def _t_book_library(self, chat_id: int, query: str | None = None) -> Final:
+        if self.chaptarr is None:
+            return Final(NOT_SET_UP)
+        q = (query or "").strip().lower()
+        every = [b for b in await self.chaptarr.library() if b.get("title")]
+        if q:
+            every = [b for b in every if q in books.label(b).lower()]
+        def has_file(b: dict) -> bool:
+            return bool(b.get("hasFiles") or (b.get("statistics") or {}).get("bookFileCount"))
+        have = sorted((b for b in every if has_file(b)), key=lambda b: b.get("added") or "", reverse=True)
+        wanted = [b for b in every if not has_file(b) and (b.get("monitored") or b.get("ebookMonitored"))]
+        if not have and not wanted:
+            return Final(f"📚 Zu „{query}“ habe ich keine Bücher." if q else "📚 Noch keine Bücher in Chaptarr.")
+        lines = [f"📚 Da sind {len(have)} Bücher" + (f" zu „{query}“" if q else "") + (" (neueste zuerst):" if have else ".")]
+        lines += [f"📗 {books.label(b)}" for b in have[:LIST]]
+        if len(have) > LIST:
+            lines.append(f"… und {len(have) - LIST} weitere – frag nach Titel oder Autor.")
+        if wanted:
+            lines.append(f"\n🔎 Noch gesucht ({len(wanted)}): " + ", ".join(b["title"] for b in wanted[:8])
+                         + (" …" if len(wanted) > 8 else ""))
+        if not have:
+            return Final("\n".join(lines))
+        lines.append("\nTippe eins an, dann schicke ich es dir:")
+        data = {"hits": have[:MAX_HITS * 2], "hit": None, "fmt": self._book_fmt(chat_id)}
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Buch", None), stage="book", data=data)
+        flow.step = Step("\n".join(lines), self._book_question(data).buttons)
         self.flows[flow.id] = flow
         self._outbox.setdefault(chat_id, []).append(flow)
         return Final("")

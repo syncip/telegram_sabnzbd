@@ -135,6 +135,12 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
                  "format": {"type": "string", "enum": ["epub", "pdf", "azw3"]}}, ["title"]),
         ),
         ToolSpec(
+            "book_library",
+            "Welche Bücher (E-Books) schon da sind: \"welche Bücher haben wir\", \"was ist heruntergeladen\", "
+            "\"haben wir was von King?\". query: Titel/Autor zum Filtern, sonst leer. Zeigt Buttons zum Schicken.",
+            obj({"query": {"type": "string"}}, []),
+        ),
+        ToolSpec(
             "book_suggest",
             "Buch-Empfehlungen: \"empfiehl mir Bücher wie X\", \"ähnliche Bücher wie die Metro-Reihe\", \"was "
             "soll ich lesen\". Du suchst selbst 5 passende, echte Bücher aus (andere Werke/Autoren als genannt, "

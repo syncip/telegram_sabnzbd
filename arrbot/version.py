@@ -14,9 +14,12 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.22.0"
+__version__ = "1.22.1"
 
 CHANGES = {
+    "1.22.1": "Der Bot weiß, was er außerhalb des Gesprächs geschickt hat (Ergebnis nach einem Button, „📚 … ist "
+              "da“): „Schick mir das letzte Buch nochmal“ klappt jetzt. „Welche Bücher haben wir?“ zeigt die "
+              "Bücher aus Chaptarr mit Buttons zum Schicken",
     "1.22.0": "📚 Bücher im Wunschformat: Der Bot fragt einmal EPUB, PDF oder Kindle, merkt es sich und wandelt "
               "um, wenn es das Buch so nicht gibt (Calibre im Image). Buch-Empfehlungen: „Bücher wie Metro“ – fünf "
               "Vorschläge mit Grund und Buttons zum Holen. Weniger Warnungen: Sonarr/Radarr/Chaptarr-Meldungen erst, "
