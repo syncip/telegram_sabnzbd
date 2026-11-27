@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.24.2"
+__version__ = "1.24.3"
 
 CHANGES = {
+    "1.24.3": "📚 /buecher erkennt Bücher auch, wenn Chaptarr sie unter anderer ID angelegt hat (Abgleich über Titel "
+              "und Autor), und sagt ehrlich, woran es hängt: ⬇️ lädt gerade, 📥 geladen, aber von Chaptarr noch "
+              "nicht übernommen, ⏳ noch nicht in Chaptarr. „Neu prüfen“ nimmt nur noch Bücher raus, die du schon "
+              "einmal bekommen hast und die jetzt weg sind",
     "1.24.2": "📚 Bücher kommen sofort: Während ein angefordertes Buch lädt, schaut der Bot alle 5 Sekunden in "
               "SABnzbd. Ist der Download fertig, stößt er den Import in Chaptarr an und schickt das Buch, sobald "
               "die Datei da ist – ohne Rundenwarten. Lädt nichts, fragt er auch nichts ab",

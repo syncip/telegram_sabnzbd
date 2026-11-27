@@ -55,10 +55,12 @@ Außerdem:
     fertig, stößt er sofort den Import in Chaptarr an und schickt das Buch, sobald die Datei da ist. Kann
     Chaptarr ein Buch nicht übernehmen (z. B. Pfad-Problem), sagt er Bescheid. Ohne laufenden Download fragt er
     nur alle 30 Sekunden nach.
-  - **/buecher** (oder „meine Bücher“): deine Bücher, 8 pro Seite – 📗 da, 🔎 wird gesucht, ⏳ Chaptarr bereitet
-    es vor. Mit „📥 3“ kommt Buch 3 nochmal, die Liste bleibt offen. „📚 Alle Bücher“ schaltet auf alles auf
+  - **/buecher** (oder „meine Bücher“): deine Bücher, 8 pro Seite – 📗 da, 🔎 wird gesucht, ⬇️ lädt gerade,
+    📥 geladen, aber von Chaptarr noch nicht übernommen (Import hängt – Chaptarr → Activity → Queue), ⏳ noch nicht
+    in Chaptarr. Mit „📥 3“ kommt Buch 3 nochmal, die Liste bleibt offen. „📚 Alle Bücher“ schaltet auf alles auf
     dem Server um; „haben wir was von King?“ bzw. `/buecher King` filtert. „🔄 Neu prüfen“ lässt Chaptarr
-    die Ordner neu einlesen, prüft die Dateien und nimmt gelöschte Bücher aus deiner Liste (auch: „ich habe
+    die Ordner neu einlesen, prüft die Dateien und nimmt gelöschte Bücher (die du schon einmal bekommen hast)
+    aus deiner Liste (auch: „ich habe
     Bücher gelöscht“); „🧹 Liste leeren“ setzt deine Liste zurück (die Bücher bleiben auf dem Server).
   - `/check` zeigt, ob der Bot die Bücher-Dateien lesen kann (sonst mit Tipp für `BOOK_PATHS`) und ob Calibre da ist.
   - „Schick mir das letzte Buch nochmal“ versteht er: Was er ohne Nachfrage geschickt hat (Buch ist da,

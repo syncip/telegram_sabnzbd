@@ -84,6 +84,32 @@ def dedupe(hits: list[dict]) -> list[dict]:
     return out
 
 
+def lib_index(lib: list[dict]) -> dict:
+    return {"id": {b["id"]: b for b in lib if b.get("id")},
+            "foreign": {b["foreignBookId"]: b for b in lib if b.get("foreignBookId")},
+            "key": {_key(b): b for b in lib}, "lib": lib}
+
+
+def lib_find(ix: dict, book_id: int | None = None, foreign: str | None = None, title: str = "",
+             author: str = "") -> dict | None:
+    """A book in Chaptarr's library: by id, by foreign id, else by title (+ author). Requests that waited for
+    Chaptarr's metadata often end up under another id, so the title must do."""
+    b = (ix["id"].get(book_id) if book_id else None) or (ix["foreign"].get(foreign) if foreign else None)
+    if b:
+        return b
+    t, a = _key({"title": title, "authorTitle": author})
+    if not t:
+        return None
+    if b := ix["key"].get((t, a)):
+        return b
+    last = a.split()[-1] if a else ""
+    for b in ix["lib"]:  # "Pony Show" vs "Pony Show: Roman", author spelled differently
+        bt, ba = _key(b)
+        if (bt == t or bt.startswith(t + " ") or t.startswith(bt + " ")) and (not last or not ba or last in ba):
+            return b
+    return None
+
+
 def button(i: int, hit: dict) -> str:
     """Short button text; the full title is in the message (Telegram cuts long buttons)."""
     title = hit.get("title") or "?"
@@ -207,15 +233,29 @@ class BookHistory:
         except (OSError, ValueError):
             self.by_chat = {}
 
+    def mark_sent(self, chat_id: int, book_id: int, title: str = "") -> None:
+        """Got the file: from now on "gone" means deleted (see the shelf's rescan)."""
+        with self._lock:
+            for e in self.by_chat.get(str(chat_id), []):
+                if (book_id and e.get("id") == book_id) or (title and e.get("title") and e["title"] in title):
+                    e["sent"] = True
+                    if book_id and not e.get("id"):
+                        e["id"] = book_id
+            self.path.write_text(json.dumps(self.by_chat, ensure_ascii=False), encoding="utf-8")
+
     def add(self, chat_id: int, hit: dict, book_id: int | None = None) -> None:
         entry = {"id": book_id or hit.get("id") or 0, "title": hit.get("title") or "?",
                  "author": (hit.get("author") or {}).get("authorName") or hit.get("authorTitle") or "",
                  "foreign": hit.get("foreignBookId") or "", "at": datetime.now(timezone.utc).isoformat()}
         with self._lock:
-            old = [e for e in self.by_chat.get(str(chat_id), [])
-                   if not ((entry["id"] and e.get("id") == entry["id"]) or
-                           (entry["foreign"] and e.get("foreign") == entry["foreign"]) or
-                           (e.get("title"), e.get("author")) == (entry["title"], entry["author"]))]
+            def same(e: dict) -> bool:
+                return bool((entry["id"] and e.get("id") == entry["id"]) or
+                            (entry["foreign"] and e.get("foreign") == entry["foreign"]) or
+                            (e.get("title"), e.get("author")) == (entry["title"], entry["author"]))
+            before = self.by_chat.get(str(chat_id), [])
+            if any(e.get("sent") for e in before if same(e)):
+                entry["sent"] = True
+            old = [e for e in before if not same(e)]
             self.by_chat[str(chat_id)] = ([entry] + old)[:self.MAX]
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self.by_chat, ensure_ascii=False), encoding="utf-8")

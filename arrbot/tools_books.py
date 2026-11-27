@@ -31,8 +31,9 @@ RECENT_DAYS = 550  # "aktuell/neu": out in the last ~18 months
 FOLLOW_SECONDS = 900  # after SABnzbd finished: look for the file this long (unpacking, import)
 NUDGE_SECONDS = 15  # and ask Chaptarr to import this often meanwhile
 PAGE = 8  # books per page in /buecher
-STATE = {"have": "📗", "search": "🔎", "prep": "⏳"}
-STATE_TEXT = {"search": " – wird gesucht", "prep": " – Chaptarr bereitet es vor"}
+STATE = {"have": "📗", "search": "🔎", "loading": "⬇️", "import": "📥", "prep": "⏳"}
+STATE_TEXT = {"search": " – wird gesucht", "loading": " – lädt gerade",
+              "import": " – geladen, Chaptarr hat es noch nicht übernommen", "prep": " – noch nicht in Chaptarr"}
 NOT_SET_UP = ("📚 Bücher sind nicht eingerichtet: Der Admin trägt CHAPTARR_URL und CHAPTARR_API_KEY "
               "in der docker-compose.yml ein.")
 
@@ -174,22 +175,42 @@ class BookTools:
         if d["mode"] == "mine" and not mine:
             d["mode"], d["note"] = "all", "Von dir habe ich noch keine Bücher – hier alles auf dem Server."
         if d["mode"] == "mine":
-            by_id = {b.get("id"): b for b in lib}
-            by_foreign = {b.get("foreignBookId"): b for b in lib if b.get("foreignBookId")}
+            ix, queue = books.lib_index(lib), await self._queue_by_book()
             for e in mine:
-                b = by_id.get(e.get("id")) or by_foreign.get(e.get("foreign"))
+                b = books.lib_find(ix, e.get("id"), e.get("foreign"), e.get("title") or "", e.get("author") or "")
                 hit = b or {"title": e.get("title"), "authorTitle": e.get("author")}
-                state = "have" if b and books.has_file(b) else ("search" if b else "prep")
-                entries.append({"hit": hit, "state": state})
+                entries.append({"hit": hit, "state": self._shelf_state(b, queue)})
         else:
             have = sorted((b for b in lib if books.has_file(b)), key=lambda b: b.get("added") or "", reverse=True)
             wanted = [b for b in lib if not books.has_file(b) and (b.get("monitored") or b.get("ebookMonitored"))]
-            entries = [{"hit": b, "state": "have"} for b in have] + [{"hit": b, "state": "search"} for b in wanted]
+            queue = await self._queue_by_book()
+            entries = [{"hit": b, "state": "have"} for b in have] + [
+                {"hit": b, "state": self._shelf_state(b, queue)} for b in wanted]
         q = d["query"].lower()
         if q:
             entries = [e for e in entries if q in books.label(e["hit"]).lower()]
         d["shelf"] = entries
         d["page"] = 0
+
+    async def _queue_by_book(self) -> dict[int, dict]:
+        try:
+            return {q["bookId"]: q for q in await self.chaptarr.queue() if q.get("bookId")}
+        except ArrError as e:
+            log.info("Chaptarr-Warteschlange: %s", e)
+            return {}
+
+    @staticmethod
+    def _shelf_state(b: dict | None, queue: dict[int, dict]) -> str:
+        if b is None:
+            return "prep"
+        if books.has_file(b):
+            return "have"
+        q = queue.get(b.get("id"))
+        if q is None:
+            return "search"
+        state = (q.get("trackedDownloadState") or "").lower()
+        return "loading" if state in ("", "downloading") and (q.get("status") or "").lower() != "completed" \
+            else "import"
 
     async def _shelf_rescan(self, chat_id: int) -> str:
         """Let Chaptarr rescan its folders, check the files on disk and drop deleted books from the user's list."""
@@ -197,11 +218,7 @@ class BookTools:
             await self.chaptarr._req("POST", "/command", json={"name": "RescanFolders"})
         except ArrError as e:
             log.info("Chaptarr RescanFolders: %s", e)
-        lib = [b for b in await self.chaptarr.library() if b.get("title")]
-        by_id = {b.get("id"): b for b in lib}
-        by_foreign = {b.get("foreignBookId"): b for b in lib if b.get("foreignBookId")}
-        waiting = {p.book_id for p in (self.books.items if self.books is not None else [])}
-        waiting_titles = {p.title for p in (self.books.items if self.books is not None else [])}
+        ix = books.lib_index([b for b in await self.chaptarr.library() if b.get("title")])
         mine = self.book_history.of(chat_id) if self.book_history is not None else []
 
         async def on_disk(b: dict) -> bool | None:
@@ -213,19 +230,19 @@ class BookTools:
             return any(os.path.isfile(books.map_path(f.get("path") or "", self.book_paths)) for f in files) \
                 if files else False
 
-        found = [by_id.get(e.get("id")) or by_foreign.get(e.get("foreign")) for e in mine]
+        found = [books.lib_find(ix, e.get("id"), e.get("foreign"), e.get("title") or "", e.get("author") or "")
+                 for e in mine]
         disk = await asyncio.gather(*(on_disk(b) if b and books.has_file(b) else asyncio.sleep(0, None)
                                       for b in found))
         trust_disk = any(x is True for x in disk)  # at least one readable file: the mapping works
         keep, gone = [], []
         for e, b, there in zip(mine, found, disk):
-            pending = (b and b.get("id") in waiting) or any(e.get("title", "") in t for t in waiting_titles)
             if b and books.has_file(b) and (there is not False or not trust_disk):
                 keep.append(e)
-            elif pending:
-                keep.append(e)  # still on its way
+            elif e.get("sent"):
+                gone.append(e.get("title") or "?")  # you had it, now it is gone: deleted
             else:
-                gone.append(e.get("title") or "?")
+                keep.append(e)  # never arrived: still on its way (or stuck – the list shows why)
         if self.book_history is not None and gone:
             self.book_history.keep(chat_id, keep)
         if not gone:
@@ -420,6 +437,8 @@ class BookTools:
                 send, problems = await books.prepare(files, self.book_paths, fmt, self._cache_dir())
                 if send:
                     self._outbox.setdefault(chat_id, []).append(View(chat_id, "file", arg=send))
+                    if self.book_history is not None:
+                        self.book_history.mark_sent(chat_id, book_id)
                     if offer and fmt:
                         self._offer_other_format(chat_id, hit, fmt)
                     return f"📚 Hier ist „{name}“." + (f"\n⚠️ {problems[0]}" if problems else "")
@@ -516,12 +535,19 @@ class BookTools:
             return out
         if only is None:
             out += await self._book_queue_check()
+        ix: dict | None = None
         for p in list(self.books.items):
             if only is not None and p.book_id not in only:
                 continue
             try:
                 if not p.book_id:  # waited for Chaptarr's metadata: is it in the library now?
-                    if book_id := await self.chaptarr.find(p.ref):
+                    book_id = await self.chaptarr.find(p.ref)
+                    if not book_id:  # added under another id: by title
+                        ix = ix or books.lib_index(await self.chaptarr.library())
+                        b = books.lib_find(ix, title=p.ref.get("title") or p.title.split(" – ")[0],
+                                           author=p.title.split(" – ")[1] if " – " in p.title else "")
+                        book_id = int(b["id"]) if b and b.get("id") else None
+                    if book_id:
                         await self.chaptarr.want(book_id)
                         self.books.found(p, book_id)
                     elif self.books.expired(p):
@@ -538,6 +564,8 @@ class BookTools:
                                                      self._cache_dir())
                 self.books.remove(p)
                 if send:
+                    if self.book_history is not None:
+                        self.book_history.mark_sent(p.chat_id, p.book_id, p.title)
                     out.append((p.chat_id, f"📚 „{p.title}“ ist da:" + (f"\n⚠️ {problems[0]}" if problems else ""), send))
                 else:
                     out.append((p.chat_id, f"⚠️ „{p.title}“ ist da, aber ich kann es nicht schicken: {problems[0]}", []))

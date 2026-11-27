@@ -424,6 +424,8 @@ def test_shelf_rescan_drops_deleted_and_reset(tmp_path):
     tools.chaptarr._req = req
     tools.book_history.by_chat[str(CHAT)][1]["id"] = 8  # "Datei weg"
     tools.book_history.by_chat[str(CHAT)][0]["id"] = 7  # "Limit"
+    tools.book_history.mark_sent(CHAT, 8)  # had "Datei weg" and "Weg" once: gone now = deleted
+    tools.book_history.mark_sent(CHAT, 0, "Weg")
     asyncio.run(tools.run(ToolCall("1", "book_library", {"mine": True}), CHAT))
     flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
     assert ("🔄 Neu prüfen", "rescan") in flow.step.buttons and ("🧹 Liste leeren", "reset") in flow.step.buttons
@@ -472,3 +474,40 @@ def test_book_sent_right_after_sabnzbd_finished(tmp_path):
     (chat, text, files), = asyncio.run(tools.book_fast())
     assert "ist da" in text and [n for _, n in files] == ["schwarm.epub"]
     assert tools._follow() == ({}, {})  # done: the fast job is idle again
+
+
+def test_shelf_finds_books_by_title_and_shows_why_not_there(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.book_history = books.BookHistory(str(tmp_path))
+    for t, a in (("Die Briefeschreiberin", "Virginia Evans"), ("Pony Show", "Juli Zeh"), ("Broder", "Dörte Hansen"),
+                 ("Unbekannt", "X")):
+        tools.book_history.add(CHAT, {"title": t, "author": {"authorName": a}})
+    lib = [{"id": 21, "title": "Pony Show: Roman", "authorTitle": "Zeh, Juli Zeh", "hasFiles": False},
+           {"id": 22, "title": "Die Briefeschreiberin", "authorTitle": "Virginia Evans"},
+           {"id": 23, "title": "Broder", "authorTitle": "hansen, dörte Broder", "hasFiles": True}]
+    real = tools.chaptarr._req
+
+    async def req(method, path, **kw):
+        if path == "/book" and method == "GET" and "titleSlug" not in (kw.get("params") or {}):
+            return lib
+        if path == "/queue":
+            return {"records": [{"bookId": 22, "status": "completed", "trackedDownloadState": "importBlocked"},
+                                {"bookId": 21, "status": "downloading", "trackedDownloadState": "downloading"}]}
+        if path == "/command":
+            return {}
+        if path == "/bookfile":
+            return [{"path": "/books/Frank/limit.epub"}]
+        return await real(method, path, **kw)
+
+    tools.chaptarr._req = req
+    asyncio.run(tools.run(ToolCall("1", "book_library", {"mine": True}), CHAT))
+    t = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow)).step.text
+    assert "📥 Die Briefeschreiberin – Virginia Evans – geladen, Chaptarr hat es noch nicht übernommen" in t
+    assert "⬇️ Pony Show: Roman" in t and "lädt gerade" in t
+    assert "📗 Broder" in t and "⏳ Unbekannt – X – noch nicht in Chaptarr" in t
+    # rescan: nothing was ever sent, so nothing counts as deleted
+    asyncio.run(tools.run(ToolCall("2", "book_library", {"mine": True, "check": True}), CHAT))
+    assert len(tools.book_history.of(CHAT)) == 4
+    tools.book_history.mark_sent(CHAT, 0, "Unbekannt – X")  # had it once, now not in Chaptarr: deleted
+    asyncio.run(tools.run(ToolCall("3", "book_library", {"mine": True, "check": True}), CHAT))
+    assert [e["title"] for e in tools.book_history.of(CHAT)] == ["Broder", "Pony Show", "Die Briefeschreiberin"]
