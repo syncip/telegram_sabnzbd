@@ -64,8 +64,11 @@ sollte ich setzen?" / "Empfiehl mir ein Limit": admin_limit_advice.
 Einschlafen", "mit den Kindern") gehört in suggest situation – nicht seine Lieblingsgenres als genres raten. \
 Bücher/E-Books ("schick mir das Buch X", "ich will X lesen"): book – die Datei kommt in den Chat. \
 Welche Bücher schon da sind ("welche Bücher haben wir"): book_library; "meine Bücher": book_library mine=true. \
-Buch-EMPFEHLUNGEN ("Bücher wie X", "ähnliche Bücher", "was soll ich lesen"): book_suggest mit deinen eigenen \
-5 Vorschlägen – nicht book (das holt nur genau einen Titel) und nicht suggest (das ist für Filme/Serien). \
+Buch-EMPFEHLUNGEN ("Bücher wie X", "ähnliche Bücher", "was soll ich lesen"): book_suggest mit 8–10 eigenen \
+Vorschlägen (der Bot prüft sie und zeigt 5) – nicht book (holt genau einen Titel), nicht suggest (Filme/Serien). \
+Achte auf die mitgegebenen "Bücher des Nutzers": nichts davon nochmal, aber ihren Geschmack nutzen. \
+"Aktuelle/neue" Bücher oder "was ist gerade beliebt": ERST book_charts (kind new + subject bzw. trending), \
+dann book_suggest mit recent=true und Titeln aus dieser Liste. \
 Hörbücher kann der Bot (noch) nicht.
 - Unklar, was gemeint ist (welcher Titel, Film oder Serie, welche Meldungen, wie lange)? Stell EINE kurze Rückfrage \
 statt zu raten. Klar genug (ein passender Treffer, eindeutige Bitte)? Direkt machen, nicht nachfragen.
@@ -158,6 +161,8 @@ class Agent:
         # Short profile line for the user (~30 tokens), set by the bot. Goes in front of the message,
         # not into the system prompt, so the cached prompt prefix stays the same for everybody.
         self.context_for: Callable[[int], str] | None = None
+        # More context for some messages only (chat id, text) -> line, e.g. the user's books for book wishes
+        self.extra_context: Callable[[int, str], str] | None = None
         # What the bot wrote outside the conversation (button results, "📚 ist da", notices): goes in front
         # of the next message, so "schick mir das letzte Buch nochmal" knows what is meant.
         self.notes: dict[int, list[str]] = {}
@@ -205,6 +210,8 @@ class Agent:
 
             work = list(conv.history)
             ctx = self.context_for(user_id or chat_id) if self.context_for else ""
+            if self.extra_context and (extra := self.extra_context(chat_id, text)):
+                ctx = (f"{ctx}\n" if ctx else "") + extra
             if notes := self.notes.pop(chat_id, None):
                 said = " | ".join(f"„{n}“" for n in notes)
                 ctx = (f"{ctx}\n" if ctx else "") + f"[Zuletzt hat der Bot dir außerhalb des Gesprächs geschrieben: {said}]"

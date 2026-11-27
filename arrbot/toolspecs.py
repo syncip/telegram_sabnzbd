@@ -142,12 +142,23 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             obj({"query": {"type": "string"}, "mine": {"type": "boolean"}}, []),
         ),
         ToolSpec(
+            "book_charts",
+            "Fakten für Buch-Empfehlungen (Open Library): kind=new: Neuerscheinungen der letzten 2 Jahre, die es auf "
+            "Deutsch gibt, subject: crime, thriller, mystery, science_fiction, fantasy, romance, horror, "
+            "historical_fiction, biography, humor, young_adult, children, dystopia, nonfiction; kind=trending: was "
+            "gerade viel gelesen wird (period daily/weekly/monthly/yearly). Danach book_suggest mit recent=true.",
+            obj({"kind": {"type": "string", "enum": ["new", "trending"]}, "subject": {"type": "string"},
+                 "period": {"type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]}}, ["kind"]),
+        ),
+        ToolSpec(
             "book_suggest",
             "Buch-Empfehlungen: \"empfiehl mir Bücher wie X\", \"ähnliche Bücher wie die Metro-Reihe\", \"was "
-            "soll ich lesen\". Du suchst selbst 5 passende, echte Bücher aus (andere Werke/Autoren als genannt, "
-            "außer gewünscht; Reihen mit Band 1), je mit einem kurzen Grund auf Deutsch. intro: ein Satz, worauf du "
-            "geachtet hast. Der Bot zeigt sie mit Buttons zum Holen.",
-            obj({"intro": {"type": "string"},
+            "soll ich lesen\". Du suchst 8–10 passende, echte Bücher aus (andere Werke/Autoren als genannt, außer "
+            "gewünscht; Reihen mit Band 1; nichts aus den Büchern des Nutzers), je mit kurzem Grund auf Deutsch. "
+            "Der Bot prüft jeden Titel in Chaptarr, lässt Erfundenes und Bekanntes weg und zeigt 5 mit Buttons. "
+            "recent=true bei \"aktuell/neu\": nur, was in den letzten ~18 Monaten erschienen ist. intro: ein Satz, "
+            "worauf du geachtet hast.",
+            obj({"intro": {"type": "string"}, "recent": {"type": "boolean"},
                  "books": {"type": "array", "items": obj({"title": {"type": "string"}, "author": {"type": "string"},
                                                           "why": {"type": "string"}}, ["title", "author", "why"])}},
                 ["books"]),

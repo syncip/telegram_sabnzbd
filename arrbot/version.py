@@ -14,9 +14,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.23.0"
+__version__ = "1.24.0"
 
 CHANGES = {
+    "1.24.0": "📚 Bessere Buch-Empfehlungen: jeder Vorschlag wird in Chaptarr geprüft (Erfundenes fliegt raus, echtes "
+              "Jahr, 📗 = schon da), deine Bücher werden nicht nochmal vorgeschlagen und prägen den Geschmack, "
+              "„aktuelle Krimis“ nutzt Neuerscheinungen und Trends von Open Library und zeigt nur, was in den "
+              "letzten ~18 Monaten erschienen ist. Fertige Bücher kommen schneller: Prüfung alle 30 s, der Bot "
+              "stößt den Import in Chaptarr an und sagt Bescheid, wenn Chaptarr ein Buch nicht übernehmen kann",
     "1.23.0": "📚 /buecher: deine Bücher übersichtlich mit Seiten (8 pro Seite), 📗 da / 🔎 wird gesucht / ⏳ wird "
               "vorbereitet, 📥-Nummern-Buttons zum erneuten Schicken – die Liste bleibt danach offen; Umschalten auf "
               "alle Bücher auf dem Server. /check zeigt, ob der Bot die Bücher-Dateien lesen kann (mit Tipp für "

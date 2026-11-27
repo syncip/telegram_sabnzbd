@@ -249,7 +249,8 @@ class Pending:
     title: str
     at: str
     fmt: str = ""
-    ref: dict = field(default_factory=dict)  # book_id 0 = not in Chaptarr yet: title/titleSlug/foreignBookId
+    ref: dict = field(default_factory=dict)
+    warned: bool = False  # told the user that Chaptarr cannot import it  # book_id 0 = not in Chaptarr yet: title/titleSlug/foreignBookId
 
     @property
     def ident(self) -> tuple:
@@ -283,6 +284,11 @@ class PendingBooks:
     def remove(self, p: Pending) -> None:
         with self._lock:
             self.items = [x for x in self.items if x.ident != p.ident]
+            self._save()
+
+    def warn(self, p: Pending) -> None:
+        with self._lock:
+            p.warned = True
             self._save()
 
     def found(self, p: Pending, book_id: int) -> None:

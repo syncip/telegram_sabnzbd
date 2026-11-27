@@ -212,7 +212,8 @@ def test_book_suggestions_with_buttons(tmp_path):
              {"title": "Der Schwarm", "author": "Frank Schätzing", "why": "Ozean statt Tunnel"}]
     asyncio.run(tools.run(ToolCall("1", "book_suggest", {"intro": "Endzeit und Spannung:", "books": picks}), CHAT))
     flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
-    assert "1. Limit – Frank Schätzing\n   Großer Thriller" in flow.step.text
+    assert "1. 📗 Limit – Frank Schätzing\n   Großer Thriller" in flow.step.text  # checked in Chaptarr: there
+    assert "2. Der Schwarm – Frank Schätzing (2004)" in flow.step.text
     assert [v for _, v in flow.step.buttons] == ["s0", "s1", "no"]
     flow = asyncio.run(tools.choose(flow.id, "s0"))
     assert not flow.step.done and "welchem Format" in flow.step.text  # no edition question
@@ -312,3 +313,63 @@ def test_metadata_still_prepared_then_found(tmp_path):
     state["file"] = True
     (chat, text, files), = asyncio.run(tools.book_deliveries())
     assert "ist da" in text and [n for _, n in files] == ["schwarm.epub"]
+
+
+def test_suggestions_checked_mine_left_out_recent_filtered(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.book_history = books.BookHistory(str(tmp_path))
+    tools.book_history.add(CHAT, {"title": "Limit", "author": {"authorName": "Frank Schätzing"}})
+    picks = [{"title": "Limit", "author": "Frank Schätzing", "why": "a"},
+             {"title": "Erfundenes Buch", "author": "Niemand", "why": "b"},
+             {"title": "Der Schwarm", "author": "Frank Schätzing", "why": "c"}]
+    asyncio.run(tools.run(ToolCall("1", "book_suggest", {"books": picks}), CHAT))
+    flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
+    assert "1. Der Schwarm" in flow.step.text and "Limit" not in flow.step.text
+    assert "(2 weitere habe ich weggelassen: gibt es so nicht, hast du schon.)" in flow.step.text
+    res = asyncio.run(tools.run(ToolCall("2", "book_suggest", {"books": picks, "recent": True}), CHAT))
+    assert "nicht neu genug" in res.final  # Der Schwarm is from 2004
+    ctx = tools.book_context(CHAT, "empfiehl mir ein Buch")
+    assert ctx.startswith("[Bücher des Nutzers") and "Limit – Frank Schätzing" in ctx
+    assert tools.book_context(CHAT, "lad Dune 2") == ""  # not for films: saves tokens
+
+
+def test_book_charts_from_open_library():
+    import httpx as hx
+
+    from arrbot import booklists
+
+    def handler(req):
+        if req.url.path == "/search.json":
+            assert "subject:crime" in req.url.params["q"] and "language:ger" in req.url.params["q"]
+            return hx.Response(200, json={"docs": [
+                {"title": "Neu", "author_name": ["A"], "first_publish_year": 2026},
+                {"title": "Alt", "author_name": ["B"], "first_publish_year": 1999}]})
+        return hx.Response(200, json={"works": [{"title": "Trend", "author_name": ["C"], "language": ["ger"]},
+                                                {"title": "Nur Englisch", "language": ["eng"]}]})
+
+    t = hx.MockTransport(handler)
+    assert [b["title"] for b in asyncio.run(booklists.new_books("krimi", transport=t))] == ["Neu"]
+    assert [b["title"] for b in asyncio.run(booklists.trending(transport=t))] == ["Trend"]
+
+
+def test_downloaded_book_import_nudged_and_blocked_told(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.books.add(11, CHAT, "Der Schwarm")
+    sent = []
+    queue = [{"bookId": 11, "status": "completed", "trackedDownloadState": "importBlocked",
+              "statusMessages": [{"messages": ["Not a valid ebook"]}]}]
+    real = tools.chaptarr._req
+
+    async def req(method, path, **kw):
+        if path == "/queue":
+            return {"records": queue}
+        if path == "/command":
+            sent.append(kw.get("json"))
+            return {}
+        return await real(method, path, **kw)
+
+    tools.chaptarr._req = req
+    (chat, text, files), = asyncio.run(tools.book_deliveries())
+    assert "kann es nicht übernehmen: Not a valid ebook" in text and files == []
+    assert sent == [{"name": "RefreshMonitoredDownloads"}]
+    assert asyncio.run(tools.book_deliveries()) == []  # told once

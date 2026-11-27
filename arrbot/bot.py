@@ -225,6 +225,7 @@ def build_app(cfg: Config) -> Application:
     users.on_role = on_role
     background: set[asyncio.Task] = set()  # keeps running Plex links alive
     agent.context_for = lambda uid: profile_db.profile(uid).context_line()
+    agent.extra_context = tools.book_context  # 📚 the user's books, only for messages about books
 
     def on_finish(t, title: str) -> None:
         kind = "movie" if t.service == "radarr" else "series"
@@ -2153,7 +2154,7 @@ def build_app(cfg: Config) -> Application:
         application.job_queue.run_daily(unusual_job, time(20, 0, tzinfo=tz), name="auffaellig")
         application.job_queue.run_daily(watch_ask_job, time(19, 0, tzinfo=tz), name="gesehen")
         if tools.chaptarr is not None:
-            application.job_queue.run_repeating(book_job, interval=120, first=90, name="buecher")
+            application.job_queue.run_repeating(book_job, interval=30, first=30, name="buecher")
         application.job_queue.run_repeating(save_buttons_job, interval=300, first=300, name="buttons")
         if cfg.site_hours > 0:
             application.job_queue.run_repeating(sites_job, interval=cfg.site_hours * 3600, first=900, name="seiten")

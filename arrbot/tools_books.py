@@ -6,20 +6,26 @@ A mixin of ToolRunner (arrbot/tools.py): self is the ToolRunner.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 
-from . import books
+import httpx
+
+from . import booklists, books, toolgroups
 from .arr import ArrError
 from .tooltypes import Candidate, Final, Flow, Step, View
 
 log = logging.getLogger(__name__)
 
 MAX_HITS = 5
-MAX_SUGGEST = 6
+MAX_SUGGEST = 5  # shown
+MAX_PICKS = 10  # checked (the AI may send more, some drop out)
+RECENT_DAYS = 550  # "aktuell/neu": out in the last ~18 months
 PAGE = 8  # books per page in /buecher
 STATE = {"have": "📗", "search": "🔎", "prep": "⏳"}
 STATE_TEXT = {"search": " – wird gesucht", "prep": " – Chaptarr bereitet es vor"}
@@ -63,17 +69,64 @@ class BookTools:
             return Final(await self._book_pick(chat_id, hits[0], data["fmt"]))
         return self._book_flow(chat_id, data)
 
-    async def _t_book_suggest(self, chat_id: int, books_: list | None = None, intro: str = "", **kw: Any) -> Final:
-        picks = [b for b in (books_ or kw.get("books") or []) if isinstance(b, dict) and b.get("title")][:MAX_SUGGEST]
+    async def _book_verify(self, pick: dict) -> dict | None:
+        """The Chaptarr entry of a suggestion, or None if there is no such book (the AI made it up)."""
+        title, author = books._key({"title": pick.get("title"), "authorTitle": pick.get("author") or ""})
+        last = author.split()[-1] if author else ""
+        try:
+            hits = await self.chaptarr.lookup(f"{pick['title']} {pick.get('author') or ''}".strip())
+        except ArrError as e:
+            log.info("Vorschlag %s: %s", pick.get("title"), e)
+            return None
+        for h in books.dedupe([h for h in hits if h.get("title")]):
+            ht, ha = books._key(h)
+            if (title in ht or ht in title) and (not last or last in ha):
+                return h
+        return None
+
+    async def _t_book_suggest(self, chat_id: int, books_: list | None = None, intro: str = "", recent: bool = False,
+                              **kw: Any) -> Final:
+        picks = [b for b in (books_ or kw.get("books") or []) if isinstance(b, dict) and b.get("title")][:MAX_PICKS]
         if not picks:
             return Final("🤷 Mir fällt gerade nichts Passendes ein – nenn mir ein Buch oder einen Autor, den du magst.")
+        dropped = {"fake": 0, "mine": 0, "old": 0}
+        if self.chaptarr is not None:
+            found = await asyncio.gather(*(self._book_verify(p) for p in picks))
+            mine = {books._key({"title": e.get("title"), "authorTitle": e.get("author")})[0]
+                    for e in (self.book_history.of(chat_id) if self.book_history is not None else [])}
+            cutoff = (datetime.now() - timedelta(days=RECENT_DAYS)).strftime("%Y-%m-%d")
+            kept = []
+            for p, h in zip(picks, found):
+                if h is None:
+                    dropped["fake"] += 1
+                elif books._key(h)[0] in mine:
+                    dropped["mine"] += 1
+                elif recent and (h.get("releaseDate") or "")[:10] < cutoff:
+                    dropped["old"] += 1
+                else:
+                    kept.append(dict(p, hit=h))
+            picks = kept[:MAX_SUGGEST]
+        else:
+            picks = picks[:MAX_SUGGEST]
+        why_not = ", ".join(t for t, n in (("gibt es so nicht", dropped["fake"]), ("hast du schon", dropped["mine"]),
+                                            ("nicht neu genug", dropped["old"])) if n)
+        if not picks:
+            return Final("🤷 Davon blieb nichts übrig (" + (why_not or "keine Treffer") + "). Sag mir genauer, was du "
+                         "suchst – oder ein Buch, das dir gefallen hat.")
         lines = [f"📚 {intro.strip() or 'Das könnte dir gefallen:'}", ""]
         for i, b in enumerate(picks, 1):
-            lines.append(f"{i}. {b['title']} – {b.get('author') or '?'}" + (f"\n   {b['why']}" if b.get("why") else ""))
+            h = b.get("hit") or {}
+            year = (h.get("releaseDate") or "")[:4]
+            name = books.label(h) if h else f"{b['title']} – {b.get('author') or '?'}"
+            if year.isdigit() and f"({year})" not in name:
+                name += f" ({year})"
+            lines.append(f"{i}. " + ("📗 " if h.get("id") else "") + name + (f"\n   {b['why']}" if b.get("why") else ""))
+        if sum(dropped.values()):
+            lines.append(f"\n({sum(dropped.values())} weitere habe ich weggelassen: {why_not}.)")
         if self.chaptarr is None:
             return Final("\n".join(lines))
         data = {"suggest": picks, "hits": [], "hit": None, "fmt": self._book_fmt(chat_id)}
-        lines.append("\nWelches soll ich dir holen?")
+        lines.append("\nWelches soll ich dir holen? (📗 = schon da)")
         flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Buch", None), stage="book", data=data)
         flow.step = Step("\n".join(lines), [(f"📥 {i}. {b['title']}"[:60], f"s{i - 1}") for i, b in enumerate(picks, 1)]
                          + [("✖️ Keins", "no")])
@@ -171,6 +224,26 @@ class BookTools:
         return [f"📚 Bücher-Ordner: ❌ nicht lesbar. Chaptarr sagt {path}, der Bot findet {local} nicht. "
                 f"Bücher-Ordner im Bot einbinden und BOOK_PATHS setzen, z. B. \"{folder}=/books\"."] + out
 
+    async def _t_book_charts(self, chat_id: int, kind: str = "new", subject: str | None = None,
+                             period: str = "weekly") -> list[dict]:
+        """Facts for the AI: new releases of a genre in German, or what is trending (Open Library)."""
+        try:
+            if kind == "trending":
+                return await booklists.trending(period)
+            return await booklists.new_books(subject)
+        except (httpx.HTTPError, ValueError) as e:
+            return [{"error": f"Open Library antwortet nicht ({e}) – nimm dein eigenes Wissen, recent=true"}]
+
+    def book_context(self, chat_id: int, text: str) -> str:
+        """The user's books (titles only, ~100 tokens), only in front of messages about books."""
+        if self.book_history is None or "books" not in toolgroups.groups_for(text):
+            return ""
+        mine = self.book_history.of(chat_id)[:20]
+        if not mine:
+            return ""
+        return "[Bücher des Nutzers, neueste zuerst: " + "; ".join(
+            f"{e.get('title')}" + (f" – {e['author']}" if e.get("author") else "") for e in mine) + "]"
+
     def _book_question(self, data: dict) -> Step:
         hits = data["hits"]
         if data["hit"] is None:
@@ -198,12 +271,14 @@ class BookTools:
             pass
         elif value.startswith("s") and 0 <= idx < len(d.get("suggest") or []):
             b = d["suggest"][idx]
-            try:
-                hits = [h for h in await self.chaptarr.lookup(f"{b['title']} {b.get('author') or ''}".strip())
-                        if h.get("title")]
-            except ArrError as e:
-                self.flows.pop(flow.id, None)
-                return Step(f"❌ {e}", done=True)
+            hits = [b["hit"]] if b.get("hit") else None
+            if hits is None:
+                try:
+                    hits = [h for h in await self.chaptarr.lookup(f"{b['title']} {b.get('author') or ''}".strip())
+                            if h.get("title")]
+                except ArrError as e:
+                    self.flows.pop(flow.id, None)
+                    return Step(f"❌ {e}", done=True)
             if not hits:
                 return Step(f"🤷 „{b['title']}“ finde ich in Chaptarr nicht. Nimm ein anderes:", flow.step.buttons)
             d["hits"], d["hit"] = hits[:1], 0  # the best match: no edition question for a suggestion
@@ -264,11 +339,44 @@ class BookTools:
         await self._added(chat_id, f"📚 {name}")
         return f"🔎 „{name}“ habe ich noch nicht – ich suche es und schicke es dir, sobald es da ist."
 
+    async def _book_queue_check(self) -> list[tuple[int, str, list[tuple[str, str]]]]:
+        """Downloaded but not imported yet: nudge Chaptarr (it checks only every few minutes by itself), and
+        tell the user once if Chaptarr cannot import it (wrong path, wrong format …)."""
+        waiting = {p.book_id: p for p in self.books.items if p.book_id}
+        if not waiting:
+            return []
+        try:
+            queue = await self.chaptarr.queue()
+        except ArrError as e:
+            log.info("Chaptarr-Warteschlange: %s", e)
+            return []
+        out, nudge = [], False
+        for q in queue:
+            p = waiting.get(q.get("bookId"))
+            if p is None:
+                continue
+            state = (q.get("trackedDownloadState") or "").lower()
+            if state in ("importpending", "importing") or (q.get("status") or "").lower() == "completed":
+                nudge = True
+            if state in ("importblocked", "importfailed", "failedpending") and not p.warned:
+                why = "; ".join(m for sm in q.get("statusMessages") or [] for m in sm.get("messages") or [])
+                self.books.warn(p)
+                out.append((p.chat_id, f"⚠️ „{p.title}“ ist geladen, aber Chaptarr kann es nicht übernehmen"
+                                       + (f": {why[:200]}" if why else "") + ". Der Admin sieht in Chaptarr unter "
+                                       "Activity → Queue nach; danach schicke ich es dir.", []))
+        if nudge:
+            try:
+                await self.chaptarr._req("POST", "/command", json={"name": "RefreshMonitoredDownloads"})
+            except ArrError as e:
+                log.info("Chaptarr Import anstoßen: %s", e)
+        return out
+
     async def book_deliveries(self) -> list[tuple[int, str, list[tuple[str, str]]]]:
         """For the job: (chat, text, files) of requested books that arrived or gave up."""
         out: list[tuple[int, str, list[tuple[str, str]]]] = []
-        if self.chaptarr is None or self.books is None:
+        if self.chaptarr is None or self.books is None or not self.books.items:
             return out
+        out += await self._book_queue_check()
         for p in list(self.books.items):
             try:
                 if not p.book_id:  # waited for Chaptarr's metadata: is it in the library now?
