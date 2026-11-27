@@ -14,9 +14,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.21.0"
+__version__ = "1.22.0"
 
 CHANGES = {
+    "1.22.0": "📚 Bücher im Wunschformat: Der Bot fragt einmal EPUB, PDF oder Kindle, merkt es sich und wandelt "
+              "um, wenn es das Buch so nicht gibt (Calibre im Image). Buch-Empfehlungen: „Bücher wie Metro“ – fünf "
+              "Vorschläge mit Grund und Buttons zum Holen. Weniger Warnungen: Sonarr/Radarr/Chaptarr-Meldungen erst, "
+              "wenn sie zwei Runden bleiben, alle in einer Nachricht, ohne Link-Vorschau, mit „🔕 nicht mehr melden“; "
+              "abgeschaltete Optionen (RSS aus) werden erklärt statt sinnlos neu getestet",
     "1.21.0": "Chaptarr wie Radarr/Sonarr eingebunden: /check prüft es (Version, Profile, Warnungen), die "
               "Überwachung meldet Ausfall und Rückkehr, Chaptarr-Warnungen kommen wie bei Sonarr/Radarr (Indexer/"
               "Download-Client wird selbst neu getestet), laufende Buch-Downloads stehen in /downloads und der "

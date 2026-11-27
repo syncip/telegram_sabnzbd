@@ -41,6 +41,11 @@ Außerdem:
   (`/mnt/user/media/books:/books:ro`, Pfade ggf. mit `BOOK_PATHS` übersetzen). Hörbücher noch nicht.
   Chaptarr läuft überall mit wie Radarr/Sonarr: `/check`, Überwachung, Warnungen, `/downloads` (📚) und
   Speicherplatz.
+  - **Format:** Beim ersten Buch fragt der Bot: EPUB, PDF oder Kindle (AZW3) – und merkt es sich. Ändern:
+    „Bücher als PDF“ oder „schick es mir für Kindle“. Gibt es das Buch nicht im Format, wandelt der Bot es mit
+    Calibre um (ist im Image) und schickt es, wenn es unter 50 MB bleibt; sonst kommt das Original.
+  - **Empfehlungen:** „Ich mag die Metro-Bücher, empfiehl mir ähnliche“ – fünf Bücher mit kurzem Grund, je ein
+    Button „📥 holen“.
 - **Bewerten:** Unter Vorschlägen „👎👁 Bewerten“: 👎 = nicht meins, 👁 = schon gesehen (dann fragt der
   Bot „Wie fandest du’s?“ mit ⭐1–5). Nach einem frisch zu Ende geschauten Film oder einer Serie in Plex
   fragt der Bot das auch (höchstens zwei am Tag, „🔕 Nicht mehr fragen“ beendet es). Sterne aus Plex zählen
@@ -196,7 +201,9 @@ Außerdem:
   gesperrt, testet er ihn neu und lässt Sonarr/Radarr den Status prüfen – und sagt, ob es geholfen hat.
   Zusätzlich prüft er (nur Sonarr/Radarr), ob Indexer nur Hauptkategorien (5000/5100) haben; dann gibt es den Button
   „🔧 Unterkategorien eintragen“ (ändert die Indexer-Einstellung, deshalb nur auf Knopfdruck). `/check`
-  zeigt die aktuellen Warnungen mit.
+  zeigt die aktuellen Warnungen mit. Damit es nicht nervt: gemeldet wird erst, was zwei Runden hintereinander
+  da ist, alles in einer Nachricht, ohne Link-Vorschau; was er selbst behoben hat, meldet er nicht. Mit
+  „🔕 … nicht mehr melden“ schweigt eine Warnung, bis sie einmal weg war.
 - **Suche ohne Ergebnis:** Startet der Bot eine Suche, wartet er im Hintergrund, bis Sonarr/Radarr fertig
   sind. Wurde nichts geladen, prüft er sofort selbst, warum, und sagt es (statt erst nach 30 Minuten):
   Titel/Staffel nicht überwacht? Liefern die Indexer gar nichts (dann auch: sind nur Hauptkategorien wie

@@ -61,7 +61,7 @@ def test_issues_include_own_category_check():
     found = asyncio.run(arrhealth.issues(sonarr_for(fake)))
     assert [i.source for i in found] == ["IndexerStatusCheck", "IndexerCategories"]  # "ok" left out
     assert "scenenzbs" in found[1].message and found[1].indexer_id == 1
-    assert "vorübergehend gesperrt" in found[0].text() and "https://wiki/x" in found[0].text()
+    assert "vorübergehend gesperrt" in found[0].text() and "wiki" not in found[0].text()  # no link cards
 
 
 def test_auto_fix_tests_indexers_and_rechecks():
@@ -98,6 +98,8 @@ def test_health_watch_reports_new_once_and_resolved(tmp_path):
     fake = FakeSonarr()
     svc = sonarr_for(fake)
     hw = arrhealth.HealthWatch(str(tmp_path))
+    new, gone = asyncio.run(hw.poll([svc]))
+    assert new == [] and gone == []  # seen once: could be a restart, wait
     new, gone = asyncio.run(hw.poll([svc]))
     assert len(new) == 2 and gone == []
     new, gone = asyncio.run(hw.poll([svc]))

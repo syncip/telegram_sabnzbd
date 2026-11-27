@@ -129,8 +129,21 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             "book",
             "Buch (E-Book) holen und als Datei in den Chat schicken: \"schick mir das Buch X\", \"ich will X von Y "
             "lesen\". Ist es noch nicht da, sucht Chaptarr es und der Bot schickt es später. title: Buchtitel, "
-            "author: Autor, falls genannt. Nicht für Filme/Serien/Hörbücher.",
-            obj({"title": {"type": "string"}, "author": {"type": "string"}}, ["title"]),
+            "author: Autor, falls genannt. format nur, wenn der Nutzer eins nennt (\"als PDF\", \"für Kindle\" = "
+            "azw3); sonst fragt der Bot selbst. Nicht für Empfehlungen (book_suggest), Filme/Serien, Hörbücher.",
+            obj({"title": {"type": "string"}, "author": {"type": "string"},
+                 "format": {"type": "string", "enum": ["epub", "pdf", "azw3"]}}, ["title"]),
+        ),
+        ToolSpec(
+            "book_suggest",
+            "Buch-Empfehlungen: \"empfiehl mir Bücher wie X\", \"ähnliche Bücher wie die Metro-Reihe\", \"was "
+            "soll ich lesen\". Du suchst selbst 5 passende, echte Bücher aus (andere Werke/Autoren als genannt, "
+            "außer gewünscht; Reihen mit Band 1), je mit einem kurzen Grund auf Deutsch. intro: ein Satz, worauf du "
+            "geachtet hast. Der Bot zeigt sie mit Buttons zum Holen.",
+            obj({"intro": {"type": "string"},
+                 "books": {"type": "array", "items": obj({"title": {"type": "string"}, "author": {"type": "string"},
+                                                          "why": {"type": "string"}}, ["title", "author", "why"])}},
+                ["books"]),
         ),
         ToolSpec(
             "title_feedback",

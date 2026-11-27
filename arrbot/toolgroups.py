@@ -37,7 +37,7 @@ GROUPS: dict[str, tuple[set[str], str]] = {
                r"benachrichtig|bescheid|info (wenn|bei|nur)|nur (noch )?(wenn|info)|"
                r"version|modell|\bki\b|update|bist du aktuell|kalender|woche|kommt|wann|heute|morgen|speicher|platz|festplatte|voll|rückblick|plex|gesehen|"
                r"geschaut|weiterschau|fortschritt|verknüpf|verbind"),
-    "books": ({"book"}, r"\bbuch\b|bücher|buches|e-?book|epub|kindle|\blesen\b|roman\b|autor"),
+    "books": ({"book", "book_suggest"}, r"\bbuch\b|bücher|buches|e-?book|epub|kindle|\blesen\b|roman\b|autor"),
     "sites": ({"watch_site"}, r"überwach|beobacht|webseite|website|im auge|seiten?\b"),
     "admin": (set(),  # all admin_* tools, only for admins
               r"statistik|übersicht|dashboard|verwaltung|wie steht|was macht|zeig mir|nutzer|user|limit|check|api|mediathek|aufräum|qualität|profil|aktivit|anfrag|"

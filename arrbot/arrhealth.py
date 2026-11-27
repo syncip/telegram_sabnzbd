@@ -26,31 +26,45 @@ AUTO_FIX = {
     "IndexerSearchCheck": "indexers", "IndexerRssCheck": "indexers", "IndexerJackettAllCheck": None,
     "DownloadClientStatusCheck": "clients", "DownloadClientCheck": "clients",
 }
-# Short German explanation per source (the message of Sonarr/Radarr is shown too)
+# Short German explanation per source (the message of Sonarr/Radarr is shown too); {svc} = the service
 EXPLAIN = {
-    "IndexerStatusCheck": "Ein Indexer hatte Fehler und ist vorübergehend gesperrt – Sonarr/Radarr sucht dort nicht.",
+    "IndexerStatusCheck": "Ein Indexer hatte Fehler und ist vorübergehend gesperrt – {svc} sucht dort nicht.",
     "IndexerLongTermStatusCheck": "Ein Indexer ist seit über 6 Stunden gesperrt.",
     "IndexerSearchCheck": "Kein Indexer kann gerade suchen – Suchen bringen nichts.",
     "IndexerRssCheck": "Kein Indexer liefert gerade neue Releases (RSS).",
     "DownloadClientStatusCheck": "Ein Download-Client hatte Fehler.",
     "DownloadClientCheck": "Der Download-Client (SABnzbd) ist nicht erreichbar – nichts kann geladen werden.",
     "RootFolderCheck": "Ein Medien-Ordner fehlt (Laufwerk nicht eingehängt? Pfad geändert?).",
-    "RemotePathMappingCheck": "Fertige Downloads liegen an einem Pfad, den Sonarr/Radarr nicht sieht – "
-                              "Import klappt nicht (Remote Path Mapping/Docker-Volumes prüfen).",
+    "RemotePathMappingCheck": "Fertige Downloads liegen an einem Pfad, den {svc} nicht sieht – Import klappt "
+                              "nicht. Den Downloads-Ordner im {svc}-Container genauso einbinden wie bei SABnzbd "
+                              "(oder Remote Path Mapping).",
     "ImportMechanismCheck": "Fertige Downloads werden nicht automatisch importiert.",
-    "UpdateCheck": "Für Sonarr/Radarr gibt es ein Update.",
+    "UpdateCheck": "Für {svc} gibt es ein Update.",
     "DiskSpaceCheck": "Wenig Speicherplatz.",
-    "ApiKeyValidationCheck": "Der API-Key von Sonarr/Radarr ist zu kurz/ungültig.",
+    "ApiKeyValidationCheck": "Der API-Key von {svc} ist zu kurz/ungültig.",
     "ProxyCheck": "Der Proxy funktioniert nicht.",
     "SystemTimeCheck": "Die Systemzeit stimmt nicht – Indexer lehnen Anfragen dann oft ab.",
     "IndexerCategories": "Nur Hauptkategorien eingetragen – viele Indexer liefern die Unterkategorien dann nicht mit.",
 }
+# Same sources, but a setting instead of a failure ("No indexers available with RSS sync enabled")
+EXPLAIN_SETTING = {
+    "IndexerSearchCheck": "Bei keinem Indexer ist die automatische Suche an – {svc} → Settings → Indexers → "
+                          "„Enable Automatic Search“.",
+    "IndexerRssCheck": "Bei keinem Indexer ist RSS an – neue Releases holt {svc} nicht von selbst "
+                       "(Settings → Indexers → „Enable RSS“; mit Prowlarr dort „Full Sync“).",
+}
 WEIGHT = {"error": "❌", "warning": "⚠️", "notice": "ℹ️"}
+CONFIRM = 2  # report an issue only after it was seen in so many rounds in a row (restarts, short hiccups stay quiet)
+
+
+def is_setting(source: str, message: str) -> bool:
+    """A switched-off option, not a failure: testing again does not help."""
+    return source in EXPLAIN_SETTING and "enabled" in message.lower()
 
 
 @dataclass
 class Issue:
-    service: str  # "Sonarr" | "Radarr"
+    service: str  # "Sonarr" | "Radarr" | "Chaptarr"
     source: str
     kind: str  # notice | warning | error
     message: str
@@ -61,12 +75,15 @@ class Issue:
     def key(self) -> str:
         return f"{self.service}|{self.source}|{self.message}"
 
+    @property
+    def mute_key(self) -> str:
+        return f"{self.service}|{self.source}"
+
     def text(self) -> str:
         out = f"{WEIGHT.get(self.kind, '⚠️')} {self.service}: {self.message}"
-        if self.source in EXPLAIN:
-            out += f"\n{EXPLAIN[self.source]}"
-        if self.wiki:
-            out += f"\nℹ️ {self.wiki}"
+        explain = EXPLAIN_SETTING if is_setting(self.source, self.message) else EXPLAIN
+        if self.source in explain:
+            out += "\n" + explain[self.source].format(svc=self.service)
         return out
 
 
@@ -120,7 +137,7 @@ async def recheck(arr: Any, wait: float = 20.0) -> list[Issue]:
 async def auto_fix(arr: Any, issue: Issue, wait: float = 20.0) -> str | None:
     """Harmless fixes. Returns what was done and whether it helped, None if nothing can be done."""
     what = AUTO_FIX.get(issue.source)
-    if not what:
+    if not what or is_setting(issue.source, issue.message):
         return None
     path = "/indexer/testall" if what == "indexers" else "/downloadclient/testall"
     label = "Indexer" if what == "indexers" else "Download-Clients"
@@ -135,7 +152,7 @@ async def auto_fix(arr: Any, issue: Issue, wait: float = 20.0) -> str | None:
         lines.append(f"   ❌ {r.get('id', '?')}: {fails or 'Fehler'}")
     left = await recheck(arr, wait)
     if any(x.key == issue.key for x in left):
-        lines.append("Die Warnung ist noch da – Sonarr/Radarr sperrt einen Indexer nach Fehlern eine Weile "
+        lines.append(f"Die Warnung ist noch da – {arr.kind} sperrt einen Indexer nach Fehlern eine Weile "
                      "(Backoff). Kommt sie wieder, liegt es am Indexer/Client selbst.")
     else:
         lines.append("✅ Danach ist die Warnung weg.")
@@ -179,19 +196,32 @@ class HealthWatch:
     def __init__(self, data_dir: str):
         self.path = Path(data_dir) / "arr_health.json"
         try:
-            self.known: dict[str, dict] = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            self.known = {}
+            raw = {}
+        if "known" not in raw:  # before 1.22: only the reported issues
+            raw = {"known": {k: dict(v, told=True) for k, v in raw.items()}}
+        self.known: dict[str, dict] = raw["known"]
+        self.muted: set[str] = set(raw.get("muted") or [])  # "Service|source": until the issue is gone
+
+    def mute(self, service: str, source: str) -> None:
+        self.muted.add(f"{service}|{source}")
+        self._save()
 
     def _save(self) -> None:
         try:
-            self.path.write_text(json.dumps(self.known, ensure_ascii=False, indent=1), encoding="utf-8")
+            data = {"known": self.known, "muted": sorted(self.muted)}
+            self.path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError as e:
             log.warning("arr_health.json nicht geschrieben: %s", e)
 
     async def poll(self, services: list[Any]) -> tuple[list[Issue], list[dict]]:
-        """(new issues, resolved ones). A service that cannot be asked keeps its known issues."""
+        """(new issues, resolved ones). A service that cannot be asked keeps its known issues.
+
+        New = seen in CONFIRM rounds in a row and not muted; resolved = only what was reported.
+        """
         new, gone = [], []
+        changed = False
         for arr in services:
             try:
                 now = await issues(arr)
@@ -200,12 +230,25 @@ class HealthWatch:
                 continue
             keys = {i.key for i in now}
             for i in now:
-                if i.key not in self.known:
-                    self.known[i.key] = {"service": i.service, "source": i.source, "message": i.message}
+                k = self.known.setdefault(i.key, {"service": i.service, "source": i.source, "message": i.message,
+                                                  "seen": 0, "told": False})
+                if k.get("told"):
+                    continue
+                k["seen"] = k.get("seen", 0) + 1
+                changed = True
+                if k["seen"] >= CONFIRM and i.mute_key not in self.muted:
+                    k["told"] = True
                     new.append(i)
             for k, v in list(self.known.items()):
                 if v.get("service") == arr.kind and k not in keys:
-                    gone.append(self.known.pop(k))
-        if new or gone:
+                    self.known.pop(k)
+                    changed = True
+                    if v.get("told"):
+                        gone.append(v)
+            still = {f"{v.get('service')}|{v.get('source')}" for v in self.known.values()}
+            for m in [m for m in self.muted if m.startswith(arr.kind + "|") and m not in still]:
+                self.muted.discard(m)  # fixed: report it again if it comes back
+                changed = True
+        if changed:
             self._save()
         return new, gone

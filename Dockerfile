@@ -4,7 +4,9 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 DATA_DIR=/data \
     PUID=1000 PGID=1000
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# ffmpeg: 🎧 listening in; calibre (ebook-convert): 📚 books in the format the user wants
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg calibre && rm -rf /var/lib/apt/lists/*
+ENV QT_QPA_PLATFORM=offscreen QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox
 
 COPY requirements.txt .
 # Patient with flaky networks (Unraid): longer timeout, more retries.

@@ -36,7 +36,7 @@ grep -nE '(KEY|TOKEN|ID): "[^"]+' docker-compose.yml   # only PUID/PGID may matc
 | Library / cleanup / duplicates / watched questions | `media.py`, `mediamgr.py`, `cleanup.py`, `dupes.py`, `watchask.py` |
 | German audio | `german.py`, `manage.py`, `listen.py`, `watch.py` |
 | Suggestions & taste | `recommend.py`, `profiles.py`, `together.py`, `wishlist.py`, `tmdb.py` |
-| Books (Chaptarr, file into chat, pending in data/books.json) | `chaptarr.py`, `books.py`, `tools_books.py` |
+| Books (Chaptarr, file into chat, pending in data/books.json, format per chat + Calibre convert, suggestions) | `chaptarr.py`, `books.py`, `tools_books.py` |
 | Chaptarr like Radarr/Sonarr | `health.run_checks(chaptarr=)`, `arr_services` in `bot.py`, `downloads.collect(chaptarr=)`, `extras.disks` |
 
 ## bot.py sections (Grep the marker `# ---- <name>`)

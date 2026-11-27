@@ -7,6 +7,7 @@ import dataclasses
 import html
 import json
 import logging
+import os
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from telegram import (
     BotCommandScopeDefault,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
     Update,
 )
@@ -51,6 +53,7 @@ from .agent import PRICES, UsageStats
 from .users import ADMIN, BLOCKED, PENDING, USER, UserStore, limit_text, quality_label
 
 log = logging.getLogger(__name__)
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)  # admin notices: no big Discord/wiki cards
 
 HELP = (
     "Schreib mir einfach, was du sehen willst, z. B.:\n"
@@ -143,11 +146,13 @@ def build_app(cfg: Config) -> Application:
     tmdb = TMDB(cfg.tmdb_api_key) if cfg.tmdb_api_key else None
     tools = ToolRunner(radarr, sonarr, store, cfg.minimum_availability, cfg.quality_prompt_seconds, tmdb, tz)
     if cfg.chaptarr:
-        from .books import PendingBooks
+        from .books import BookFormats, PendingBooks
         from .chaptarr import Chaptarr
 
         tools.chaptarr = Chaptarr(cfg.chaptarr)
         tools.books = PendingBooks(cfg.data_dir)
+        tools.book_formats = BookFormats(cfg.data_dir)
+        tools.book_cache = os.path.join(cfg.data_dir, "book_cache")
         tools.book_paths = cfg.book_paths or cfg.media_paths
     agent = Agent(make_provider(cfg.llm), tools, cfg.history_idle_minutes, cfg.max_history_messages)
     turn_tokens: dict[int, int] = {}  # tokens of the message being answered (activity log)
@@ -261,9 +266,10 @@ def build_app(cfg: Config) -> Application:
         for admin in users.admins():
             try:
                 if html_text:
-                    await app.bot.send_message(admin, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+                    await app.bot.send_message(admin, text, parse_mode=ParseMode.HTML, reply_markup=markup,
+                                               link_preview_options=NO_PREVIEW)
                 else:
-                    await app.bot.send_message(admin, text, reply_markup=markup)
+                    await app.bot.send_message(admin, text, reply_markup=markup, link_preview_options=NO_PREVIEW)
             except (BadRequest, Forbidden) as e:
                 log.warning("Admin %s nicht erreichbar: %s", admin, e)
 
@@ -952,20 +958,27 @@ def build_app(cfg: Config) -> Application:
     async def arr_health_round() -> None:
         """Sonarr/Radarr/Chaptarr warnings: new ones (fixed if harmless), and what is gone."""
         new, gone = await arr_watch.poll(list(arr_services.values()))
-        for issue in new:
+        parts, rows = [], []
+        for issue in new:  # one message per round, not one per warning
             text = issue.text()
             svc = arr_services.get(issue.service)
             if svc is not None and issue.source in arrhealth.AUTO_FIX:
                 if fix := await arrhealth.auto_fix(svc, issue):
+                    if "✅" in fix:  # fixed by itself: no need to tell
+                        log.info("%s: %s – %s", issue.service, issue.message, fix)
+                        continue
                     text += "\n" + fix
-            rows = []
             if issue.source == "IndexerCategories" and issue.indexer_id is not None:
                 rows.append([InlineKeyboardButton("🔧 Unterkategorien eintragen",
                                                   callback_data=f"h:cat:{issue.service}:{issue.indexer_id}")])
+            label = f"{issue.service} {issue.source.removesuffix('Check')}"[:40]
+            rows.append([InlineKeyboardButton(f"🔕 {label} nicht mehr melden",
+                                              callback_data=f"h:mute:{issue.service}:{issue.source}"[:64])])
             log.warning("%s meldet: %s", issue.service, issue.message)
-            await tell_admins(text, InlineKeyboardMarkup(rows) if rows else None)
-        for g in gone:
-            await tell_admins(f"✅ {g.get('service')}: behoben – {g.get('message')}")
+            parts.append(text)
+        parts += [f"✅ {g.get('service')}: behoben – {g.get('message')}" for g in gone]
+        if parts:
+            await tell_admins("\n\n".join(parts), InlineKeyboardMarkup(rows) if rows else None)
 
     async def on_health_button(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -974,6 +987,12 @@ def build_app(cfg: Config) -> Application:
             return
         _, action, service, raw = query.data.split(":", 3)
         await query.answer()
+        if action == "mute":
+            arr_watch.mute(service, raw)
+            await query.edit_message_reply_markup(None)
+            await app.bot.send_message(query.message.chat_id, f"🔕 Okay, {service} {raw} melde ich nicht mehr, "
+                                       "bis die Warnung einmal weg war. /check zeigt sie weiter.")
+            return
         svc = arr_services.get(service)
         if action != "cat" or svc is None:
             return
