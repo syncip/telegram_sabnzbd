@@ -82,8 +82,8 @@ services:
       CHAPTARR_API_KEY: ""
       # Leer = der Standard-Ordner für E-Books in Chaptarr
       CHAPTARR_ROOT_FOLDER: ""
-      # Pfade, wie Chaptarr sie sieht = Pfade im Bot-Container (oben eingebunden), z. B. "/books=/books".
-      # Leer = wie MEDIA_PATHS bzw. gleiche Pfade.
+      # Chaptarr-Pfad=Bot-Pfad. Beispiel: Chaptarr hat /mnt/user/media/books als /media, der Bot dasselbe als
+      # /books (Volume oben) -> "/media=/books". /check zeigt, ob es passt. Leer = wie MEDIA_PATHS bzw. gleiche Pfade.
       BOOK_PATHS: ""
 
       # --- TMDB (optional, kostenlos): deutsche Titel, deutsche Termine, Vorschläge, Top-Listen ---

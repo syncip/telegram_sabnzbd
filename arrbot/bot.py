@@ -43,7 +43,7 @@ from .llm import ToolCall, make_provider
 from .sabnzbd import SABnzbd, SabError
 from .state import Store, Tracked, utcnow
 from .tmdb import TMDB
-from .tools import Candidate, Flow, Offer, ToolRunner, View, mute, release_languages
+from .tools import Candidate, Final, Flow, Offer, ToolRunner, View, mute, release_languages
 from .tracker import Tracker
 from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from . import admin as admin_view
@@ -76,6 +76,7 @@ HELP = (
     "/verbrauch – deine Anfragen und Limits\n"
     "/profil – was ich über deinen Geschmack weiß\n"
     "/kalender – was diese Woche kommt\n"
+    "/buecher – deine Bücher, nochmal schicken lassen\n"
     "/plex – Plex verbinden (gesehen, weiterschauen)\n"
     "/neu – Gespräch zurücksetzen\n"
     "/stumm 30 – Download-Meldungen 30 Min. stumm (auch 2h, 3d; „nerv mich 3 Tage nicht“), /laut – wieder an\n"
@@ -146,12 +147,13 @@ def build_app(cfg: Config) -> Application:
     tmdb = TMDB(cfg.tmdb_api_key) if cfg.tmdb_api_key else None
     tools = ToolRunner(radarr, sonarr, store, cfg.minimum_availability, cfg.quality_prompt_seconds, tmdb, tz)
     if cfg.chaptarr:
-        from .books import BookFormats, PendingBooks
+        from .books import BookFormats, BookHistory, PendingBooks
         from .chaptarr import Chaptarr
 
         tools.chaptarr = Chaptarr(cfg.chaptarr)
         tools.books = PendingBooks(cfg.data_dir)
         tools.book_formats = BookFormats(cfg.data_dir)
+        tools.book_history = BookHistory(cfg.data_dir)
         tools.book_cache = os.path.join(cfg.data_dir, "book_cache")
         tools.book_paths = cfg.book_paths or cfg.media_paths
     agent = Agent(make_provider(cfg.llm), tools, cfg.history_idle_minutes, cfg.max_history_messages)
@@ -570,10 +572,16 @@ def build_app(cfg: Config) -> Application:
     async def save_buttons_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         save_buttons()
 
-    def markup_for(buttons: list[tuple[str, str]], prefix: str) -> InlineKeyboardMarkup | None:
+    def markup_for(buttons: list[tuple[str, str]], prefix: str, rows: list[int] | None = None) -> InlineKeyboardMarkup | None:
         if not buttons:
             return None
-        return InlineKeyboardMarkup([[InlineKeyboardButton(lbl, callback_data=f"{prefix}:{val}")] for lbl, val in buttons])
+        keys = [InlineKeyboardButton(lbl, callback_data=f"{prefix}:{val}") for lbl, val in buttons]
+        sizes, out = list(rows or []), []
+        while keys:
+            n = sizes.pop(0) if sizes else 1
+            out.append(keys[:n])
+            keys = keys[n:]
+        return InlineKeyboardMarkup(out)
 
     def offer_markup(offer: Offer) -> InlineKeyboardMarkup | None:
         p, btn = f"o:{offer.id}", InlineKeyboardButton
@@ -628,7 +636,7 @@ def build_app(cfg: Config) -> Application:
     async def show_flow(flow: Flow, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Send or update the flow's message with its current step."""
         step = flow.step
-        markup = markup_for(step.buttons, f"f:{flow.id}")
+        markup = markup_for(step.buttons, f"f:{flow.id}", step.rows)
         if flow.message_id:
             try:
                 await app.bot.edit_message_text(step.text, flow.chat_id, flow.message_id, reply_markup=markup)
@@ -940,6 +948,7 @@ def build_app(cfg: Config) -> Application:
         extra = [version.line(update_state["latest"]), *model_lines(True)]
         if cfg.monitor_minutes > 0:
             extra.append(monitor.status() + f" (alle {cfg.monitor_minutes} Min.)")
+        extra += await tools.book_access()
         for svc in arr_services.values():
             try:
                 found = await arrhealth.issues(svc)
@@ -1636,6 +1645,18 @@ def build_app(cfg: Config) -> Application:
         text = extras.render_disks(ds, cfg.disk_warn_gb, await cleanup_candidates() if low or ds else None)
         await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
 
+    async def on_books(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/buecher: the user's books, with buttons to send one again."""
+        chat, uid = update.effective_chat.id, update.effective_user.id
+        query = " ".join(ctx.args or []) or None
+        try:
+            res = await tools._t_book_library(chat, query=query, mine=True)
+        except ArrError as e:
+            res = Final(f"❌ {e}")
+        if res.text:
+            await update.effective_message.reply_text(res.text)
+        await deliver_outbox(chat, uid, ctx)
+
     async def on_calendar(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await send_calendar(update.effective_chat.id, update.effective_user.id)
 
@@ -2092,6 +2113,7 @@ def build_app(cfg: Config) -> Application:
             BotCommand("verbrauch", "Anfragen und Limits"),
             BotCommand("profil", "Was ich über dich weiß"),
             BotCommand("kalender", "Was kommt diese Woche"),
+            BotCommand("buecher", "Deine Bücher – nochmal schicken lassen"),
             BotCommand("plex", "Plex verbinden"),
             BotCommand("stumm", "Download-Meldungen stumm (z. B. /stumm 30)"),
             BotCommand("laut", "Meldungen wieder an"),
@@ -2190,6 +2212,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["statistik", "stats"], on_stats, filters=is_admin))
     app.add_handler(CommandHandler(["check", "apis"], on_check, filters=is_admin))
     app.add_handler(CommandHandler("version", on_version, filters=allowed))
+    app.add_handler(CommandHandler("buecher", on_books, filters=allowed))
     app.add_handler(CommandHandler(["mediathek", "medien", "aufraeumen"], on_media, filters=is_admin))
     app.add_handler(CommandHandler(["aktivitaet", "anfragen", "probleme"], on_activity, filters=is_admin))
     app.add_handler(CommandHandler(["regeln", "aufraeumregeln"], on_cleanup, filters=is_admin))

@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.22.2"
+__version__ = "1.23.0"
 
 CHANGES = {
+    "1.23.0": "📚 /buecher: deine Bücher übersichtlich mit Seiten (8 pro Seite), 📗 da / 🔎 wird gesucht / ⏳ wird "
+              "vorbereitet, 📥-Nummern-Buttons zum erneuten Schicken – die Liste bleibt danach offen; Umschalten auf "
+              "alle Bücher auf dem Server. /check zeigt, ob der Bot die Bücher-Dateien lesen kann (mit Tipp für "
+              "BOOK_PATHS) und ob Calibre zum Umwandeln da ist",
     "1.22.2": "Buchauswahl lesbar: mehrere Ausgaben desselben Buchs werden zu einem zusammengefasst, die vollen "
               "Titel (mit Jahr und Seiten) stehen nummeriert in der Nachricht, die Buttons sind kurz. Bereitet "
               "Chaptarr ein Buch noch vor („being prepared by the metadata server“), kommt kein Fehler mehr: der "

@@ -220,27 +220,55 @@ def test_book_suggestions_with_buttons(tmp_path):
     assert flow.step.done and "Hier ist „Limit" in flow.step.text
 
 
-def test_book_library_lists_and_sends(tmp_path):
+def test_shelf_mine_all_pages_and_send_again(tmp_path):
     tools, _, _ = setup(tmp_path)
+    tools.book_history = books.BookHistory(str(tmp_path))
     lib = [{"id": 7, "title": "Limit", "author": {"authorName": "Frank Schätzing"}, "hasFiles": True,
             "added": "2026-11-27T10:00:00Z"},
            {"id": 8, "title": "Metro 2033", "authorTitle": "Dmitry Glukhovsky", "statistics": {"bookFileCount": 1},
             "added": "2026-11-27T16:12:00Z"},
            {"id": 9, "title": "Der Schwarm", "monitored": True}]
+    lib += [{"id": 100 + i, "title": f"Band {i}", "hasFiles": True, "added": "2020-01-01"} for i in range(8)]
 
     async def library(media="ebook"):
         return lib
 
     tools.chaptarr.library = library
-    asyncio.run(tools.run(ToolCall("1", "book_library", {}), CHAT))
+    # nothing of mine yet: all books, newest first, 8 per page
+    asyncio.run(tools.run(ToolCall("1", "book_library", {"mine": True}), CHAT))
     flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
-    assert "Da sind 2 Bücher" in flow.step.text and "🔎 Noch gesucht (1): Der Schwarm" in flow.step.text
-    assert flow.step.text.index("Metro 2033") < flow.step.text.index("Limit")  # newest first
-    assert flow.step.buttons[0][0] == "📗 1. Metro 2033"
-    flow = asyncio.run(tools.choose(flow.id, "b1"))  # Limit, format epub is known
-    assert flow.step.done and "Hier ist „Limit" in flow.step.text
+    t = flow.step.text
+    assert "noch keine Bücher" in t and "Alle Bücher auf dem Server (11) · Seite 1/2" in t
+    assert t.index("1. 📗 Metro 2033") < t.index("2. 📗 Limit")
+    assert flow.step.buttons[:4] == [("📥 1", "n0"), ("📥 2", "n1"), ("📥 3", "n2"), ("📥 4", "n3")]
+    assert ("Weiter ▶️", "pg:1") in flow.step.buttons and flow.step.rows[:2] == [4, 4]
+    flow = asyncio.run(tools.choose(flow.id, "pg:1"))
+    assert "Seite 2/2" in flow.step.text and "11. 🔎 Der Schwarm – wird gesucht" in flow.step.text
+    assert ("📥 11", "n10") not in flow.step.buttons  # nothing to send yet
+    flow = asyncio.run(tools.choose(flow.id, "pg:0"))
+    flow = asyncio.run(tools.choose(flow.id, "n1"))  # Limit: sent, and the list stays for the next one
+    assert not flow.step.done and flow.step.text.startswith("📚 Hier ist „Limit") and "Seite 1/2" in flow.step.text
+    view = next(x for x in tools.take_outbox(CHAT) if isinstance(x, View))
+    assert [n for _, n in view.arg] == ["limit.epub"]
+    flow = asyncio.run(tools.choose(flow.id, "mine"))  # now Limit is mine
+    assert "📚 Deine Bücher (1)" in flow.step.text and "1. 📗 Limit – Frank Schätzing" in flow.step.text
+    assert asyncio.run(tools.choose(flow.id, "no")).step.done
     res = asyncio.run(tools.run(ToolCall("2", "book_library", {"query": "king"}), CHAT))
     assert "keine Bücher" in res.final
+
+
+def test_check_tells_whether_books_are_readable(tmp_path):
+    tools, _, _ = setup(tmp_path)
+
+    async def library(media="ebook"):
+        return [{"id": 7, "title": "Limit", "hasFiles": True}]
+
+    tools.chaptarr.library = library
+    ok = asyncio.run(tools.book_access())
+    assert "lesbar ✅" in ok[0] and ok[1].startswith("🔄 Umwandeln (Calibre)")
+    tools.book_paths = None
+    bad = asyncio.run(tools.book_access())
+    assert "nicht lesbar" in bad[0] and "/books/Frank/" in bad[0] and "BOOK_PATHS" in bad[0]
 
 
 def test_editions_merged_and_long_titles_readable():

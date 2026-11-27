@@ -47,8 +47,10 @@ Außerdem:
     Calibre um (ist im Image) und schickt es, wenn es unter 50 MB bleibt; sonst kommt das Original.
   - **Empfehlungen:** „Ich mag die Metro-Bücher, empfiehl mir ähnliche“ – fünf Bücher mit kurzem Grund, je ein
     Button „📥 holen“.
-  - „Welche Bücher haben wir?“ – die Liste aus Chaptarr (neueste zuerst, was noch gesucht wird) mit Buttons
-    zum Schicken; „haben wir was von King?“ filtert.
+  - **/buecher** (oder „meine Bücher“): deine Bücher, 8 pro Seite – 📗 da, 🔎 wird gesucht, ⏳ Chaptarr bereitet
+    es vor. Mit „📥 3“ kommt Buch 3 nochmal, die Liste bleibt offen. „📚 Alle Bücher“ schaltet auf alles auf
+    dem Server um; „haben wir was von King?“ bzw. `/buecher King` filtert.
+  - `/check` zeigt, ob der Bot die Bücher-Dateien lesen kann (sonst mit Tipp für `BOOK_PATHS`) und ob Calibre da ist.
   - „Schick mir das letzte Buch nochmal“ versteht er: Was er ohne Nachfrage geschickt hat (Buch ist da,
     Ergebnis nach einem Button), bekommt die KI bei deiner nächsten Nachricht mit.
 - **Bewerten:** Unter Vorschlägen „👎👁 Bewerten“: 👎 = nicht meins, 👁 = schon gesehen (dann fragt der

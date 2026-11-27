@@ -136,9 +136,10 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
         ),
         ToolSpec(
             "book_library",
-            "Welche Bücher (E-Books) schon da sind: \"welche Bücher haben wir\", \"was ist heruntergeladen\", "
-            "\"haben wir was von King?\". query: Titel/Autor zum Filtern, sonst leer. Zeigt Buttons zum Schicken.",
-            obj({"query": {"type": "string"}}, []),
+            "Bücherliste mit Buttons zum (erneut) Schicken. mine=true: die Bücher des Nutzers (\"meine Bücher\", "
+            "\"Liste meiner Bücher\", \"was habe ich gelesen/bekommen\"); sonst alle auf dem Server (\"welche "
+            "Bücher haben wir\", \"was ist heruntergeladen\"). query: Titel/Autor zum Filtern (\"was von King?\").",
+            obj({"query": {"type": "string"}, "mine": {"type": "boolean"}}, []),
         ),
         ToolSpec(
             "book_suggest",

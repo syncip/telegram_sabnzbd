@@ -49,6 +49,7 @@ class Step:
     buttons: list[tuple[str, str]] = field(default_factory=list)  # (label, value)
     timeout: int = 0  # seconds until the default is taken (quality only)
     done: bool = False
+    rows: list[int] = field(default_factory=list)  # buttons per row (e.g. [4, 4, 2, 1]); empty = one per row
 
 
 @dataclass

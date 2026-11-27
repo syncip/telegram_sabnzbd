@@ -189,6 +189,40 @@ async def prepare(files: list[dict], mapping: str | None, fmt: str | None, cache
     return [(out, os.path.basename(out))], []
 
 
+class BookHistory:
+    """The books each chat asked for or got (data/book_history.json), newest first – for /buecher."""
+
+    MAX = 300
+
+    def __init__(self, data_dir: str):
+        self.path = Path(data_dir) / "book_history.json"
+        self._lock = threading.Lock()
+        try:
+            self.by_chat: dict[str, list[dict]] = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.by_chat = {}
+
+    def add(self, chat_id: int, hit: dict, book_id: int | None = None) -> None:
+        entry = {"id": book_id or hit.get("id") or 0, "title": hit.get("title") or "?",
+                 "author": (hit.get("author") or {}).get("authorName") or hit.get("authorTitle") or "",
+                 "foreign": hit.get("foreignBookId") or "", "at": datetime.now(timezone.utc).isoformat()}
+        with self._lock:
+            old = [e for e in self.by_chat.get(str(chat_id), [])
+                   if not ((entry["id"] and e.get("id") == entry["id"]) or
+                           (entry["foreign"] and e.get("foreign") == entry["foreign"]) or
+                           (e.get("title"), e.get("author")) == (entry["title"], entry["author"]))]
+            self.by_chat[str(chat_id)] = ([entry] + old)[:self.MAX]
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.by_chat, ensure_ascii=False), encoding="utf-8")
+
+    def of(self, chat_id: int) -> list[dict]:
+        return list(self.by_chat.get(str(chat_id), []))
+
+
+def has_file(b: dict) -> bool:
+    return bool(b.get("hasFiles") or (b.get("statistics") or {}).get("bookFileCount"))
+
+
 class BookFormats:
     """Which format each chat wants (data/book_formats.json)."""
 
