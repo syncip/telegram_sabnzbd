@@ -14,9 +14,12 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.24.1"
+__version__ = "1.24.2"
 
 CHANGES = {
+    "1.24.2": "📚 Bücher kommen sofort: Während ein angefordertes Buch lädt, schaut der Bot alle 5 Sekunden in "
+              "SABnzbd. Ist der Download fertig, stößt er den Import in Chaptarr an und schickt das Buch, sobald "
+              "die Datei da ist – ohne Rundenwarten. Lädt nichts, fragt er auch nichts ab",
     "1.24.1": "📚 Format: Die KI darf es nicht mehr selbst festlegen – der Bot fragt, solange du keins gewählt oder "
               "genannt hast. Schickt er im gemerkten Format, kommt darunter „Lieber ein anderes Format?“ mit Buttons. "
               "/buecher: „🔄 Neu prüfen“ (Chaptarr scannt neu, gelöschte Bücher fliegen aus deiner Liste) und "

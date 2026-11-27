@@ -51,8 +51,10 @@ Außerdem:
     📗 = schon da); was du schon hast, schlägt er nicht nochmal vor, nutzt es aber für deinen Geschmack.
     „Empfiehl mir aktuelle Krimis“ / „was wird gerade gelesen?“ holt Neuerscheinungen (auf Deutsch) bzw. Trends
     von Open Library (kostenlos, ohne Key) und zeigt nur, was in den letzten ~18 Monaten erschienen ist.
-  - **Schnell da:** Der Bot schaut alle 30 Sekunden nach angeforderten Büchern, stößt nach dem Download den
-    Import in Chaptarr an und sagt dir, wenn Chaptarr ein Buch nicht übernehmen kann (z. B. Pfad-Problem).
+  - **Schnell da:** Lädt ein angefordertes Buch, schaut der Bot alle 5 Sekunden in SABnzbd. Ist der Download
+    fertig, stößt er sofort den Import in Chaptarr an und schickt das Buch, sobald die Datei da ist. Kann
+    Chaptarr ein Buch nicht übernehmen (z. B. Pfad-Problem), sagt er Bescheid. Ohne laufenden Download fragt er
+    nur alle 30 Sekunden nach.
   - **/buecher** (oder „meine Bücher“): deine Bücher, 8 pro Seite – 📗 da, 🔎 wird gesucht, ⏳ Chaptarr bereitet
     es vor. Mit „📥 3“ kommt Buch 3 nochmal, die Liste bleibt offen. „📚 Alle Bücher“ schaltet auf alles auf
     dem Server um; „haben wir was von King?“ bzw. `/buecher King` filtert. „🔄 Neu prüfen“ lässt Chaptarr

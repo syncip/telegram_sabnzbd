@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -18,6 +19,7 @@ import httpx
 
 from . import booklists, books, toolgroups
 from .arr import ArrError
+from .sabnzbd import SabError
 from .tooltypes import Candidate, Final, Flow, Step, View
 
 log = logging.getLogger(__name__)
@@ -26,6 +28,8 @@ MAX_HITS = 5
 MAX_SUGGEST = 5  # shown
 MAX_PICKS = 10  # checked (the AI may send more, some drop out)
 RECENT_DAYS = 550  # "aktuell/neu": out in the last ~18 months
+FOLLOW_SECONDS = 900  # after SABnzbd finished: look for the file this long (unpacking, import)
+NUDGE_SECONDS = 15  # and ask Chaptarr to import this often meanwhile
 PAGE = 8  # books per page in /buecher
 STATE = {"have": "📗", "search": "🔎", "prep": "⏳"}
 STATE_TEXT = {"search": " – wird gesucht", "prep": " – Chaptarr bereitet es vor"}
@@ -40,6 +44,13 @@ class BookTools:
     book_paths: str | None = None  # "chaptarr path=bot path;…"
     book_cache: str | None = None  # where converted files go (data/book_cache)
     book_history: Any = None  # books.BookHistory
+    sab: Any = None  # sabnzbd.SABnzbd: tells when a book download is finished
+
+    def _follow(self) -> tuple[dict[int, str], dict[int, float]]:
+        """(book id -> SABnzbd nzo id while downloading, book id -> when SABnzbd finished it)."""
+        if "_book_dl" not in self.__dict__:
+            self.__dict__["_book_dl"], self.__dict__["_book_done"] = {}, {}
+        return self.__dict__["_book_dl"], self.__dict__["_book_done"]
 
     def _book_fmt(self, chat_id: int) -> str | None:
         return self.book_formats.get(chat_id) if self.book_formats is not None else None
@@ -444,6 +455,8 @@ class BookTools:
             if p is None:
                 continue
             state = (q.get("trackedDownloadState") or "").lower()
+            if q.get("downloadId") and state in ("", "downloading"):
+                self._follow()[0][p.book_id] = q["downloadId"]  # book_fast watches it in SABnzbd
             if state in ("importpending", "importing") or (q.get("status") or "").lower() == "completed":
                 nudge = True
             if state in ("importblocked", "importfailed", "failedpending") and not p.warned:
@@ -459,13 +472,53 @@ class BookTools:
                 log.info("Chaptarr Import anstoßen: %s", e)
         return out
 
-    async def book_deliveries(self) -> list[tuple[int, str, list[tuple[str, str]]]]:
+    async def book_fast(self) -> list[tuple[int, str, list[tuple[str, str]]]]:
+        """Every few seconds, but only while a requested book downloads: as soon as SABnzbd is done, nudge
+        Chaptarr to import and send the file the moment it is there (no waiting for the 30-second round)."""
+        dl, done = self._follow()
+        if self.chaptarr is None or self.books is None or not (dl or done):
+            return []
+        now = time.monotonic()
+        if dl and self.sab is not None:
+            try:
+                slots = (await self.sab.queue()).slots
+            except SabError as e:
+                log.info("SABnzbd: %s", e)
+                slots = None
+            if slots is not None:
+                for book_id, nzo in list(dl.items()):
+                    if nzo not in slots:  # left the queue: downloaded (now unpacking/importing)
+                        dl.pop(book_id)
+                        done[book_id] = now
+        for b, since in list(done.items()):
+            if now - since > FOLLOW_SECONDS:
+                done.pop(b)  # stuck somewhere: the 30-second round and its notices take over
+        if not done:
+            return []
+        last = self.__dict__.get("_book_nudge", 0.0)
+        if now - last >= NUDGE_SECONDS or any(since == now for since in done.values()):
+            self.__dict__["_book_nudge"] = now
+            try:
+                await self.chaptarr._req("POST", "/command", json={"name": "RefreshMonitoredDownloads"})
+            except ArrError as e:
+                log.info("Chaptarr Import anstoßen: %s", e)
+        out = await self.book_deliveries(only=set(done))
+        waiting = {p.book_id for p in self.books.items}
+        for b in list(done):
+            if b not in waiting:
+                done.pop(b)  # sent
+        return out
+
+    async def book_deliveries(self, only: set[int] | None = None) -> list[tuple[int, str, list[tuple[str, str]]]]:
         """For the job: (chat, text, files) of requested books that arrived or gave up."""
         out: list[tuple[int, str, list[tuple[str, str]]]] = []
         if self.chaptarr is None or self.books is None or not self.books.items:
             return out
-        out += await self._book_queue_check()
+        if only is None:
+            out += await self._book_queue_check()
         for p in list(self.books.items):
+            if only is not None and p.book_id not in only:
+                continue
             try:
                 if not p.book_id:  # waited for Chaptarr's metadata: is it in the library now?
                     if book_id := await self.chaptarr.find(p.ref):

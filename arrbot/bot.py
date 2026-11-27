@@ -154,6 +154,7 @@ def build_app(cfg: Config) -> Application:
         tools.books = PendingBooks(cfg.data_dir)
         tools.book_formats = BookFormats(cfg.data_dir)
         tools.book_history = BookHistory(cfg.data_dir)
+        tools.sab = sab
         tools.book_cache = os.path.join(cfg.data_dir, "book_cache")
         tools.book_paths = cfg.book_paths or cfg.media_paths
     agent = Agent(make_provider(cfg.llm), tools, cfg.history_idle_minutes, cfg.max_history_messages)
@@ -683,7 +684,14 @@ def build_app(cfg: Config) -> Application:
 
     async def book_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         """📚 Requested books that arrived in Chaptarr: send the file."""
-        for chat_id, text, files in await tools.book_deliveries():
+        await send_books(await tools.book_deliveries())
+
+    async def book_fast_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        """📚 While a requested book downloads: send it right when SABnzbd and Chaptarr are done."""
+        await send_books(await tools.book_fast())
+
+    async def send_books(items: list) -> None:
+        for chat_id, text, files in items:
             agent.note(chat_id, text)
             try:
                 await app.bot.send_message(chat_id, text)
@@ -2155,6 +2163,7 @@ def build_app(cfg: Config) -> Application:
         application.job_queue.run_daily(watch_ask_job, time(19, 0, tzinfo=tz), name="gesehen")
         if tools.chaptarr is not None:
             application.job_queue.run_repeating(book_job, interval=30, first=30, name="buecher")
+            application.job_queue.run_repeating(book_fast_job, interval=5, first=35, name="buecher-schnell")
         application.job_queue.run_repeating(save_buttons_job, interval=300, first=300, name="buttons")
         if cfg.site_hours > 0:
             application.job_queue.run_repeating(sites_job, interval=cfg.site_hours * 3600, first=900, name="seiten")

@@ -436,3 +436,39 @@ def test_shelf_rescan_drops_deleted_and_reset(tmp_path):
     flow = asyncio.run(tools.choose(flow.id, "reset!"))
     assert tools.book_history.of(CHAT) == [] and "Deine Liste ist leer" in flow.step.text
     assert "Alle Bücher auf dem Server" in flow.step.text
+
+
+def test_book_sent_right_after_sabnzbd_finished(tmp_path):
+    from types import SimpleNamespace
+
+    tools, state, _ = setup(tmp_path)
+    tools.books.add(11, CHAT, "Der Schwarm")
+    slots = {"SABnzbd_nzo_1": object()}
+
+    class Sab:
+        async def queue(self):
+            return SimpleNamespace(slots=slots)
+
+    tools.sab = Sab()
+    commands = []
+    real = tools.chaptarr._req
+
+    async def req(method, path, **kw):
+        if path == "/queue":
+            return {"records": [{"bookId": 11, "downloadId": "SABnzbd_nzo_1", "trackedDownloadState": "downloading"}]}
+        if path == "/command":
+            commands.append(kw["json"]["name"])
+            return {}
+        return await real(method, path, **kw)
+
+    tools.chaptarr._req = req
+    assert asyncio.run(tools.book_fast()) == []  # nothing followed yet: no calls at all
+    asyncio.run(tools.book_deliveries())  # the normal round sees the download
+    assert asyncio.run(tools.book_fast()) == [] and commands == []  # still downloading
+    slots.clear()  # SABnzbd done
+    assert asyncio.run(tools.book_fast()) == []  # file not imported yet, but Chaptarr was nudged
+    assert commands == ["RefreshMonitoredDownloads"]
+    state["file"] = True  # Chaptarr imported it
+    (chat, text, files), = asyncio.run(tools.book_fast())
+    assert "ist da" in text and [n for _, n in files] == ["schwarm.epub"]
+    assert tools._follow() == ({}, {})  # done: the fast job is idle again
