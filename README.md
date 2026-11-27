@@ -39,6 +39,8 @@ Außerdem:
   des Autors), lässt suchen und schickt die Datei, sobald sie da ist; nach 7 Tagen ohne Treffer sagt er
   Bescheid. Einrichten: `CHAPTARR_URL`, `CHAPTARR_API_KEY` und den Bücher-Ordner nur lesend einbinden
   (`/mnt/user/media/books:/books:ro`, Pfade ggf. mit `BOOK_PATHS` übersetzen). Hörbücher noch nicht.
+  Chaptarr läuft überall mit wie Radarr/Sonarr: `/check`, Überwachung, Warnungen, `/downloads` (📚) und
+  Speicherplatz.
 - **Bewerten:** Unter Vorschlägen „👎👁 Bewerten“: 👎 = nicht meins, 👁 = schon gesehen (dann fragt der
   Bot „Wie fandest du’s?“ mit ⭐1–5). Nach einem frisch zu Ende geschauten Film oder einer Serie in Plex
   fragt der Bot das auch (höchstens zwei am Tag, „🔕 Nicht mehr fragen“ beendet es). Sterne aus Plex zählen
@@ -185,14 +187,14 @@ Außerdem:
   Funktionen, pro Nutzer und die letzten Probleme mit Fehlertext. Bei echten Fehlern (Absturz, KI antwortet
   nicht) bekommst du sofort eine Nachricht. Wird 90 Tage aufbewahrt; Nutzer sehen in /hilfe, dass du das
   siehst.
-- **Überwachung (Admin):** Alle `MONITOR_MINUTES` Minuten prüft der Bot Radarr, Sonarr, SABnzbd, TMDB
-  und Plex (ohne KI, kostet nichts). Fällt einer zweimal hintereinander aus, kommt „🚨 Sonarr ist nicht
+- **Überwachung (Admin):** Alle `MONITOR_MINUTES` Minuten prüft der Bot Radarr, Sonarr, Chaptarr, SABnzbd,
+  TMDB und Plex (ohne KI, kostet nichts). Fällt einer zweimal hintereinander aus, kommt „🚨 Sonarr ist nicht
   erreichbar“, wenn er zurück ist „✅ läuft wieder (war 12 Min. weg)“.
-- **Sonarr/Radarr-Warnungen (Admin):** Bei jeder Überwachungsrunde liest der Bot die Warnungen von
-  Sonarr/Radarr (System → Status) und meldet neue einmal, mit Erklärung auf Deutsch; verschwindet eine,
+- **Sonarr/Radarr/Chaptarr-Warnungen (Admin):** Bei jeder Überwachungsrunde liest der Bot die Warnungen von
+  Sonarr/Radarr/Chaptarr (System → Status) und meldet neue einmal, mit Erklärung auf Deutsch; verschwindet eine,
   kommt „✅ behoben“. Harmloses behebt er selbst: Ist ein Indexer oder Download-Client wegen Fehlern
   gesperrt, testet er ihn neu und lässt Sonarr/Radarr den Status prüfen – und sagt, ob es geholfen hat.
-  Zusätzlich prüft er, ob Indexer nur Hauptkategorien (5000/5100) haben; dann gibt es den Button
+  Zusätzlich prüft er (nur Sonarr/Radarr), ob Indexer nur Hauptkategorien (5000/5100) haben; dann gibt es den Button
   „🔧 Unterkategorien eintragen“ (ändert die Indexer-Einstellung, deshalb nur auf Knopfdruck). `/check`
   zeigt die aktuellen Warnungen mit.
 - **Suche ohne Ergebnis:** Startet der Bot eine Suche, wartet er im Hintergrund, bis Sonarr/Radarr fertig
@@ -333,7 +335,7 @@ Nur für den Admin:
   Erfolgsquote, Warnungen, Plex, Wunschliste) – auch per Text: „Zeig mir Anna“
 - `/statistik` – Nutzerzahl, aktive Nutzer, Anfragen, KI-Aufrufe, Tokens und Kosten (heute, Monat,
   gesamt, Ø pro Anfrage), Budget-Balken, die letzten Monate und alles pro Nutzer
-- `/check` – prüft Telegram, KI, Radarr, Sonarr, SABnzbd und TMDB: ✅/❌ mit Version, Antwortzeit und
+- `/check` – prüft Telegram, KI, Radarr, Sonarr, Chaptarr (falls eingerichtet), SABnzbd und TMDB: ✅/❌ mit Version, Antwortzeit und
   verständlichem Fehler („API-Key falsch (401)“, „nicht erreichbar – URL/Netzwerk prüfen“). Die KI-Prüfung
   kostet einen Mini-Aufruf (~60 Tokens).
 - `/aktivitaet [Name]` – was Nutzer fragen, was geklappt hat, wo es Probleme gab

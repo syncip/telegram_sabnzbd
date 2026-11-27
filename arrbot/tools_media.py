@@ -322,7 +322,7 @@ class MediaTools:
         from . import extras
 
         report = await self._media_report()
-        disks = await extras.disks(self.radarr, self.sonarr)
+        disks = await extras.disks(self.radarr, self.sonarr, self.chaptarr)
         acc = self._plex_of(chat_id)
         self._outbox.setdefault(chat_id, []).append(
             View(chat_id, "html", arg=mediamgr.storage_text(report, disks, acc.user_id if acc else None,

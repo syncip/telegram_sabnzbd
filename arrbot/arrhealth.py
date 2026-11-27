@@ -92,6 +92,8 @@ async def issues(arr: Any) -> list[Issue]:
     raw = await arr._req("GET", "/health") or []
     out = [Issue(arr.kind, h.get("source", "?"), (h.get("type") or "warning").lower(), h.get("message", "?"),
                  str(h.get("wikiUrl") or "")) for h in raw if (h.get("type") or "").lower() != "ok"]
+    if arr.kind == "Chaptarr":  # book categories (7000/8000) have no film/TV sub categories to add
+        return out
     try:
         out += category_issues(arr.kind, await arr._req("GET", "/indexer") or [])
     except ArrError:

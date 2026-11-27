@@ -107,7 +107,7 @@ services:
       LISTEN_API_KEY: ""
 
       # --- Überwachung & Updates ---
-      # Radarr, Sonarr, SABnzbd, TMDB und Plex so oft prüfen; Admins hören bei Ausfall und Rückkehr ("0" = aus)
+      # Radarr, Sonarr, Chaptarr, SABnzbd, TMDB und Plex so oft prüfen; Admins hören bei Ausfall und Rückkehr ("0" = aus)
       MONITOR_MINUTES: "5"
       # Einmal täglich nachsehen, ob es eine neue Bot-Version auf GitHub gibt ("" = aus)
       UPDATE_REPO: "syncip/telegram_sabnzbd"

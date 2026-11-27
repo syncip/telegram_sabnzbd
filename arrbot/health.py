@@ -56,7 +56,8 @@ def _short(e: Exception) -> str:
 
 async def run_checks(*, bot: Any, provider: LLMProvider | None, model: str, radarr: Any, sonarr: Any,
                      sab: Any, tmdb: Any, plex: Callable[[], Awaitable[str]] | None = None,
-                     light: bool = False, builder: LLMProvider | None = None, builder_model: str = "") -> list[Check]:
+                     light: bool = False, builder: LLMProvider | None = None, builder_model: str = "",
+                     chaptarr: Any = None) -> list[Check]:
     """light: only the services (no Telegram, no AI call) - for the regular monitoring."""
     async def telegram() -> str:
         me = await bot.get_me()
@@ -98,9 +99,10 @@ async def run_checks(*, bot: Any, provider: LLMProvider | None, model: str, rada
     skipped: list[Check] = []
     for name, svc, fn in (("Radarr", radarr, arr(radarr) if radarr else None),
                           ("Sonarr", sonarr, arr(sonarr) if sonarr else None),
+                          ("Chaptarr", chaptarr, arr(chaptarr) if chaptarr else None),
                           ("SABnzbd", sab, sabnzbd), ("TMDB", tmdb, tmdb_check), ("Plex", plex, plex)):
         if svc is None:
-            if light or name == "Plex":
+            if light or name in ("Plex", "Chaptarr"):
                 continue
             hint = {"TMDB": "nicht eingerichtet – ohne Key keine deutschen Titel, Top-Listen, Vorschläge",
                     "SABnzbd": "nicht eingerichtet – ohne SABnzbd keine Fertig-Uhrzeit"}.get(name, "nicht eingerichtet")

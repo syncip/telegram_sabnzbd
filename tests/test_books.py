@@ -108,3 +108,53 @@ def test_not_configured(tmp_path):
     tools = ToolRunner(None, None, Store(str(tmp_path)), "released")
     res = asyncio.run(tools.run(ToolCall("1", "book", {"title": "X"}), CHAT))
     assert "CHAPTARR_URL" in res.final
+
+
+def fake_ops():
+    """Chaptarr's system side: status, profiles, health, queue, disk space."""
+    def handler(req):
+        p = req.url.path
+        if p == "/api/v1/system/status":
+            return httpx.Response(200, json={"version": "0.9.1"})
+        if p == "/api/v1/qualityprofile":
+            return httpx.Response(200, json=[{"id": 1, "name": "eBook"}])
+        if p == "/api/v1/health":
+            return httpx.Response(200, json=[{"source": "IndexerStatusCheck", "type": "warning", "message": "Indexer weg"}])
+        if p == "/api/v1/indexer":
+            raise AssertionError("no sub category check for books")
+        if p == "/api/v1/queue":
+            assert req.url.params["includeBook"] == "true"
+            return httpx.Response(200, json={"records": [
+                {"id": 3, "bookId": 11, "book": {"title": "Der Schwarm"}, "author": {"authorName": "Frank Schätzing"},
+                 "size": 100, "sizeleft": 50, "status": "downloading", "downloadId": "x1"}]})
+        if p == "/api/v1/rootfolder":
+            return httpx.Response(200, json=[{"path": "/books"}])
+        if p == "/api/v1/diskspace":
+            return httpx.Response(200, json=[{"path": "/books", "freeSpace": 2**40, "totalSpace": 2**41}])
+        return httpx.Response(404)
+
+    return Chaptarr(ArrConfig("http://c", "k"), transport=httpx.MockTransport(handler))
+
+
+def test_chaptarr_in_check_health_downloads_disk(tmp_path):
+    from datetime import timezone
+
+    from arrbot import arrhealth, downloads, extras, health
+
+    ch = fake_ops()
+    checks = asyncio.run(health.run_checks(bot=None, provider=None, model="", radarr=None, sonarr=None, sab=None,
+                                           tmdb=None, light=True, chaptarr=ch))
+    (c,) = checks
+    assert c.name == "Chaptarr" and c.ok and "0.9.1" in c.line and "1 Qualitätsprofile" in c.line
+    (issue,) = asyncio.run(arrhealth.issues(ch))
+    assert issue.service == "Chaptarr" and issue.source in arrhealth.AUTO_FIX
+    snap = asyncio.run(downloads.collect(None, None, Store(str(tmp_path)), None, False, timezone.utc,
+                                         chaptarr=ch, book_owners={11: [CHAT]}))
+    (it,) = snap.items
+    assert it.kind == "book" and it.title == "Der Schwarm – Frank Schätzing" and it.owners == [CHAT] and it.pct == 50
+    assert "📚" in downloads.render(snap, CHAT, False, str, timezone.utc)
+    (d,) = asyncio.run(extras.disks(None, None, ch))
+    assert d.path == "/books" and d.free == 2**40
+    # not set up: no line in /check, nothing breaks
+    assert asyncio.run(health.run_checks(bot=None, provider=None, model="", radarr=None, sonarr=None, sab=None,
+                                         tmdb=None, light=True)) == []

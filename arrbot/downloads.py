@@ -7,13 +7,17 @@ showing it costs no AI tokens.
 from __future__ import annotations
 
 import html
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from typing import Callable
 
+from .arr import ArrError
 from .sabnzbd import SabQueue, eta_text, size_text
 from .state import Store, utcnow
+
+log = logging.getLogger(__name__)
 
 BAR_WIDTH = 10
 MAX_ACTIVE = 8
@@ -34,7 +38,7 @@ def bar(pct: float | None, width: int = BAR_WIDTH) -> str:
 @dataclass
 class Item:
     key: str  # "radarr:12" – matches Tracked.key
-    kind: str  # movie | series
+    kind: str  # movie | series | book
     title: str
     episodes: list[str] = field(default_factory=list)
     state: str = QUEUED
@@ -81,16 +85,24 @@ def _arr_state(q: dict) -> str:
 
 
 async def collect(radarr, sonarr, store: Store, sab_queue: SabQueue | None, sab_configured: bool,
-                  tz: tzinfo, now: datetime | None = None) -> Snapshot:
+                  tz: tzinfo, now: datetime | None = None, chaptarr=None,
+                  book_owners: dict[int, list[int]] | None = None) -> Snapshot:
     now = now or utcnow()
     tracked = store.state.tracked
     by_download: dict[str, Item] = {}
     items: list[Item] = []
-    for service, svc in (("radarr", radarr), ("sonarr", sonarr)):
+    for service, svc in (("radarr", radarr), ("sonarr", sonarr), ("chaptarr", chaptarr)):
         if svc is None:
             continue
-        for q in await svc.queue():
-            arr_id = q.get("movieId") if service == "radarr" else q.get("seriesId")
+        try:
+            records = await svc.queue()
+        except ArrError as e:
+            if service != "chaptarr":
+                raise
+            log.warning("%s", e)  # books are optional: the movie/series overview still comes
+            continue
+        for q in records:
+            arr_id = {"radarr": q.get("movieId"), "sonarr": q.get("seriesId")}.get(service, q.get("bookId"))
             key = f"{service}:{arr_id}"
             did = q.get("downloadId") or f"{key}:{q.get('id')}"
             ep = _episode(q)
@@ -98,7 +110,10 @@ async def collect(radarr, sonarr, store: Store, sab_queue: SabQueue | None, sab_
                 if ep and ep not in by_download[did].episodes:
                     by_download[did].episodes.append(ep)
                 continue
-            if service == "radarr":
+            if service == "chaptarr":
+                b, a = q.get("book") or {}, (q.get("author") or {}).get("authorName")
+                title = (b.get("title") or q.get("title", "?")) + (f" – {a}" if a else "")
+            elif service == "radarr":
                 m = q.get("movie") or {}
                 title = f"{m.get('title') or q.get('title', '?')}" + (f" ({m['year']})" if m.get("year") else "")
             else:
@@ -106,11 +121,11 @@ async def collect(radarr, sonarr, store: Store, sab_queue: SabQueue | None, sab_
             t = tracked.get(key)
             size, left = float(q.get("size") or 0), float(q.get("sizeleft") or 0)
             it = Item(
-                key=key, kind="movie" if service == "radarr" else "series", title=title,
+                key=key, kind={"radarr": "movie", "sonarr": "series"}.get(service, "book"), title=title,
                 episodes=[ep] if ep else [], state=_arr_state(q),
                 pct=100 * (size - left) / size if size else None,
                 mb_total=size / 2**20, mb_left=left / 2**20,
-                owners=list(t.chat_ids) if t else [],
+                owners=list(t.chat_ids) if t else list((book_owners or {}).get(arr_id) or []),
             )
             it.problems = [m for sm in q.get("statusMessages") or [] for m in sm.get("messages") or []]
             if q.get("errorMessage"):
@@ -161,7 +176,7 @@ def _when(iso: str, now: datetime, tz: tzinfo) -> str:
 
 
 def _icon(it: Item) -> str:
-    return "🎬" if it.kind == "movie" else "📺"
+    return {"movie": "🎬", "book": "📚"}.get(it.kind, "📺")
 
 
 def _eps(it: Item) -> str:
@@ -277,7 +292,7 @@ def render(snap: Snapshot, viewer: int, show_all: bool, name_of: Callable[[int],
         for (title, text), its in list(groups.items())[:MAX_ACTIVE]:
             eps = sorted({ep for i in its for ep in i.episodes})
             ep_txt = (" · " + ", ".join(eps[:4]) + (f" +{len(eps) - 4}" if len(eps) > 4 else "")) if eps else ""
-            tool = "Radarr" if its[0].kind == "movie" else "Sonarr"
+            tool = {"movie": "Radarr", "book": "Chaptarr"}.get(its[0].kind, "Sonarr")
             raw = its[0].problems[0] if its[0].problems else ""
             detail = f"\n   <i>{e(raw[:110] + ('…' if len(raw) > 110 else ''))}</i>" if raw and text == "Problem beim Download" else ""
             owners = sorted({o for i in its for o in i.owners})

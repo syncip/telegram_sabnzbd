@@ -118,10 +118,10 @@ def _size(b: float) -> str:
     return (f"{tb:.1f} TB" if tb >= 1 else f"{b / 2**30:.0f} GB").replace(".", ",")
 
 
-async def disks(radarr: Any, sonarr: Any) -> list[Disk]:
-    """The drives that hold the media root folders (one entry per drive)."""
+async def disks(radarr: Any, sonarr: Any, chaptarr: Any = None) -> list[Disk]:
+    """The drives that hold the media (and book) root folders (one entry per drive)."""
     found: dict[str, Disk] = {}
-    for svc in (radarr, sonarr):
+    for svc in (radarr, sonarr, chaptarr):
         if not svc:
             continue
         try:

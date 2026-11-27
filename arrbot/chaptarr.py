@@ -21,6 +21,7 @@ MEDIA = "ebook"  # what can be sent in Telegram (audiobooks are hundreds of MB)
 
 class Chaptarr(_ArrBase):
     kind = "Chaptarr"
+    _queue_params = {"includeBook": "true", "includeAuthor": "true"}
 
     def __init__(self, cfg: ArrConfig, transport: Any = None):
         super().__init__(cfg, transport)

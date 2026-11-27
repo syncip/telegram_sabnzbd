@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.20.0"
+__version__ = "1.21.0"
 
 CHANGES = {
+    "1.21.0": "Chaptarr wie Radarr/Sonarr eingebunden: /check prüft es (Version, Profile, Warnungen), die "
+              "Überwachung meldet Ausfall und Rückkehr, Chaptarr-Warnungen kommen wie bei Sonarr/Radarr (Indexer/"
+              "Download-Client wird selbst neu getestet), laufende Buch-Downloads stehen in /downloads und der "
+              "Bücher-Ordner im Speicherplatz",
     "1.20.0": "📚 Bücher mit Chaptarr: „Schick mir das Buch X“ – ist das E-Book da, kommt die Datei direkt in den "
               "Chat; sonst sucht Chaptarr es und der Bot schickt es, sobald es geladen ist",
     "1.19.0": "Vorschläge denken mit: „was für nebenbei beim Cardio“, „zum Einschlafen“, „mit den Kindern“ – "

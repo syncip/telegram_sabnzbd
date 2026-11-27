@@ -828,7 +828,11 @@ def build_app(cfg: Config) -> Application:
                 sab_queue = await sab.queue()
             except SabError as e:
                 log.warning("%s", e)
-        snap = await downloads.collect(radarr, sonarr, store, sab_queue, sab is not None, tz)
+        book_owners: dict[int, list[int]] = {}
+        for p in (tools.books.items if tools.books else []):
+            book_owners.setdefault(p.book_id, []).append(p.chat_id)
+        snap = await downloads.collect(radarr, sonarr, store, sab_queue, sab is not None, tz,
+                                       chaptarr=tools.chaptarr, book_owners=book_owners)
         query = _cb_query(query) or None
         text = downloads.render(snap, viewer, show_all, users.name, tz, show_finished=finished, query=query)
         # callback "d:<a|m>:<f|->[:<title filter>]": all/mine, with/without the finished list
@@ -915,14 +919,14 @@ def build_app(cfg: Config) -> Application:
 
     monitor = health.Monitor()
     arr_watch = arrhealth.HealthWatch(cfg.data_dir)
-    arr_services = {s.kind: s for s in (sonarr, radarr) if s is not None}
+    arr_services = {s.kind: s for s in (sonarr, radarr, tools.chaptarr) if s is not None}
     update_state: dict = {"latest": None, "told": None}
 
     async def check_text() -> str:
         checks = await health.run_checks(bot=app.bot, provider=agent.provider, model=cfg.llm.model,
                                          radarr=radarr, sonarr=sonarr, sab=sab, tmdb=tmdb, plex=plex_probe(),
                                          builder=tools.builder if cfg.recipe_model != cfg.llm.model else None,
-                                         builder_model=cfg.recipe_model)
+                                         builder_model=cfg.recipe_model, chaptarr=tools.chaptarr)
         update_state["latest"] = await version.latest(cfg.update_repo, token=cfg.update_token) or update_state["latest"]
         extra = [version.line(update_state["latest"]), *model_lines(True)]
         if cfg.monitor_minutes > 0:
@@ -938,14 +942,15 @@ def build_app(cfg: Config) -> Application:
 
     async def monitor_job(_: ContextTypes.DEFAULT_TYPE) -> None:
         checks = await health.run_checks(bot=None, provider=None, model="", radarr=radarr, sonarr=sonarr,
-                                         sab=sab, tmdb=tmdb, plex=plex_probe(), light=True)
+                                         sab=sab, tmdb=tmdb, plex=plex_probe(), light=True,
+                                         chaptarr=tools.chaptarr)
         for msg in monitor.update(checks):
             log.warning("Überwachung: %s", msg)
             await tell_admins(msg)
         await arr_health_round()
 
     async def arr_health_round() -> None:
-        """Sonarr/Radarr warnings: new ones (fixed if harmless), and what is gone."""
+        """Sonarr/Radarr/Chaptarr warnings: new ones (fixed if harmless), and what is gone."""
         new, gone = await arr_watch.poll(list(arr_services.values()))
         for issue in new:
             text = issue.text()
@@ -1232,7 +1237,7 @@ def build_app(cfg: Config) -> Application:
 
     async def cleanup_hits(rule: cleanup.Rule, fresh: bool = False) -> list[media.Title]:
         if rule.low_space_gb:
-            ds = await extras.disks(radarr, sonarr)
+            ds = await extras.disks(radarr, sonarr, tools.chaptarr)
             if not extras.low_disks(ds, rule.low_space_gb):
                 return []
         return cleanup.matches(rule, await media_report(fresh=fresh), rules.kept())
@@ -1604,7 +1609,7 @@ def build_app(cfg: Config) -> Application:
         return [f"• {m.get('title')} ({m.get('year')}) · {extras._size(m['sizeOnDisk'])}" for m in movies[:5]]
 
     async def send_disk(chat_id: int) -> None:
-        ds = await extras.disks(radarr, sonarr)
+        ds = await extras.disks(radarr, sonarr, tools.chaptarr)
         low = extras.low_disks(ds, cfg.disk_warn_gb)
         text = extras.render_disks(ds, cfg.disk_warn_gb, await cleanup_candidates() if low or ds else None)
         await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
@@ -1770,7 +1775,7 @@ def build_app(cfg: Config) -> Application:
     disk_warned: set[str] = set()
 
     async def disk_job(_: ContextTypes.DEFAULT_TYPE) -> None:
-        ds = await extras.disks(radarr, sonarr)
+        ds = await extras.disks(radarr, sonarr, tools.chaptarr)
         low = {d.path for d in extras.low_disks(ds, cfg.disk_warn_gb)}
         new = low - disk_warned
         if new:
