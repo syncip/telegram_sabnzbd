@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 
 CHANGES = {
+    "1.18.0": "Duplikate anzeigen: „Zeig mir die Duplikate“ bzw. „📋 Alle anzeigen“ – die ganze Liste seitenweise "
+              "mit Dateinamen, was weg soll und was bleibt; große Bibliotheken werden nicht mehr abgeschnitten. "
+              "„Arbeitest du noch?“ beantwortet der Bot sofort, auch mitten in langen Vorgängen: woran, seit "
+              "wann, welcher Schritt",
     "1.17.0": "Serien aus Vorschlägen und Toplisten fragen wieder nach den Staffeln (alle, Staffel X, nur neue). "
               "Nachfragen zu Gesehenem: Film oder Staffeln in Plex fertig geschaut, dann fragt der Bot hin und "
               "wieder, ob es weg kann (Löschen, Behalten, Später, Nie löschen). Nur in anderer Sprache: Der Bot "

@@ -194,3 +194,18 @@ def test_duplicate_settings_are_saved(tmp_path):
                                           "languages": ["Deutsch", "Englisch"]}), ADMIN))
     assert "Deutsch vor Englisch" in res.final and "1080p vor 4K" in res.final and "95" in res.final
     assert tools._dupe_prefs()["similarity"] == 95
+
+
+def test_duplicate_full_list_pages():
+    metas = [{"type": "movie", "ratingKey": str(i), "title": f"Film {i}", "Guid": [{"id": f"tmdb://{i}"}],
+              "Media": [media(i * 10, "1080", 100, ["ger"], 8), media(i * 10 + 1, "720", 100, ["ger"], 3)]}
+             for i in range(1, 11)]
+    job = dupes.find(metas, dupes.load_prefs(None))
+    text, buttons = dupes.preview(job, dupes.load_prefs(None))
+    assert "list" in [v for _, v in buttons]
+    text, buttons = dupes.full_list(job)
+    assert "Duplikate 1–8 von 10 (Seite 1/2)" in text and "🗑 720p" in text and "11.mkv" in text
+    assert [v for _, v in buttons][0] == "pg:next"
+    job.page = 1
+    text, buttons = dupes.full_list(job)
+    assert "9–10 von 10" in text and "pg:prev" in [v for _, v in buttons] and "pg:next" not in [v for _, v in buttons]

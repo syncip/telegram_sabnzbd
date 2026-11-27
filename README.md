@@ -152,7 +152,13 @@ Außerdem:
   fragt einzeln. Behalten wird zuerst die Sprache (Standard Deutsch vor Englisch), dann die Auflösung (Standard
   die höchste) – änderbar: „Bei Duplikaten 1080p vor 4K behalten“, „Auflösung ist wichtiger als Sprache“.
   Gelöscht wird über Plex (dort unter Einstellungen → Bibliothek „Löschen von Medien erlauben“ einschalten),
-  danach lesen Radarr/Sonarr den Titel neu ein.
+  danach lesen Radarr/Sonarr den Titel neu ein. Nur anschauen: „Zeig mir die Duplikate“ oder der Button
+  „📋 Alle anzeigen“ – die ganze Liste seitenweise, je Eintrag was weg soll und was bleibt, mit Dateinamen;
+  gelöscht wird nur per Button.
+- **„Arbeitest du noch?“:** Läuft etwas Langes (Duplikate, Medien-Manager, Vorschläge), beantwortet der Bot
+  Fragen wie „Arbeitest du noch?“, „Läuft das noch?“, „Hängst du?“ sofort und ohne KI: woran er arbeitet, seit
+  wann und welcher Schritt gerade läuft. Andere Nachrichten in der Zeit bekommen kurz „Ich bin noch bei … –
+  deine Nachricht ist gleich danach dran“.
 - **Aufräumregeln (Admin):** „Lösch Filme, die alle gesehen haben, nach 30 Tagen“, „Serien, die keiner
   nach einem Jahr angeschaut hat, nur wenn weniger als 100 GB frei sind“. Täglich um 11 Uhr kommt eine
   Liste mit „🗑 Alle löschen“ und „🛡 Behalten“ (wird nie wieder vorgeschlagen). Nur wenn du ausdrücklich

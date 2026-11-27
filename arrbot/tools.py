@@ -326,8 +326,9 @@ def build_admin_specs() -> list[ToolSpec]:
             "Doppelte Filme/Folgen in Plex finden (Inhalt: gleicher Titel/gleiche Folge und ähnliche Laufzeit) und "
             "die schlechtere Version löschen – erst Liste mit Bestätigung. action scan (Standard) oder settings: "
             "similarity (Prozent gleiche Laufzeit, Standard 97), languages (Reihenfolge, z. B. [\"de\",\"en\"]), "
-            "resolutions (Text, z. B. \"1080p vor 4K\"), language_first (Sprache wichtiger als Auflösung).",
-            obj({"action": {"type": "string", "enum": ["scan", "settings"]},
+            "resolutions (Text, z. B. \"1080p vor 4K\"), language_first (Sprache wichtiger als Auflösung). "
+            "action list: nur anzeigen (\"zeig mir die Duplikate\") – ganze Liste mit Dateien, löschen nur per Button.",
+            obj({"action": {"type": "string", "enum": ["scan", "list", "settings"]},
                  "kind": {"type": "string", "enum": ["movie", "series", "all"]},
                  "similarity": {"type": "number"}, "languages": {"type": "array", "items": {"type": "string"}},
                  "resolutions": {"type": "string"}, "language_first": {"type": "boolean"}}),
@@ -583,6 +584,7 @@ class ToolRunner:
         self.site_hours = 6
         self.approvals: approval.ApprovalStore | None = None  # set by the bot
         self.on_approval: Callable[[approval.Pending], Awaitable[None]] | None = None  # bot asks the admins
+        self.running: dict[int, tuple[str, float]] = {}  # chat -> (tool, since)
         self.trace: dict[int, list[tuple[str, str | None, str]]] = {}
 
     # ---- plumbing -------------------------------------------------------
@@ -698,7 +700,11 @@ class ToolRunner:
         return self.trace.pop(chat_id, [])
 
     async def run(self, call: ToolCall, chat_id: int) -> ToolResult:
-        r = await self._run(call, chat_id)
+        self.running[chat_id] = (call.name, asyncio.get_running_loop().time())  # for "arbeitest du noch?"
+        try:
+            r = await self._run(call, chat_id)
+        finally:
+            self.running.pop(chat_id, None)
         error = r.content if r.is_error else (r.final if (r.final or "").startswith("⚠️") else None)
         self.trace.setdefault(chat_id, []).append((call.name, error, r.final or ""))
         return r
@@ -1882,7 +1888,8 @@ class ToolRunner:
         except plex.PlexError as e:
             raise ArrError(str(e)) from e
         # Audio languages only come with the details: fetch them for the titles that matter.
-        wanted = [m for g in dupes.groups(metas) for m in g][:400]
+        wanted = [m for g in dupes.groups(metas) for m in g]
+        rest, wanted = wanted[400:], wanted[:400]  # the rest without audio details, but not left out
         sem = asyncio.Semaphore(4)
 
         async def detail(m: dict) -> dict:
@@ -1893,8 +1900,9 @@ class ToolRunner:
                     return m
             return {**m, "Media": full.get("Media") or m.get("Media")}
 
-        job = dupes.find(list(await asyncio.gather(*(detail(m) for m in wanted))), prefs)
-        text, buttons = dupes.preview(job, prefs)
+        job = dupes.find(list(await asyncio.gather(*(detail(m) for m in wanted))) + rest, prefs)
+        job.no_details = len(rest)
+        text, buttons = dupes.full_list(job) if action == "list" and job.items else dupes.preview(job, prefs)
         if not buttons:
             return Final(text)
         flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Duplikate", None), stage="dup", data=job)
@@ -1944,6 +1952,10 @@ class ToolRunner:
             job.pos += 1
         elif value == "one":
             job.pos = 0
+        elif value == "list" or value.startswith("pg:"):
+            job.page += {"pg:next": 1, "pg:prev": -1}.get(value, 0) if value != "list" else -job.page
+            text, buttons = dupes.full_list(job)
+            return Step(text, buttons)
         if value == "stop" or job.pos >= len(job.items):
             return Step(dupes.summary(job), done=True)
         text, buttons = dupes.one(job)

@@ -32,6 +32,7 @@ LANG_NAME = {"de": "Deutsch", "en": "Englisch", "fr": "Französisch", "es": "Spa
              "ja": "Japanisch"}
 UNSURE_SPAN = 10  # percent below the threshold that still get asked about
 PREVIEW_LINES = 15
+PAGE = 8  # duplicates per page of the full list (with file names: Telegram allows 4096 characters)
 
 
 def load_prefs(raw: str | None) -> dict:
@@ -93,6 +94,8 @@ class DupeJob:
     deleted: list[Dupe] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: int = 0
+    page: int = 0
+    no_details: int = 0  # titles whose audio languages were not fetched (very big libraries)
 
 
 def similarity(a: Version, b: Version) -> float:
@@ -224,11 +227,45 @@ def preview(job: DupeJob, prefs: dict) -> tuple[str, list[tuple[str, str]]]:
         lines += [f"• {d.name}: {d.similarity:.0f} % ähnlich" for d in unsure[:6]]
     if job.other_cuts:
         lines.append(f"\nℹ️ {job.other_cuts}× gleicher Titel mit deutlich anderer Laufzeit – lasse ich in Ruhe.")
+    if job.no_details:
+        lines.append(f"ℹ️ Bei {job.no_details} Titeln kenne ich die Tonspuren nicht (sehr große Bibliothek) – "
+                     "dort entscheidet die Auflösung.")
     buttons: list[tuple[str, str]] = []
     if sure:
         buttons.append((f"🗑 Alle {len(sure)} sicheren löschen ({size_text(sum(d.drop.size for d in sure))})", "all"))
     if job.items:
-        buttons += [("👆 Einzeln durchgehen", "one"), ("✖️ Abbrechen", "no")]
+        buttons += [("📋 Alle anzeigen (mit Dateien)", "list"), ("👆 Einzeln durchgehen", "one"),
+                    ("✖️ Abbrechen", "no")]
+    return "\n".join(lines), buttons
+
+
+def _short(path: str, n: int = 70) -> str:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    return name if len(name) <= n else name[: n - 1] + "…"
+
+
+def full_list(job: DupeJob) -> tuple[str, list[tuple[str, str]]]:
+    """One page of all duplicates: what goes, what stays, with the file names. Nothing is deleted here."""
+    pages = max(1, -(-len(job.items) // PAGE))
+    job.page = max(0, min(job.page, pages - 1))
+    start = job.page * PAGE
+    lines = [f"📋 Duplikate {start + 1}–{min(start + PAGE, len(job.items))} von {len(job.items)}"
+             + (f" (Seite {job.page + 1}/{pages})" if pages > 1 else "")]
+    for i, d in enumerate(job.items[start:start + PAGE], start + 1):
+        mark = "" if d.sure else f" ❓ nur {d.similarity:.0f} % gleich"
+        lines.append(f"\n{i}. {d.name}{mark}")
+        lines.append(f"   🗑 {d.drop.label}\n      {_short(d.drop.file)}")
+        lines.append(f"   ✅ {d.keep.label}\n      {_short(d.keep.file)}")
+    nav: list[tuple[str, str]] = []
+    if job.page > 0:
+        nav.append(("◀️ Zurück", "pg:prev"))
+    if job.page < pages - 1:
+        nav.append(("Weiter ▶️", "pg:next"))
+    sure = [d for d in job.items if d.sure]
+    buttons = nav + [("👆 Einzeln durchgehen", "one")]
+    if sure:
+        buttons.append((f"🗑 Alle {len(sure)} sicheren löschen ({size_text(sum(d.drop.size for d in sure))})", "all"))
+    buttons.append(("✖️ Fertig", "no"))
     return "\n".join(lines), buttons
 
 

@@ -45,7 +45,7 @@ from .tools import Candidate, Flow, Offer, ToolRunner, View, mute, release_langu
 from .tracker import Tracker
 from . import activity, approval, cleanup, guard, monthly, recipes, sitewatch, wishlist, extras, german, health, listen, media, plex, profiles, stats, version, watch
 from . import admin as admin_view
-from . import langpick, qprofiles
+from . import busy, langpick, qprofiles
 from .profiles import ProfileStore
 from .agent import PRICES, UsageStats
 from .users import ADMIN, BLOCKED, PENDING, USER, UserStore, limit_text, quality_label
@@ -184,6 +184,7 @@ def build_app(cfg: Config) -> Application:
     tools.sites, tools.site_hours = sites, cfg.site_hours
     listener = listen.Listener(cfg.listen_api_key, cfg.media_paths)
     answering: set[int] = set()  # chats in an AI turn: their additions are already logged with the question
+    busy_with: dict[int, list[tuple[str, float]]] = {}  # chat -> [(question, since)]: "arbeitest du noch?"
     profile_db = ProfileStore(cfg.data_dir)
     tools.profiles = profile_db
     plex_store = plex.PlexStore(cfg.data_dir)
@@ -448,6 +449,17 @@ def build_app(cfg: Config) -> Application:
 
     async def respond(chat_id: int, user_id: int, text: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("chat %s: %r", chat_id, text[:200])
+        now = asyncio.get_running_loop().time()
+        current = (busy_with.get(chat_id) or [None])[0]
+        if busy.is_status_question(text, current is not None):  # no AI, no limit: answered right away
+            tool = tools.running.get(chat_id)
+            await app.bot.send_message(chat_id, busy.status_text(
+                current[0] if current else None, current[1] if current else None,
+                tool[0] if tool else None, tool[1] if tool else None, now))
+            return
+        if current is not None:
+            await app.bot.send_message(chat_id, f"⏳ Ich bin noch bei „{current[0][:60]}“ – deine Nachricht "
+                                                "ist gleich danach dran.")
         if not users.is_admin(user_id) and (v := shield.message(user_id, text)):
             activity_db.record(user_id, text, [], activity.LIMIT, f"Spam: {v.reason}")
             await guard_verdict(user_id, v)
@@ -465,6 +477,7 @@ def build_app(cfg: Config) -> Application:
         tools.take_trace(chat_id)
         turn_tokens.pop(user_id, None)
         answering.add(chat_id)
+        busy_with.setdefault(chat_id, []).append((text, now))
         failed = None
         try:
             reply = await asyncio.wait_for(agent.handle(chat_id, text, user_id), RESPONSE_TIMEOUT)
@@ -482,6 +495,11 @@ def build_app(cfg: Config) -> Application:
         finally:
             typing.cancel()
             answering.discard(chat_id)
+            mine = busy_with.get(chat_id) or []
+            if (text, now) in mine:
+                mine.remove((text, now))
+            if not mine:
+                busy_with.pop(chat_id, None)
         await log_activity(chat_id, user_id, text, reply, failed)
 
         if reply.strip():
