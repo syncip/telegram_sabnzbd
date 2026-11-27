@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.22.1"
+__version__ = "1.22.2"
 
 CHANGES = {
+    "1.22.2": "Buchauswahl lesbar: mehrere Ausgaben desselben Buchs werden zu einem zusammengefasst, die vollen "
+              "Titel (mit Jahr und Seiten) stehen nummeriert in der Nachricht, die Buttons sind kurz. Bereitet "
+              "Chaptarr ein Buch noch vor („being prepared by the metadata server“), kommt kein Fehler mehr: der "
+              "Bot wartet, lässt suchen, sobald es drin ist, und schickt es",
     "1.22.1": "Der Bot weiß, was er außerhalb des Gesprächs geschickt hat (Ergebnis nach einem Button, „📚 … ist "
               "da“): „Schick mir das letzte Buch nochmal“ klappt jetzt. „Welche Bücher haben wir?“ zeigt die "
               "Bücher aus Chaptarr mit Buttons zum Schicken",

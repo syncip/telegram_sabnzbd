@@ -34,7 +34,8 @@ Außerdem:
   nichts Düsteres oder Verschachteltes) und kurze Folgen (nebenbei bis ~35 Min., Einschlafen bis 30 Min.) mehr
   als dein sonstiger Geschmack; die Folgenlänge steht dabei.
 - **📚 Bücher (mit Chaptarr):** „Schick mir das Buch Der Schwarm“, „Ich will Limit von Schätzing lesen“.
-  Mehrere Treffer: Buttons zur Auswahl (📗 = schon da). Ist das E-Book in Chaptarr, kommt die Datei sofort in
+  Mehrere Treffer: nummerierte Liste mit vollem Titel, Jahr und Seiten, dazu kurze Buttons (📗 = schon da);
+  Ausgaben desselben Buchs fasst der Bot zusammen. Ist das E-Book in Chaptarr, kommt die Datei sofort in
   den Chat (EPUB bevorzugt, bis 50 MB). Sonst fügt der Bot es in Chaptarr hinzu (nur dieses Buch, nicht alle
   des Autors), lässt suchen und schickt die Datei, sobald sie da ist; nach 7 Tagen ohne Treffer sagt er
   Bescheid. Einrichten: `CHAPTARR_URL`, `CHAPTARR_API_KEY` und den Bücher-Ordner nur lesend einbinden

@@ -79,7 +79,12 @@ class Chaptarr(_ArrBase):
             "authorMonitoring": {"monitor": "none", "monitorFuture": False, f"{media}Monitored": True,
                                  "searchForMissing": False},
         }
-        res = await self._req("POST", "/book/import", json=body)
+        try:
+            res = await self._req("POST", "/book/import", json=body)
+        except ArrError as e:
+            if "being prepared" in str(e) or "saved your request" in str(e):
+                return None  # the metadata server is still building author/book; Chaptarr adds it later itself
+            raise
         if isinstance(res, dict) and res.get("id"):
             return int(res["id"])
         if isinstance(res, dict) and res.get("pendingId"):

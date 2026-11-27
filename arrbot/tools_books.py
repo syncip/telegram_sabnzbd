@@ -52,7 +52,7 @@ class BookTools:
         if fmt and self.book_formats is not None:
             self.book_formats.set(chat_id, fmt)  # "als PDF" = from now on PDF
         term = f"{title} {author}".strip() if author else title
-        hits = [h for h in await self.chaptarr.lookup(term) if h.get("title")][:MAX_HITS]
+        hits = books.dedupe([h for h in await self.chaptarr.lookup(term) if h.get("title")])[:MAX_HITS]
         if not hits:
             return Final(f"🤷 Zu „{term}“ finde ich kein Buch. Stimmt der Titel? Mit Autor klappt es oft besser.")
         data = {"hits": hits, "hit": 0 if len(hits) == 1 else None, "fmt": fmt or self._book_fmt(chat_id)}
@@ -111,9 +111,8 @@ class BookTools:
     def _book_question(self, data: dict) -> Step:
         hits = data["hits"]
         if data["hit"] is None:
-            return Step("📚 Welches Buch meinst du?",
-                        [(("📗 " if h.get("id") else "") + books.label(h)[:60], f"b{i}") for i, h in enumerate(hits)]
-                        + [("✖️ Keins davon", "no")])
+            return Step("\n".join(["📚 Welches Buch meinst du? (📗 = schon da)", ""] + books.numbered(hits)),
+                        [(books.button(i, h), f"b{i}") for i, h in enumerate(hits)] + [("✖️ Keins davon", "no")])
         return Step(f"📚 „{books.label(hits[data['hit']])}“ – in welchem Format willst du es?\n"
                     "Ich merke es mir für die nächsten Bücher (ändern: „Bücher als PDF“).",
                     [(text, f"f:{fmt}") for fmt, text in books.OFFER] + [("✖️ Doch nicht", "no")])
@@ -164,8 +163,11 @@ class BookTools:
         else:
             book_id = await self.chaptarr.add(hit)
             if book_id is None:
-                return (f"⏳ Chaptarr lädt gerade noch die Daten zu „{name}“. Frag mich in ein paar Minuten "
-                        "nochmal danach.")
+                if self.books is not None:
+                    ref = {k: hit.get(k) for k in ("title", "titleSlug", "foreignBookId") if hit.get(k)}
+                    self.books.add(0, chat_id, name, fmt or "", ref)
+                return (f"⏳ „{name}“ bereitet Chaptarr gerade noch vor (die Buchdaten werden erst geladen). "
+                        "Ich bleibe dran: sobald es drin ist, wird gesucht und ich schicke es dir.")
         await self.chaptarr.want(book_id)
         if self.books is not None:
             self.books.add(book_id, chat_id, name, fmt or "")
@@ -179,6 +181,15 @@ class BookTools:
             return out
         for p in list(self.books.items):
             try:
+                if not p.book_id:  # waited for Chaptarr's metadata: is it in the library now?
+                    if book_id := await self.chaptarr.find(p.ref):
+                        await self.chaptarr.want(book_id)
+                        self.books.found(p, book_id)
+                    elif self.books.expired(p):
+                        self.books.remove(p)
+                        out.append((p.chat_id, f"🤷 „{p.title}“ hat Chaptarr in {books.WAIT_DAYS} Tagen nicht "
+                                               "hinzugefügt. Frag mich später nochmal danach.", []))
+                    continue
                 files = await self.chaptarr.files(p.book_id)
             except ArrError as e:
                 log.info("Buch %s: %s", p.title, e)

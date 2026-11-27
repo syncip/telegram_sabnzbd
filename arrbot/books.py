@@ -17,7 +17,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -51,6 +51,48 @@ def label(hit: dict) -> str:
     if author:
         out += f" – {author}"
     return out + (f" ({year})" if year.isdigit() else "")
+
+
+def _key(hit: dict) -> tuple[str, str]:
+    def norm(s: str) -> str:
+        return " ".join("".join(c if c.isalnum() else " " for c in s.lower()).split())
+    author = (hit.get("author") or {}).get("authorName") or hit.get("authorTitle") or ""
+    return norm(hit.get("title") or ""), norm(author)
+
+
+def dedupe(hits: list[dict]) -> list[dict]:
+    """One entry per book: Chaptarr lists each edition/printing on its own. Keeps the one in the library,
+    else the newest; the order of first appearance stays."""
+    best: dict[tuple[str, str], dict] = {}
+    for h in hits:
+        k = _key(h)
+        old = best.get(k)
+        if old is None or (h.get("id") and not old.get("id")) or (
+                bool(h.get("id")) == bool(old.get("id")) and (h.get("releaseDate") or "") > (old.get("releaseDate") or "")):
+            best[k] = h
+    seen, out = set(), []
+    for h in hits:
+        k = _key(h)
+        if k not in seen:
+            seen.add(k)
+            out.append(best[k])
+    return out
+
+
+def button(i: int, hit: dict) -> str:
+    """Short button text; the full title is in the message (Telegram cuts long buttons)."""
+    title = hit.get("title") or "?"
+    year = (hit.get("releaseDate") or "")[:4]
+    short = title if len(title) <= 34 else title[:33].rstrip(" ,:-–") + "…"
+    return ("📗 " if hit.get("id") else "") + f"{i + 1}. {short}" + (f" ({year})" if year.isdigit() else "")
+
+
+def numbered(hits: list[dict]) -> list[str]:
+    out = []
+    for i, h in enumerate(hits):
+        pages = h.get("pageCount")
+        out.append(f"{i + 1}. " + ("📗 " if h.get("id") else "") + label(h) + (f", {pages} S." if pages else ""))
+    return out
 
 
 def map_path(path: str, mapping: str | None) -> str:
@@ -173,6 +215,11 @@ class Pending:
     title: str
     at: str
     fmt: str = ""
+    ref: dict = field(default_factory=dict)  # book_id 0 = not in Chaptarr yet: title/titleSlug/foreignBookId
+
+    @property
+    def ident(self) -> tuple:
+        return (self.book_id or self.ref.get("foreignBookId") or self.title, self.chat_id)
 
 
 class PendingBooks:
@@ -192,15 +239,22 @@ class PendingBooks:
         tmp.write_text(json.dumps([asdict(x) for x in self.items], ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.path)
 
-    def add(self, book_id: int, chat_id: int, title: str, fmt: str = "") -> None:
+    def add(self, book_id: int, chat_id: int, title: str, fmt: str = "", ref: dict | None = None) -> None:
         with self._lock:
-            if not any(x.book_id == book_id and x.chat_id == chat_id for x in self.items):
-                self.items.append(Pending(book_id, chat_id, title, datetime.now(timezone.utc).isoformat(), fmt))
+            new = Pending(book_id, chat_id, title, datetime.now(timezone.utc).isoformat(), fmt, dict(ref or {}))
+            if not any(x.ident == new.ident for x in self.items):
+                self.items.append(new)
                 self._save()
 
     def remove(self, p: Pending) -> None:
         with self._lock:
-            self.items = [x for x in self.items if not (x.book_id == p.book_id and x.chat_id == p.chat_id)]
+            self.items = [x for x in self.items if x.ident != p.ident]
+            self._save()
+
+    def found(self, p: Pending, book_id: int) -> None:
+        """A request that waited for Chaptarr's metadata is in the library now."""
+        with self._lock:
+            p.book_id = book_id
             self._save()
 
     def expired(self, p: Pending, now: datetime | None = None) -> bool:

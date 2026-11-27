@@ -81,7 +81,8 @@ def test_pick_add_search_then_deliver(tmp_path):
     tools, state, calls = setup(tmp_path)
     asyncio.run(tools.run(ToolCall("1", "book", {"title": "Der Schwarm"}), CHAT))
     flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
-    assert flow.step.buttons[0] == ("Der Schwarm – Frank Schätzing (2004)", "b0") and flow.step.buttons[-1][1] == "no"
+    assert flow.step.buttons[0] == ("1. Der Schwarm (2004)", "b0") and flow.step.buttons[-1][1] == "no"
+    assert "1. Der Schwarm – Frank Schätzing (2004)" in flow.step.text
     flow = asyncio.run(tools.choose(flow.id, "b0"))
     assert flow.step.done and "schicke es dir, sobald es da ist" in flow.step.text
     body = json.loads(next(c for m, p, c in calls if p == "/api/v1/book/import"))
@@ -235,8 +236,51 @@ def test_book_library_lists_and_sends(tmp_path):
     flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
     assert "Da sind 2 Bücher" in flow.step.text and "🔎 Noch gesucht (1): Der Schwarm" in flow.step.text
     assert flow.step.text.index("Metro 2033") < flow.step.text.index("Limit")  # newest first
-    assert flow.step.buttons[0][0].startswith("📗 Metro 2033")
+    assert flow.step.buttons[0][0] == "📗 1. Metro 2033"
     flow = asyncio.run(tools.choose(flow.id, "b1"))  # Limit, format epub is known
     assert flow.step.done and "Hier ist „Limit" in flow.step.text
     res = asyncio.run(tools.run(ToolCall("2", "book_library", {"query": "king"}), CHAT))
     assert "keine Bücher" in res.final
+
+
+def test_editions_merged_and_long_titles_readable():
+    long = "Schraubenverbindungen: Grundlagen, Berechnung, Eigenschaften, Handhabung"
+    a = {"author": {"authorName": "Hubert Wiegand"}}
+    hits = [dict(a, title=long, releaseDate="2007-01-01"), dict(a, title=long + " ", releaseDate="2013-05-01"),
+            dict(a, title="Schraubenverbindungen: Grundlagen - Funktion - Berechnung", releaseDate="2010-01-01"),
+            dict(a, title=long, releaseDate="1988-01-01", id=4)]
+    out = books.dedupe(hits)
+    assert len(out) == 2 and out[0].get("id") == 4  # the one in the library wins
+    assert books.button(0, out[0]) == "📗 1. Schraubenverbindungen: Grundlagen… (1988)"
+    assert long in books.numbered(out)[0]
+    assert books.dedupe(hits[:2])[0]["releaseDate"] == "2013-05-01"  # else the newest printing
+
+
+def test_metadata_still_prepared_then_found(tmp_path):
+    tools, state, calls = setup(tmp_path)
+    real = tools.chaptarr._req
+    prepared = {"done": False}
+
+    async def req(method, path, **kw):
+        if path == "/book/import":
+            from arrbot.arr import ArrError
+            raise ArrError("Chaptarr POST /book/import -> HTTP 400: Failed to import book: The author and requested "
+                           "book are being prepared by the metadata server. Chaptarr saved your request")
+        if path == "/book" and method == "GET" and prepared["done"]:
+            return [{"id": 11, "title": "Der Schwarm"}]
+        return await real(method, path, **kw)
+
+    tools.chaptarr._req = req
+    asyncio.run(tools.run(ToolCall("1", "book", {"title": "Der Schwarm"}), CHAT))
+    flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
+    flow = asyncio.run(tools.choose(flow.id, "b0"))
+    assert flow.step.done and "bereitet Chaptarr gerade noch vor" in flow.step.text and "❌" not in flow.step.text
+    assert books.PendingBooks(str(tmp_path)).items[0].book_id == 0  # survives a restart
+    assert asyncio.run(tools.book_deliveries()) == []  # still preparing
+    prepared["done"] = True
+    assert asyncio.run(tools.book_deliveries()) == []  # in the library now: searched, no file yet
+    assert tools.books.items[0].book_id == 11
+    assert any(p == "/api/v1/command" for _, p, _ in calls)
+    state["file"] = True
+    (chat, text, files), = asyncio.run(tools.book_deliveries())
+    assert "ist da" in text and [n for _, n in files] == ["schwarm.epub"]
