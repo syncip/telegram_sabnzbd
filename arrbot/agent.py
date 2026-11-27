@@ -204,6 +204,7 @@ class Agent:
                 conv.groups = set()
             conv.last_used = utcnow()
             conv.groups |= toolgroups.groups_for(text)
+            self.tools.user_text[chat_id] = text
             every = self.tools.specs_for(user_id or chat_id)
             full = False
             self.usage.request()

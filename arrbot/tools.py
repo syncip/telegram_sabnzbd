@@ -86,6 +86,7 @@ class ToolRunner(MediaTools, AdminTools, DiscoverTools, GermanTools, BookTools):
         self.approvals: approval.ApprovalStore | None = None  # set by the bot
         self.on_approval: Callable[[approval.Pending], Awaitable[None]] | None = None  # bot asks the admins
         self.running: dict[int, tuple[str, float]] = {}  # chat -> (tool, since)
+        self.user_text: dict[int, str] = {}  # chat -> the message being answered (to check the AI's guesses)
         self.trace: dict[int, list[tuple[str, str | None, str]]] = {}
 
     # ---- plumbing -------------------------------------------------------

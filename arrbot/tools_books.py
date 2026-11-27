@@ -58,6 +58,9 @@ class BookTools:
         if self.chaptarr is None:
             return Final(NOT_SET_UP)
         fmt = books.norm_format(format)
+        said = self.user_text.get(chat_id)
+        if fmt and said is not None and not books.mentions_format(said):
+            fmt = None  # the AI filled it in by itself: ask the user instead
         if fmt and self.book_formats is not None:
             self.book_formats.set(chat_id, fmt)  # "als PDF" = from now on PDF
         term = f"{title} {author}".strip() if author else title
@@ -134,12 +137,15 @@ class BookTools:
         self._outbox.setdefault(chat_id, []).append(flow)
         return Final("")
 
-    async def _t_book_library(self, chat_id: int, query: str | None = None, mine: bool = False) -> Final:
+    async def _t_book_library(self, chat_id: int, query: str | None = None, mine: bool = False,
+                              check: bool = False) -> Final:
         """📚 The shelf: the user's books (mine) or all books in Chaptarr, paged, with buttons to send again."""
         if self.chaptarr is None:
             return Final(NOT_SET_UP)
         d = {"hits": [], "hit": None, "fmt": self._book_fmt(chat_id), "page": 0, "query": (query or "").strip(),
              "mode": "mine" if mine else "all", "note": ""}
+        if check:
+            d["note"] = await self._shelf_rescan(chat_id)
         await self._shelf_load(chat_id, d)
         if not d["shelf"]:
             q = d["query"]
@@ -174,6 +180,49 @@ class BookTools:
         d["shelf"] = entries
         d["page"] = 0
 
+    async def _shelf_rescan(self, chat_id: int) -> str:
+        """Let Chaptarr rescan its folders, check the files on disk and drop deleted books from the user's list."""
+        try:
+            await self.chaptarr._req("POST", "/command", json={"name": "RescanFolders"})
+        except ArrError as e:
+            log.info("Chaptarr RescanFolders: %s", e)
+        lib = [b for b in await self.chaptarr.library() if b.get("title")]
+        by_id = {b.get("id"): b for b in lib}
+        by_foreign = {b.get("foreignBookId"): b for b in lib if b.get("foreignBookId")}
+        waiting = {p.book_id for p in (self.books.items if self.books is not None else [])}
+        waiting_titles = {p.title for p in (self.books.items if self.books is not None else [])}
+        mine = self.book_history.of(chat_id) if self.book_history is not None else []
+
+        async def on_disk(b: dict) -> bool | None:
+            """True/False = file there or not; None = cannot tell (bot cannot read the book folder)."""
+            try:
+                files = await self.chaptarr.files(int(b["id"]))
+            except ArrError:
+                return None
+            return any(os.path.isfile(books.map_path(f.get("path") or "", self.book_paths)) for f in files) \
+                if files else False
+
+        found = [by_id.get(e.get("id")) or by_foreign.get(e.get("foreign")) for e in mine]
+        disk = await asyncio.gather(*(on_disk(b) if b and books.has_file(b) else asyncio.sleep(0, None)
+                                      for b in found))
+        trust_disk = any(x is True for x in disk)  # at least one readable file: the mapping works
+        keep, gone = [], []
+        for e, b, there in zip(mine, found, disk):
+            pending = (b and b.get("id") in waiting) or any(e.get("title", "") in t for t in waiting_titles)
+            if b and books.has_file(b) and (there is not False or not trust_disk):
+                keep.append(e)
+            elif pending:
+                keep.append(e)  # still on its way
+            else:
+                gone.append(e.get("title") or "?")
+        if self.book_history is not None and gone:
+            self.book_history.keep(chat_id, keep)
+        if not gone:
+            return "🔄 Neu geprüft: alle deine Bücher sind noch da."
+        return (f"🔄 Neu geprüft: {len(gone)} nicht mehr da und aus deiner Liste genommen: "
+                + ", ".join(gone[:6]) + (" …" if len(gone) > 6 else "") + "."
+                + ("" if trust_disk else "\n(Die Dateien selbst konnte ich nicht ansehen – BOOK_PATHS? Siehe /check.)"))
+
     def _shelf_step(self, d: dict) -> Step:
         shelf, n = d["shelf"], len(d["shelf"])
         pages = max(1, -(-n // PAGE))
@@ -200,8 +249,11 @@ class BookTools:
         nav = ([("◀️ Zurück", f"pg:{page - 1}")] if page > 0 else []) + (
             [("Weiter ▶️", f"pg:{page + 1}")] if page < pages - 1 else [])
         other = ("📚 Alle Bücher", "all") if d["mode"] == "mine" else ("👤 Meine Bücher", "mine")
-        buttons = nums + nav + [other, ("✖️ Schließen", "no")]
-        rows = [4] * (len(nums) // 4) + ([len(nums) % 4] if len(nums) % 4 else []) + ([len(nav)] if nav else []) + [2]
+        tail = [other, ("🔄 Neu prüfen", "rescan")] + (
+            [("🧹 Liste leeren", "reset")] if d["mode"] == "mine" else []) + [("✖️ Schließen", "no")]
+        buttons = nums + nav + tail
+        rows = [4] * (len(nums) // 4) + ([len(nums) % 4] if len(nums) % 4 else []) + ([len(nav)] if nav else []) + [
+            2, len(tail) - 2]
         return Step("\n".join(lines), buttons, rows=rows)
 
     async def book_access(self) -> list[str]:
@@ -263,6 +315,26 @@ class BookTools:
                 d["mode"], d["note"] = value, ""
                 await self._shelf_load(flow.chat_id, d)
                 return self._shelf_step(d)
+            if value == "rescan":
+                try:
+                    d["note"] = await self._shelf_rescan(flow.chat_id)
+                except ArrError as e:
+                    d["note"] = f"❌ {e}"
+                await self._shelf_load(flow.chat_id, d)
+                return self._shelf_step(d)
+            if value == "reset":
+                return Step("🧹 Deine Bücherliste leeren? Die Bücher bleiben auf dem Server und unter „📚 Alle "
+                            "Bücher“; deine Liste füllt sich wieder mit dem, was du ab jetzt anforderst.",
+                            [("🧹 Ja, leeren", "reset!"), ("↩️ Zurück", "back")], rows=[2])
+            if value == "reset!":
+                if self.book_history is not None:
+                    self.book_history.keep(flow.chat_id, [])
+                d["mode"] = "mine"
+                await self._shelf_load(flow.chat_id, d)
+                d["note"] = "🧹 Deine Liste ist leer." + (f" {d['note']}" if d.get("note") else "")
+                return self._shelf_step(d)
+            if value == "back":
+                return self._shelf_step(d)
             if value.startswith("n") and value[1:].isdigit() and int(value[1:]) < len(d["shelf"]):
                 d["hits"], d["hit"] = [d["shelf"][int(value[1:])]["hit"]], 0
                 value = "shelf"
@@ -285,9 +357,12 @@ class BookTools:
         elif value.startswith("b") and 0 <= idx < len(d["hits"]):
             d["hit"] = idx
         elif value.startswith("f:") and (fmt := books.norm_format(value[2:])):
-            d["fmt"] = fmt
+            d["fmt"], d["asked"] = fmt, True
             if self.book_formats is not None:
                 self.book_formats.set(flow.chat_id, fmt)
+        elif d.get("again") and value == "no":
+            self.flows.pop(flow.id, None)
+            return Step(f"👍 Okay, bleibt bei {books.NAMES.get(d.get('was'), 'dem Format')}.", done=True)
         elif d.get("shelf") is not None and value == "no" and d["hit"] is not None:
             d["hits"], d["hit"], d["note"] = [], None, ""
             return self._shelf_step(d)
@@ -300,18 +375,29 @@ class BookTools:
             return self._book_question(d)
         if d.get("shelf") is not None:  # from the shelf: send it and show the shelf again for the next one
             try:
-                d["note"] = await self._book_pick(flow.chat_id, d["hits"][d["hit"]], d["fmt"])
+                d["note"] = await self._book_pick(flow.chat_id, d["hits"][d["hit"]], d["fmt"], False)
             except ArrError as e:
                 d["note"] = f"❌ {e}"
             d["hits"], d["hit"] = [], None
             return self._shelf_step(d)
         self.flows.pop(flow.id, None)
         try:
-            return Step(await self._book_pick(flow.chat_id, d["hits"][d["hit"]], d["fmt"]), done=True)
+            offer = not d.get("again") and not d.get("asked")
+            return Step(await self._book_pick(flow.chat_id, d["hits"][d["hit"]], d["fmt"], offer), done=True)
         except ArrError as e:
             return Step(f"❌ {e}", done=True)
 
-    async def _book_pick(self, chat_id: int, hit: dict, fmt: str | None = None) -> str:
+    def _offer_other_format(self, chat_id: int, hit: dict, fmt: str) -> None:
+        """Sent in the remembered format without asking: one tap for another one."""
+        others = [(t, f"f:{f}") for f, t in books.OFFER if f != fmt]
+        data = {"hits": [hit], "hit": 0, "fmt": None, "again": True, "was": fmt}
+        flow = Flow(uuid.uuid4().hex[:10], chat_id, Candidate("movie", 0, "Buch", None), stage="book", data=data)
+        flow.step = Step(f"🔄 Als {books.NAMES.get(fmt, fmt)} geschickt. Lieber ein anderes Format? "
+                         "(Ich merke mir dann das neue.)", others + [("✔️ Passt so", "no")])
+        self.flows[flow.id] = flow
+        self._outbox.setdefault(chat_id, []).append(flow)
+
+    async def _book_pick(self, chat_id: int, hit: dict, fmt: str | None = None, offer: bool = True) -> str:
         """Send it if Chaptarr has the file, else add/search it and remember the request."""
         name = books.label(hit)
         book_id = int(hit["id"]) if hit.get("id") else None
@@ -323,6 +409,8 @@ class BookTools:
                 send, problems = await books.prepare(files, self.book_paths, fmt, self._cache_dir())
                 if send:
                     self._outbox.setdefault(chat_id, []).append(View(chat_id, "file", arg=send))
+                    if offer and fmt:
+                        self._offer_other_format(chat_id, hit, fmt)
                     return f"📚 Hier ist „{name}“." + (f"\n⚠️ {problems[0]}" if problems else "")
                 return f"⚠️ „{name}“ ist da, aber ich kann es nicht schicken: {problems[0]}"
         else:

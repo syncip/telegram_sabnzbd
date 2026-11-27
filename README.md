@@ -42,7 +42,8 @@ Außerdem:
   (`/mnt/user/media/books:/books:ro`, Pfade ggf. mit `BOOK_PATHS` übersetzen). Hörbücher noch nicht.
   Chaptarr läuft überall mit wie Radarr/Sonarr: `/check`, Überwachung, Warnungen, `/downloads` (📚) und
   Speicherplatz.
-  - **Format:** Beim ersten Buch fragt der Bot: EPUB, PDF oder Kindle (AZW3) – und merkt es sich. Ändern:
+  - **Format:** Beim ersten Buch fragt der Bot: EPUB, PDF oder Kindle (AZW3) – und merkt es sich. Danach
+    kommt unter jedem Buch „Lieber ein anderes Format?“ mit Buttons. Ändern:
     „Bücher als PDF“ oder „schick es mir für Kindle“. Gibt es das Buch nicht im Format, wandelt der Bot es mit
     Calibre um (ist im Image) und schickt es, wenn es unter 50 MB bleibt; sonst kommt das Original.
   - **Empfehlungen:** „Ich mag die Metro-Bücher, empfiehl mir ähnliche“ – fünf Bücher mit kurzem Grund, je ein
@@ -54,7 +55,9 @@ Außerdem:
     Import in Chaptarr an und sagt dir, wenn Chaptarr ein Buch nicht übernehmen kann (z. B. Pfad-Problem).
   - **/buecher** (oder „meine Bücher“): deine Bücher, 8 pro Seite – 📗 da, 🔎 wird gesucht, ⏳ Chaptarr bereitet
     es vor. Mit „📥 3“ kommt Buch 3 nochmal, die Liste bleibt offen. „📚 Alle Bücher“ schaltet auf alles auf
-    dem Server um; „haben wir was von King?“ bzw. `/buecher King` filtert.
+    dem Server um; „haben wir was von King?“ bzw. `/buecher King` filtert. „🔄 Neu prüfen“ lässt Chaptarr
+    die Ordner neu einlesen, prüft die Dateien und nimmt gelöschte Bücher aus deiner Liste (auch: „ich habe
+    Bücher gelöscht“); „🧹 Liste leeren“ setzt deine Liste zurück (die Bücher bleiben auf dem Server).
   - `/check` zeigt, ob der Bot die Bücher-Dateien lesen kann (sonst mit Tipp für `BOOK_PATHS`) und ob Calibre da ist.
   - „Schick mir das letzte Buch nochmal“ versteht er: Was er ohne Nachfrage geschickt hat (Buch ist da,
     Ergebnis nach einem Button), bekommt die KI bei deiner nächsten Nachricht mit.

@@ -138,8 +138,10 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             "book_library",
             "Bücherliste mit Buttons zum (erneut) Schicken. mine=true: die Bücher des Nutzers (\"meine Bücher\", "
             "\"Liste meiner Bücher\", \"was habe ich gelesen/bekommen\"); sonst alle auf dem Server (\"welche "
-            "Bücher haben wir\", \"was ist heruntergeladen\"). query: Titel/Autor zum Filtern (\"was von King?\").",
-            obj({"query": {"type": "string"}, "mine": {"type": "boolean"}}, []),
+            "Bücher haben wir\", \"was ist heruntergeladen\"). query: Titel/Autor zum Filtern (\"was von King?\"). "
+            "check=true: vorher neu prüfen, was noch da ist (\"ich habe Bücher gelöscht\", \"prüf meine Bücher "
+            "neu\"). Liste leeren/zurücksetzen geht über den Button in der Liste (mine=true).",
+            obj({"query": {"type": "string"}, "mine": {"type": "boolean"}, "check": {"type": "boolean"}}, []),
         ),
         ToolSpec(
             "book_charts",

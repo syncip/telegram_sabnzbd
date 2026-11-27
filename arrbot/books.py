@@ -40,6 +40,11 @@ def norm_format(text: str | None) -> str | None:
     return ALIASES.get(t) or next((v for k, v in ALIASES.items() if k in t), None) if t else None
 
 
+def mentions_format(text: str) -> bool:
+    low = (text or "").lower()
+    return any(k in low for k in ALIASES)
+
+
 def ext_of(path: str) -> str:
     return path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
 
@@ -217,6 +222,16 @@ class BookHistory:
 
     def of(self, chat_id: int) -> list[dict]:
         return list(self.by_chat.get(str(chat_id), []))
+
+    def keep(self, chat_id: int, entries: list[dict]) -> None:
+        """Replace the chat's list (after a check: what is gone is left out; [] = reset)."""
+        with self._lock:
+            if entries:
+                self.by_chat[str(chat_id)] = entries
+            else:
+                self.by_chat.pop(str(chat_id), None)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.by_chat, ensure_ascii=False), encoding="utf-8")
 
 
 def has_file(b: dict) -> bool:

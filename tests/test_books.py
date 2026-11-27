@@ -373,3 +373,66 @@ def test_downloaded_book_import_nudged_and_blocked_told(tmp_path):
     assert "kann es nicht übernehmen: Not a valid ebook" in text and files == []
     assert sent == [{"name": "RefreshMonitoredDownloads"}]
     assert asyncio.run(tools.book_deliveries()) == []  # told once
+
+
+def test_format_guessed_by_ai_is_ignored_and_other_format_offered(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.book_formats.by_chat.clear()
+    tools.user_text[CHAT] = "schick mir Limit"  # no format in the user's words
+    asyncio.run(tools.run(ToolCall("1", "book", {"title": "Limit", "format": "epub"}), CHAT))
+    flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
+    assert "welchem Format" in flow.step.text  # asked, the AI's "epub" did not count
+    flow = asyncio.run(tools.choose(flow.id, "f:epub"))
+    assert not any(isinstance(x, Flow) for x in tools.take_outbox(CHAT))  # just asked: no second question
+    # next time: sent right away, with one tap for another format
+    tools.user_text[CHAT] = "schick mir Limit nochmal"
+    asyncio.run(tools.run(ToolCall("2", "book", {"title": "Limit"}), CHAT))
+    out = tools.take_outbox(CHAT)
+    offer = next(x for x in out if isinstance(x, Flow))
+    assert "Als EPUB geschickt" in offer.step.text and ("📄 PDF", "f:pdf") in offer.step.buttons
+    assert ("📱 EPUB – Handy, Tolino, Kobo, Apple Books", "f:epub") not in offer.step.buttons
+    done = asyncio.run(tools.choose(offer.id, "f:pdf"))
+    assert done.step.done and "Hier ist" in done.step.text and tools.book_formats.get(CHAT) == "pdf"
+    out = tools.take_outbox(CHAT)
+    assert [n for _, n in next(x for x in out if isinstance(x, View)).arg] == ["limit.pdf"]
+    assert not any(isinstance(x, Flow) for x in out)  # no offer after the offer
+    # "als PDF" in the user's words counts
+    tools.user_text[CHAT] = "schick mir Limit für den Kindle"
+    asyncio.run(tools.run(ToolCall("3", "book", {"title": "Limit", "format": "azw3"}), CHAT))
+    assert tools.book_formats.get(CHAT) == "azw3"
+
+
+def test_shelf_rescan_drops_deleted_and_reset(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.book_history = books.BookHistory(str(tmp_path))
+    for t in ("Weg", "Datei weg", "Limit"):
+        tools.book_history.add(CHAT, {"title": t})
+    commands = []
+    lib = [{"id": 7, "title": "Limit", "hasFiles": True}, {"id": 8, "title": "Datei weg", "hasFiles": True}]
+    real = tools.chaptarr._req
+
+    async def req(method, path, **kw):
+        if path == "/command":
+            commands.append(kw["json"]["name"])
+            return {}
+        if path == "/book" and method == "GET" and "titleSlug" not in (kw.get("params") or {}):
+            return lib
+        if path == "/bookfile" and kw["params"]["bookId"] == 8:
+            return [{"path": "/books/Frank/geloescht.epub"}]  # Chaptarr still thinks so, the disk says no
+        return await real(method, path, **kw)
+
+    tools.chaptarr._req = req
+    tools.book_history.by_chat[str(CHAT)][1]["id"] = 8  # "Datei weg"
+    tools.book_history.by_chat[str(CHAT)][0]["id"] = 7  # "Limit"
+    asyncio.run(tools.run(ToolCall("1", "book_library", {"mine": True}), CHAT))
+    flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
+    assert ("🔄 Neu prüfen", "rescan") in flow.step.buttons and ("🧹 Liste leeren", "reset") in flow.step.buttons
+    flow = asyncio.run(tools.choose(flow.id, "rescan"))
+    assert "RescanFolders" in commands
+    assert "2 nicht mehr da" in flow.step.text and "Weg" in flow.step.text and "Datei weg" in flow.step.text
+    assert "📚 Deine Bücher (1)" in flow.step.text and [e["title"] for e in tools.book_history.of(CHAT)] == ["Limit"]
+    flow = asyncio.run(tools.choose(flow.id, "reset"))
+    assert "leeren?" in flow.step.text and ("↩️ Zurück", "back") in flow.step.buttons
+    flow = asyncio.run(tools.choose(flow.id, "reset!"))
+    assert tools.book_history.of(CHAT) == [] and "Deine Liste ist leer" in flow.step.text
+    assert "Alle Bücher auf dem Server" in flow.step.text

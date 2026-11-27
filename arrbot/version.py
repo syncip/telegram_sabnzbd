@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.24.0"
+__version__ = "1.24.1"
 
 CHANGES = {
+    "1.24.1": "📚 Format: Die KI darf es nicht mehr selbst festlegen – der Bot fragt, solange du keins gewählt oder "
+              "genannt hast. Schickt er im gemerkten Format, kommt darunter „Lieber ein anderes Format?“ mit Buttons. "
+              "/buecher: „🔄 Neu prüfen“ (Chaptarr scannt neu, gelöschte Bücher fliegen aus deiner Liste) und "
+              "„🧹 Liste leeren“",
     "1.24.0": "📚 Bessere Buch-Empfehlungen: jeder Vorschlag wird in Chaptarr geprüft (Erfundenes fliegt raus, echtes "
               "Jahr, 📗 = schon da), deine Bücher werden nicht nochmal vorgeschlagen und prägen den Geschmack, "
               "„aktuelle Krimis“ nutzt Neuerscheinungen und Trends von Open Library und zeigt nur, was in den "
