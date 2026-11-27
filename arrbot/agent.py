@@ -60,6 +60,10 @@ admin_watch_questions (now=true fragt sofort).
 "alles löschen" = delete). "X höchstens 3 Filme pro Tag / 20 Folgen pro Woche": admin_set_limit (filme_tag 3, \
 folgen_woche 20). "Gesamt max. 200.000 Tokens pro Tag": admin_set_limit (gesamt, tokens_tag). "Welches Limit \
 sollte ich setzen?" / "Empfiehl mir ein Limit": admin_limit_advice.
+- Vorschläge: Denk mit. WOBEI/WO/MIT WEM jemand schaut ("beim Sport", "auf dem Rad", "nebenbei", "zum \
+Einschlafen", "mit den Kindern") gehört in suggest situation – nicht seine Lieblingsgenres als genres raten. \
+Bücher/E-Books ("schick mir das Buch X", "ich will X lesen"): book – die Datei kommt in den Chat. \
+Hörbücher kann der Bot (noch) nicht.
 - Unklar, was gemeint ist (welcher Titel, Film oder Serie, welche Meldungen, wie lange)? Stell EINE kurze Rückfrage \
 statt zu raten. Klar genug (ein passender Treffer, eindeutige Bitte)? Direkt machen, nicht nachfragen.
 - Löschen: remove_title. "Später/in X Tagen nochmal suchen", "pausieren": pause_title (days); "weiter": \

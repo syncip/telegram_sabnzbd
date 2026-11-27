@@ -25,6 +25,7 @@ from .llm import ToolCall, ToolResult, ToolSpec
 from .state import Store, utcnow
 from .tmdb import TMDB, TmdbError
 from .tools_admin import AdminTools
+from .tools_books import BookTools
 from .tools_discover import DiscoverTools
 from .tools_german import GermanTools
 from .tools_media import MediaTools
@@ -38,7 +39,7 @@ log = logging.getLogger(__name__)
 __all__ = ["ToolRunner", "ArrError", "Candidate", "DownloadsView", "Final", "Flow", "Held", "Offer", "Step", "View", "build_admin_specs", "build_specs", "mute", "queue_title", "release_languages", "resume_search", "_season_overview", "_seasons_text"]
 
 
-class ToolRunner(MediaTools, AdminTools, DiscoverTools, GermanTools):
+class ToolRunner(MediaTools, AdminTools, DiscoverTools, GermanTools, BookTools):
     def __init__(
         self,
         radarr: Radarr | None,
@@ -505,6 +506,9 @@ class ToolRunner(MediaTools, AdminTools, DiscoverTools, GermanTools):
             flow.step = await self._recipe_step(flow, value)
             if not flow.step.done:
                 self.flows[flow.id] = flow
+            return flow
+        if flow.stage == "book":
+            flow.step = await self._book_step(flow, value)
             return flow
         if flow.stage == "wa":
             flow.step = await self._wa_step(flow, value)

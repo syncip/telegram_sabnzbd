@@ -17,6 +17,8 @@ services:
       # Optional für 🎧 „Reinhören“ (prüft die gesprochene Sprache): deine Medien-Ordner, nur lesend.
       # Unraid z. B.:
       # - /mnt/user/media:/media:ro
+      # Optional für 📚 Bücher: der Bücher-Ordner von Chaptarr, nur lesend (der Bot schickt die Datei in den Chat).
+      # - /mnt/user/media/books:/books:ro
     environment:
       # Benutzer/Gruppe, dem der Daten-Ordner gehört. Unraid: 99 / 100 (nobody:users).
       # Andere Linux-Server meist 1000 / 1000 (Ausgabe von "id" auf dem Server).
@@ -73,6 +75,16 @@ services:
       SABNZBD_URL: "http://sabnzbd:8080"
       # SABnzbd -> Config -> General -> API Key
       SABNZBD_API_KEY: ""
+
+      # --- Chaptarr (optional): 📚 E-Books suchen und als Datei in den Chat schicken -----------
+      CHAPTARR_URL: ""
+      # Chaptarr -> Settings -> General -> API Key
+      CHAPTARR_API_KEY: ""
+      # Leer = der Standard-Ordner für E-Books in Chaptarr
+      CHAPTARR_ROOT_FOLDER: ""
+      # Pfade, wie Chaptarr sie sieht = Pfade im Bot-Container (oben eingebunden), z. B. "/books=/books".
+      # Leer = wie MEDIA_PATHS bzw. gleiche Pfade.
+      BOOK_PATHS: ""
 
       # --- TMDB (optional, kostenlos): deutsche Titel, deutsche Termine, Vorschläge, Top-Listen ---
       # themoviedb.org -> Einstellungen -> API: "API-Schlüssel" oder "Lesezugriffs-Token"

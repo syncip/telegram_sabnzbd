@@ -71,7 +71,10 @@ class Config:
     update_token: str | None = None  # read-only GitHub token, only for a private repo
     spam_check: bool = True  # block spammers as a precaution, warn on overuse
     recipe_reasoning: str = ""
-    recipe_model: str = ""  # model that builds new tools for admins; empty = a stronger one of the same provider
+    recipe_model: str = ""
+    chaptarr: ArrConfig | None = None  # 📚 books (ebooks) via Chaptarr
+    book_paths: str | None = None  # "chaptarr path=bot path;…" where the bot finds the book files
+    book_max_mb: int = 50  # Telegram bots may send files up to 50 MB  # model that builds new tools for admins; empty = a stronger one of the same provider
     extra: dict = field(default_factory=dict)
 
 
@@ -165,6 +168,9 @@ def load_config() -> Config:
         spam_check=(_env("SPAM_CHECK", "1") or "1").lower() not in ("0", "false", "nein", "aus", "off"),
         recipe_reasoning=(_env("RECIPE_REASONING") or RECIPE_REASONING_DEFAULT.get(llm.provider, "")).lower(),
         recipe_model=_env("RECIPE_MODEL") or RECIPE_MODELS.get(llm.provider, llm.model),
+        chaptarr=arr("CHAPTARR"),
+        book_paths=_env("BOOK_PATHS"),
+        book_max_mb=int(_env("BOOK_MAX_MB", "50")),  # type: ignore[arg-type]
         llm=llm,
         radarr=radarr,
         sonarr=sonarr,

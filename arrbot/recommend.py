@@ -6,6 +6,7 @@ about a person: liked (👍, ⭐4–5 in Plex/bot), watched to the end in Plex, 
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import re
 from typing import Any
@@ -30,6 +31,72 @@ MOODS: dict[str, list[str]] = {
     "krieg": ["Kriegsfilm"], "western": ["Western"], "mystery": ["Mystery"], "rätsel": ["Mystery"],
     "musik": ["Musik"],
 }
+
+
+@dataclass(frozen=True)
+class Situation:
+    """Where/how someone watches ("beim Sport", "zum Einschlafen"): genres that fit, genres that don't, and
+    how long a film or an episode may be. A title needs one of `prefer`. Of `avoid`, the mild ones (Drama,
+    Krimi, Mystery) are fine next to a `prefer` genre (a comedy with some drama works "nebenbei"); the hard
+    ones (Horror, Thriller …) never."""
+
+    key: str
+    label: str
+    intro: str
+    prefer: frozenset[str]
+    avoid: frozenset[str]
+    max_minutes: tuple[tuple[str, int], ...] = ()
+
+    def minutes(self, kind: str) -> int | None:
+        return dict(self.max_minutes).get(kind)
+
+    def fits(self, genres: list[str]) -> bool:
+        g = set(genres)
+        return bool(g & self.prefer) and not g & (self.avoid - MILD)
+
+
+MILD = frozenset({"Drama", "Krimi", "Mystery"})
+SITUATIONS = {
+    "nebenbei": Situation(
+        "nebenbei", "nebenbei", "🎯 Für nebenbei – leicht zu folgen, kurze Folgen",
+        frozenset({"Komödie", "Animation", "Reality", "Dokumentarfilm", "Talkshow", "Familie"}),
+        frozenset({"Horror", "Thriller", "Mystery", "Krimi", "Drama", "Kriegsfilm", "Seifenoper"}),
+        (("series", 35), ("movie", 110))),
+    "einschlafen": Situation(
+        "einschlafen", "zum Einschlafen", "🌙 Zum Einschlafen – ruhig, nichts Aufregendes",
+        frozenset({"Dokumentarfilm", "Animation", "Familie", "Komödie"}),
+        frozenset({"Horror", "Thriller", "Action", "Krimi", "Mystery", "Kriegsfilm", "Drama"}),
+        (("series", 30), ("movie", 100))),
+    "kinder": Situation(
+        "kinder", "mit Kindern", "👨‍👩‍👧 Mit Kindern",
+        frozenset({"Familie", "Animation", "Kinder"}),
+        frozenset({"Horror", "Thriller", "Krimi", "Kriegsfilm"})),
+}
+SITUATION_WORDS = [
+    ("einschlafen", "einschlafen"), ("zum schlafen", "einschlafen"), ("im bett", "einschlafen"),
+    ("mit kind", "kinder"), ("mit den kids", "kinder"), ("mit meinen kids", "kinder"), ("für kinder", "kinder"),
+    ("nebenbei", "nebenbei"), ("nebenher", "nebenbei"), ("sport", "nebenbei"), ("fitness", "nebenbei"),
+    ("cardio", "nebenbei"), ("laufband", "nebenbei"), ("training", "nebenbei"), ("trainier", "nebenbei"),
+    ("auf dem rad", "nebenbei"), ("ergometer", "nebenbei"), ("crosstrainer", "nebenbei"), ("stepper", "nebenbei"),
+    ("bügeln", "nebenbei"), ("kochen", "nebenbei"), ("putzen", "nebenbei"), ("aufräumen", "nebenbei"),
+    ("hausarbeit", "nebenbei"), ("pendeln", "nebenbei"), ("in der bahn", "nebenbei"), ("im zug", "nebenbei"),
+    ("mittagspause", "nebenbei"), ("kurze pause", "nebenbei"), ("beim essen", "nebenbei"),
+    ("hintergrund", "nebenbei"), ("berieseln", "nebenbei"), ("abschalten", "nebenbei"), ("hirn aus", "nebenbei"),
+]
+
+
+def situation_of(*texts: str | None) -> Situation | None:
+    low = " ".join(t for t in texts if t).lower()
+    if not low:
+        return None
+    if low.strip() in SITUATIONS:
+        return SITUATIONS[low.strip()]
+    for word, key in SITUATION_WORDS:
+        if word in low:
+            return SITUATIONS[key]
+    return None
+
+
 GENRE_IDS: dict[str, dict[str, list[int]]] = {"movie": {}, "series": {}}
 _TV_ONLY = {10759, 10762, 10763, 10764, 10765, 10766, 10767, 10768}
 _MOVIE_ONLY = {28, 12, 14, 27, 10402, 10749, 878, 10770, 53, 10752}

@@ -116,12 +116,21 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             "(\"neuer als 2000\" = from_year 2001), min_rating 0-10. mood: Stimmung in seinen Worten "
             "(\"was Lustiges\", \"spannend\"), genres: deutsche Genres. like: \"wie X\" (Titel), dazu ggf. mood "
             "für \"wie X, aber lustiger\". max_minutes: \"kurz/unter 90 Minuten\" (Serien: pro Folge). "
-            "german_only: nur auf Deutsch verfügbar. calibrate: \"lern meinen Geschmack\".",
+            "german_only: nur auf Deutsch verfügbar. calibrate: \"lern meinen Geschmack\". situation: WOBEI geschaut wird, "
+            "in seinen Worten (\"beim Cardio\", \"nebenbei beim Kochen\", \"zum Einschlafen\", \"mit den Kindern\") – "
+            "der Bot wählt passende Genres und Folgenlänge selbst; dann genres nur, wenn der Nutzer sie nennt.",
             obj({"kind": {"type": "string", "enum": ["movie", "series"]}, "from_year": {"type": "integer"},
                  "to_year": {"type": "integer"}, "min_rating": {"type": "number"}, "mood": {"type": "string"},
                  "genres": {"type": "array", "items": {"type": "string"}}, "like": {"type": "string"},
                  "max_minutes": {"type": "integer"}, "german_only": {"type": "boolean"},
-                 "calibrate": {"type": "boolean"}}),
+                 "calibrate": {"type": "boolean"}, "situation": {"type": "string"}}),
+        ),
+        ToolSpec(
+            "book",
+            "Buch (E-Book) holen und als Datei in den Chat schicken: \"schick mir das Buch X\", \"ich will X von Y "
+            "lesen\". Ist es noch nicht da, sucht Chaptarr es und der Bot schickt es später. title: Buchtitel, "
+            "author: Autor, falls genannt. Nicht für Filme/Serien/Hörbücher.",
+            obj({"title": {"type": "string"}, "author": {"type": "string"}}, ["title"]),
         ),
         ToolSpec(
             "title_feedback",

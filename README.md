@@ -29,6 +29,16 @@ Außerdem:
   der Genres oder Jahre auf. Für Abwechslung höchstens ein Teil pro Filmreihe, nicht nur ein Genre und
   ein „💎 Geheimtipp“ (gut bewertet, kaum bekannt); zu jedem Titel steht, warum („wie Arrival“). Was schon
   auf dem Server liegt und du noch nicht gesehen hast, kommt als „📼 Schon auf dem Server“ dazu.
+  Der Bot versteht auch, **wobei** du schaust: „was für nebenbei beim Cardio“, „beim Kochen“, „zum
+  Einschlafen“, „mit den Kindern“. Dann zählen passende Genres (nebenbei: Komödie, Animation, Reality, Doku;
+  nichts Düsteres oder Verschachteltes) und kurze Folgen (nebenbei bis ~35 Min., Einschlafen bis 30 Min.) mehr
+  als dein sonstiger Geschmack; die Folgenlänge steht dabei.
+- **📚 Bücher (mit Chaptarr):** „Schick mir das Buch Der Schwarm“, „Ich will Limit von Schätzing lesen“.
+  Mehrere Treffer: Buttons zur Auswahl (📗 = schon da). Ist das E-Book in Chaptarr, kommt die Datei sofort in
+  den Chat (EPUB bevorzugt, bis 50 MB). Sonst fügt der Bot es in Chaptarr hinzu (nur dieses Buch, nicht alle
+  des Autors), lässt suchen und schickt die Datei, sobald sie da ist; nach 7 Tagen ohne Treffer sagt er
+  Bescheid. Einrichten: `CHAPTARR_URL`, `CHAPTARR_API_KEY` und den Bücher-Ordner nur lesend einbinden
+  (`/mnt/user/media/books:/books:ro`, Pfade ggf. mit `BOOK_PATHS` übersetzen). Hörbücher noch nicht.
 - **Bewerten:** Unter Vorschlägen „👎👁 Bewerten“: 👎 = nicht meins, 👁 = schon gesehen (dann fragt der
   Bot „Wie fandest du’s?“ mit ⭐1–5). Nach einem frisch zu Ende geschauten Film oder einer Serie in Plex
   fragt der Bot das auch (höchstens zwei am Tag, „🔕 Nicht mehr fragen“ beendet es). Sterne aus Plex zählen

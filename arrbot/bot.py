@@ -142,6 +142,13 @@ def build_app(cfg: Config) -> Application:
     sab = SABnzbd(cfg.sabnzbd_url, cfg.sabnzbd_api_key) if cfg.sabnzbd_url and cfg.sabnzbd_api_key else None
     tmdb = TMDB(cfg.tmdb_api_key) if cfg.tmdb_api_key else None
     tools = ToolRunner(radarr, sonarr, store, cfg.minimum_availability, cfg.quality_prompt_seconds, tmdb, tz)
+    if cfg.chaptarr:
+        from .books import PendingBooks
+        from .chaptarr import Chaptarr
+
+        tools.chaptarr = Chaptarr(cfg.chaptarr)
+        tools.books = PendingBooks(cfg.data_dir)
+        tools.book_paths = cfg.book_paths or cfg.media_paths
     agent = Agent(make_provider(cfg.llm), tools, cfg.history_idle_minutes, cfg.max_history_messages)
     turn_tokens: dict[int, int] = {}  # tokens of the message being answered (activity log)
 
@@ -646,6 +653,25 @@ def build_app(cfg: Config) -> Application:
             await app.bot.send_message(query.message.chat_id, "⌛ Diese Auswahl ist abgelaufen. Schreib mir einfach nochmal.")
             return
         await show_flow(flow, ctx)
+        await deliver_outbox(query.message.chat_id, update.effective_user.id, ctx)  # e.g. a 📚 book file
+
+    async def send_files(chat_id: int, files: list) -> None:
+        for path, name in files:
+            try:
+                with open(path, "rb") as fh:
+                    await app.bot.send_document(chat_id, fh, filename=name, read_timeout=120, write_timeout=120)
+            except (OSError, BadRequest) as e:
+                log.warning("Datei %s nicht gesendet: %s", name, e)
+                await app.bot.send_message(chat_id, f"⚠️ {name} konnte ich nicht schicken: {e}")
+
+    async def book_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+        """📚 Requested books that arrived in Chaptarr: send the file."""
+        for chat_id, text, files in await tools.book_deliveries():
+            try:
+                await app.bot.send_message(chat_id, text)
+                await send_files(chat_id, files)
+            except (BadRequest, Forbidden) as e:
+                log.info("Buch an %s: %s", chat_id, e)
 
     async def on_flow_timeout(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         flow = await tools.quality_timeout(ctx.job.data)
@@ -1100,7 +1126,9 @@ def build_app(cfg: Config) -> Application:
         await query.edit_message_text(notify.render(store, chat), reply_markup=notify_markup(chat))
 
     async def send_view(view: View, viewer: int) -> None:
-        if view.kind == "html":
+        if view.kind == "file":
+            await send_files(view.chat_id, view.arg or [])
+        elif view.kind == "html":
             await app.bot.send_message(view.chat_id, view.arg, parse_mode=ParseMode.HTML)
         elif view.kind == "notify":
             await send_notify(view.chat_id)
@@ -2075,6 +2103,8 @@ def build_app(cfg: Config) -> Application:
         application.job_queue.run_daily(monthly_job, time(9, 15, tzinfo=tz), name="monatsbericht")
         application.job_queue.run_daily(unusual_job, time(20, 0, tzinfo=tz), name="auffaellig")
         application.job_queue.run_daily(watch_ask_job, time(19, 0, tzinfo=tz), name="gesehen")
+        if tools.chaptarr is not None:
+            application.job_queue.run_repeating(book_job, interval=120, first=90, name="buecher")
         application.job_queue.run_repeating(save_buttons_job, interval=300, first=300, name="buttons")
         if cfg.site_hours > 0:
             application.job_queue.run_repeating(sites_job, interval=cfg.site_hours * 3600, first=900, name="seiten")

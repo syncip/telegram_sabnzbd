@@ -179,13 +179,19 @@ class DiscoverTools:
     async def _t_suggest(self, chat_id: int, kind: str | None = None, from_year: int | None = None,
                          to_year: int | None = None, min_rating: float | None = None, mood: str | None = None,
                          genres: list[str] | None = None, like: str | None = None, max_minutes: int | None = None,
-                         german_only: bool = False, calibrate: bool = False) -> Final | dict:
+                         german_only: bool = False, calibrate: bool = False,
+                         situation: str | None = None) -> Final | dict:
+        sit = recommend.situation_of(situation, mood)
         wanted = recommend.wanted_genres(mood, genres)
+        if sit and wanted and not wanted & sit.prefer:
+            wanted = set()  # "leicht" etc. is covered by the situation; a taste genre must not undo it
 
         def fits(r: Any) -> bool:
             if (r.kind, r.tmdb_id) in skip or avoid.intersection(r.genres):
                 return False
             if wanted and not wanted.intersection(r.genres):
+                return False
+            if sit and not sit.fits(r.genres):
                 return False
             if (from_year or to_year) and not r.year:
                 return False
@@ -194,7 +200,7 @@ class DiscoverTools:
 
         def wish_text() -> str:
             return " ".join(x for x in (
-                (mood or "").strip() or ", ".join(sorted(wanted)),
+                "" if sit else ((mood or "").strip() or ", ".join(sorted(wanted))),
                 f"ab {from_year}" if from_year and not to_year else "",
                 f"bis {to_year}" if to_year and not from_year else "",
                 f"{from_year}–{to_year}" if from_year and to_year else "",
@@ -212,7 +218,7 @@ class DiscoverTools:
                 + (f" Nur: {wish_text()}." if wish_text() else "") + (f" Ähnlich wie: {like}." if like else ""),
             }
         prof = self.profiles.profile(chat_id) if self.profiles else None
-        explicit = bool(wanted or from_year or to_year or min_rating or max_minutes or german_only or like)
+        explicit = bool(wanted or from_year or to_year or min_rating or max_minutes or german_only or like or sit)
         if prof:  # defaults the user told the bot once ("nur Filme ab 2000")
             from_year = from_year or prof.prefs.from_year
             min_rating = min_rating or prof.prefs.min_rating
@@ -263,7 +269,20 @@ class DiscoverTools:
                 cur.score += (20 - rank) / 20
                 if title not in cur.because:
                     cur.because.append(title)
-        if like_title and pool:
+        if sit:
+            # The situation decides: taste recommendations that fit, plus well rated titles of fitting genres.
+            for k in kinds:
+                try:
+                    found = await self.tmdb.discover(k, recommend.genre_ids(k, set(sit.prefer)),
+                                                     max_minutes or sit.minutes(k), from_year, to_year, min_rating)
+                except TmdbError:
+                    continue
+                for r in found[:20]:
+                    if (k, r.tmdb_id) not in owned["tmdb"] and fits(r):
+                        pool.setdefault((k, r.tmdb_id), r)
+        if sit:
+            intro = sit.intro + ":"
+        elif like_title and pool:
             intro = f"💡 Wie {like_title}:"
         elif pool and (len(pool) >= 3 or not explicit):
             reasons = list(dict.fromkeys(t for _, _, t in seeds))[:3]
@@ -302,16 +321,23 @@ class DiscoverTools:
 
         # Runtime and film series of the best ones: "unter 90 Minuten", not three parts of one series.
         collections: dict[tuple[str, int], int] = {}
-        top = ranked[:16]
+        tips_all = sorted(on_server.values(), key=lambda r: recommend.score(r), reverse=True)[:6]
+        top = ranked[:16] + tips_all
         infos = await asyncio.gather(*(self.tmdb.details(r.kind, r.tmdb_id) for r in top), return_exceptions=True)
         too_long = set()
+        runtimes: dict[tuple[str, int], int] = {}
         for r, info in zip(top, infos):
             if isinstance(info, BaseException):
                 continue
             if info.get("collection"):
                 collections[(r.kind, r.tmdb_id)] = info["collection"]
-            if max_minutes and info.get("runtime") and info["runtime"] > int(max_minutes):
-                too_long.add((r.kind, r.tmdb_id))
+            limit = max_minutes or (sit.minutes(r.kind) if sit else None)
+            if info.get("runtime"):
+                runtimes[(r.kind, r.tmdb_id)] = int(info["runtime"])
+                if limit and info["runtime"] > int(limit):
+                    too_long.add((r.kind, r.tmdb_id))
+            elif sit and sit.minutes(r.kind) and r in tips_all:
+                too_long.add((r.kind, r.tmdb_id))  # a server tip of unknown length: rather not
         ranked = [r for r in ranked if (r.kind, r.tmdb_id) not in too_long]
         order = recommend.diversify(ranked, MAX_SUGGESTIONS, collections)
         order += [r for r in ranked if r not in order]
@@ -346,9 +372,14 @@ class DiscoverTools:
             self._remember(chat_id, c)
             cands.append(c)
             why = recommend.reason(r) if not like_title else ("💎 Geheimtipp" if "💎 Geheimtipp" in r.because else "")
+            rt = runtimes.get((r.kind, r.tmdb_id))
+            if rt and (sit or max_minutes):
+                why = (why + " · " if why else "") + (f"Folgen ~{rt} Min." if r.kind == "series" else f"{rt} Min.")
             if why:
                 lines.append(f"• {r.title}: {why}")
-        tips = sorted(on_server.values(), key=lambda r: recommend.score(r), reverse=True)[:2]
+            elif sit:
+                lines.append(f"• {r.title}")
+        tips = [r for r in tips_all if (r.kind, r.tmdb_id) not in too_long][:2]
         tip_lines = [f"📼 Schon auf dem Server: {r.title}" + (f" ({r.year})" if r.year else "")
                      + (f" – wie {r.because[0]}" if r.because else "") for r in tips]
         if not cands:

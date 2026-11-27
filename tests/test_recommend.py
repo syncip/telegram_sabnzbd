@@ -182,3 +182,23 @@ def test_plex_stars_abandoned_and_fresh(tmp_path):
     p = db.profile(5)
     assert ("movie", 2) in p.rejected and ("movie", 3) in p.rejected
     assert db.seeds(5)[0][2] == "Toll"
+
+
+def test_situation_cardio_short_and_light(tmp_path):
+    """'Serien für Cardio auf dem Rad': light genres, short runtime – the taste (drama) must not win."""
+    assert recommend.situation_of("Cardio auf dem Rad im Fitnessstudio").key == "nebenbei"
+    assert recommend.situation_of(None, "was zum Einschlafen").key == "einschlafen"
+    assert recommend.situation_of("was Spannendes") is None
+    s = recommend.SITUATIONS["nebenbei"]
+    assert s.fits(["Komödie", "Drama"]) and not s.fits(["Action", "Drama"]) and not s.fits(["Komödie", "Horror"])
+
+    tools = runner(tmp_path, movies=[{"id": 1, "tmdbId": 11, "title": "Ernst", "hasFile": True}])
+    tools.profiles.learn(5, "liked", "movie", "Arrival (2016)", tmdb=329865, genres=["Science Fiction"])
+    asyncio.run(tools.run(ToolCall("1", "suggest", {"kind": "movie", "situation": "beim Cardio auf dem Rad",
+                                                   "genres": ["Science Fiction"]}), 5))
+    offer = tools.take_outbox(5)[0]
+    titles = [c.title for c in offer.cands]
+    assert "Ernst" not in titles and "Lang und lustig" not in titles  # drama / 170 min out
+    assert "Lachen" in titles and "Komödie neu" in titles
+    assert offer.text.startswith("🎯 Für nebenbei") and "85 Min." in offer.text
+    assert "Schon auf dem Server: Ernst" not in offer.text  # a drama is no cardio tip either

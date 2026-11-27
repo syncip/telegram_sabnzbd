@@ -28,7 +28,7 @@ grep -nE '(KEY|TOKEN|ID): "[^"]+' docker-compose.yml   # only PUID/PGID may matc
 | Which tools the AI gets per message (keywords) | `toolgroups.py` (`GROUPS`; all `admin_*` only via the `admin` group) |
 | Tool descriptions/schemas the AI sees | `toolspecs.py` (`build_specs`, `build_admin_specs`) |
 | ToolRunner core: rights (`may`, `ADMIN_ONLY`, `TOOL_PERMS`, `owner_ok`), `run`, flows (`_advance`, `_choose`), add/search/remove/pause | `tools.py` |
-| Tool code by theme (mixins of ToolRunner, `self` = ToolRunner) | `tools_media.py`, `tools_admin.py`, `tools_discover.py`, `tools_german.py` |
+| Tool code by theme (mixins of ToolRunner, `self` = ToolRunner) | `tools_media.py`, `tools_admin.py`, `tools_discover.py`, `tools_german.py`, `tools_books.py` |
 | Flow/Offer/Step/View/Final/Candidate, constants, small helpers | `tooltypes.py` (re-exported by `tools.py`) |
 | Telegram handlers, jobs, buttons | `bot.py` – one `build_app()`; handlers share its locals, so it stays one function |
 | Users, roles, limits (AI + titles), rights | `users.py`; limit advice `limitadvice.py` |
@@ -36,6 +36,7 @@ grep -nE '(KEY|TOKEN|ID): "[^"]+' docker-compose.yml   # only PUID/PGID may matc
 | Library / cleanup / duplicates / watched questions | `media.py`, `mediamgr.py`, `cleanup.py`, `dupes.py`, `watchask.py` |
 | German audio | `german.py`, `manage.py`, `listen.py`, `watch.py` |
 | Suggestions & taste | `recommend.py`, `profiles.py`, `together.py`, `wishlist.py`, `tmdb.py` |
+| Books (Chaptarr, file into chat, pending in data/books.json) | `chaptarr.py`, `books.py`, `tools_books.py` |
 
 ## bot.py sections (Grep the marker `# ---- <name>`)
 
