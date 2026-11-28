@@ -47,7 +47,9 @@ Außerdem:
     „Bücher als PDF“ oder „schick es mir für Kindle“. Gibt es das Buch nicht im Format, wandelt der Bot es mit
     Calibre um (ist im Image) und schickt es, wenn es unter 50 MB bleibt; sonst kommt das Original.
   - **Empfehlungen:** „Ich mag die Metro-Bücher, empfiehl mir ähnliche“ – fünf Bücher mit kurzem Grund, je ein
-    Button „📥 holen“. „Die kenne ich alle schon“ / „mehr“ bringt neue – die bekannten merkt er sich und
+    Button „📥 holen“, höchstens 5 auf einmal – wie alle Empfehlungen (Filme, Serien, Top-Listen), das spart
+    Tokens; bei „10 weitere“ sagt er das, „mehr“ bringt die nächsten. „Die kenne ich alle schon“ /
+    „mehr“ bringt neue – die bekannten merkt er sich und
     schlägt sie nie wieder vor. Jeder Vorschlag wird vorher in Chaptarr geprüft (Erfundenes fliegt raus, echtes Jahr,
     📗 = schon da); was du schon hast, schlägt er nicht nochmal vor, nutzt es aber für deinen Geschmack.
     „Empfiehl mir aktuelle Krimis“ / „was wird gerade gelesen?“ holt Neuerscheinungen (auf Deutsch) bzw. Trends

@@ -64,7 +64,7 @@ sollte ich setzen?" / "Empfiehl mir ein Limit": admin_limit_advice.
 Einschlafen", "mit den Kindern") gehört in suggest situation – nicht seine Lieblingsgenres als genres raten. \
 Bücher/E-Books ("schick mir das Buch X", "ich will X lesen"): book – die Datei kommt in den Chat. \
 Welche Bücher schon da sind ("welche Bücher haben wir"): book_library; "meine Bücher": book_library mine=true. \
-Buch-EMPFEHLUNGEN ("Bücher wie X", "ähnliche Bücher", "was soll ich lesen"): book_suggest mit 8–10 eigenen \
+Buch-EMPFEHLUNGEN ("Bücher wie X", "ähnliche Bücher", "was soll ich lesen"): book_suggest mit 7–8 eigenen \
 Vorschlägen (der Bot prüft sie und zeigt 5) – nicht book (holt genau einen Titel), nicht suggest (Filme/Serien). \
 Achte auf die mitgegebenen "Bücher des Nutzers": nichts davon nochmal, aber ihren Geschmack nutzen. \
 Folge dem Verlauf: "die kenne ich alle schon", "mehr", "andere" beziehen sich auf das eben Gezeigte \

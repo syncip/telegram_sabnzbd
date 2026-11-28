@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from datetime import timedelta
 import json
@@ -15,7 +17,7 @@ log = logging.getLogger(__name__)
 
 MAX_RESULTS = 5
 MAX_SEASON_BUTTONS = 10
-MAX_SUGGESTIONS = 6
+MAX_SUGGESTIONS = 5  # suggestions of any kind at once (tokens: fewer is cheaper)
 MAX_TOP = 10
 NO_TMDB = 'ℹ️ Dafür brauche ich einen kostenlosen TMDB-Key. Der Admin trägt ihn in der docker-compose.yml als TMDB_API_KEY ein (themoviedb.org → Einstellungen → API).'
 MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September",
@@ -250,3 +252,29 @@ async def resume_search(svc: Any, item_id: int) -> None:
     """Monitor again and start a search right away (used by resume and by the tracker after a pause)."""
     await svc.set_monitored(item_id, True)
     await svc.search(item_id)
+
+
+# ---- "10 weitere": how many the user asked for -------------------------------------------------------------
+NUMBERS = {"zwei": 2, "drei": 3, "vier": 4, "fünf": 5, "sechs": 6, "sieben": 7, "acht": 8, "neun": 9, "zehn": 10,
+           "elf": 11, "zwölf": 12, "fünfzehn": 15, "zwanzig": 20, "dreißig": 30, "fünfzig": 50, "hundert": 100}
+_NUM = r"(\d+|" + "|".join(sorted(NUMBERS, key=len, reverse=True)) + r")"
+_ASKED = re.compile(_NUM + r"\s+(?:weitere|andere|neue|mehr|gute|bücher|buch|empfehlung|vorschl|titel|tipps?|"
+                    r"filme?|serien?|krimi|roman|thriller|komödie|doku)|top\s*" + _NUM, re.I)
+INTRO_NUM = re.compile(r"\b" + _NUM + r"\b(?=\s+\w)", re.I)
+
+
+def num_word(word: str) -> int:
+    return int(word) if word.isdigit() else NUMBERS.get(word.lower(), 0)
+
+
+def asked_count(text: str) -> int:
+    """'Schlag mir 10 weitere vor', 'zehn Filme', 'Top 20' -> the number, else 0."""
+    m = _ASKED.search(text or "")
+    return num_word(m.group(1) or m.group(2)) if m else 0
+
+
+def too_many(wanted: int) -> str:
+    """The line for asking more than the bot shows at once; "" when it fits."""
+    if wanted <= MAX_SUGGESTIONS:
+        return ""
+    return f"Sorry, ich kann nur {MAX_SUGGESTIONS} Empfehlungen auf einmal machen – sag „mehr“ für die nächsten."

@@ -531,3 +531,23 @@ def test_known_books_and_no_repeats(tmp_path):
     assert "schon vorgeschlagen" in res.final
     assert "Limit – Frank Schätzing" in tools.book_context(CHAT, "noch ein Buch bitte")
     assert all(e.get("known") for e in tools.book_history.of(CHAT))  # not in /buecher
+
+
+def test_suggestions_at_most_five_and_says_so(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.user_text[CHAT] = "Schlage mir 10 weitere vor"
+    picks = [{"title": "Limit", "author": "Frank Schätzing", "why": "x"},
+             {"title": "Der Schwarm", "author": "Frank Schätzing", "why": "y"}]
+    asyncio.run(tools.run(ToolCall("1", "book_suggest", {"intro": "Hier sind zehn weitere Bücher:", "books": picks}), CHAT))
+    t = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow)).step.text
+    assert t.startswith("Sorry, ich kann nur 5 Empfehlungen auf einmal machen")
+    assert "📚 Hier sind 2 weitere Bücher:" in t
+
+
+def test_asked_count_and_too_many():
+    from arrbot.tooltypes import asked_count, too_many
+    assert asked_count("Schlage mir 10 weitere vor") == 10
+    assert asked_count("zeig mir zehn Filme wie Alien") == 10
+    assert asked_count("die Top 20 Serien 2024") == 20
+    assert asked_count("Filme wie Alien 3") == 0 and asked_count("") == 0
+    assert too_many(5) == "" and too_many(8).startswith("Sorry, ich kann nur 5 Empfehlungen")

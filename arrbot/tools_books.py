@@ -20,12 +20,12 @@ import httpx
 from . import booklists, books, toolgroups
 from .arr import ArrError
 from .sabnzbd import SabError
-from .tooltypes import Candidate, Final, Flow, Step, View
+from .tooltypes import INTRO_NUM, MAX_SUGGESTIONS, Candidate, Final, Flow, Step, View, asked_count, num_word, too_many
 
 log = logging.getLogger(__name__)
 
 MAX_HITS = 5
-MAX_SUGGEST = 5  # shown
+MAX_SUGGEST = MAX_SUGGESTIONS  # shown
 MAX_PICKS = 10  # checked (the AI may send more, some drop out)
 RECENT_DAYS = 550  # "aktuell/neu": out in the last ~18 months
 SHOWN_SECONDS = 6 * 3600  # a suggested book is not suggested again for this long ("weitere Vorschläge")
@@ -101,7 +101,8 @@ class BookTools:
         return None
 
     async def _t_book_suggest(self, chat_id: int, books_: list | None = None, intro: str = "", recent: bool = False,
-                              known: list | None = None, **kw: Any) -> Final:
+                              known: list | None = None, wanted: int = 0, **kw: Any) -> Final:
+        wanted = int(wanted or 0) or asked_count(self.user_text.get(chat_id, ""))
         if known and self.book_history is not None:
             for k in known:
                 self.book_history.add_known(chat_id, str(k))
@@ -141,7 +142,12 @@ class BookTools:
         if not picks:
             return Final("🤷 Davon blieb nichts übrig (" + (why_not or "keine Treffer") + "). Sag mir genauer, was du "
                          "suchst – oder ein Buch, das dir gefallen hat.")
-        lines = [f"📚 {intro.strip() or 'Das könnte dir gefallen:'}", ""]
+        intro = intro.strip() or "Das könnte dir gefallen:"
+        if (m := INTRO_NUM.search(intro)) and num_word(m.group(1)) != len(picks) and 1 < num_word(m.group(1)) <= 100:
+            intro = intro[:m.start()] + str(len(picks)) + intro[m.end():]  # "zehn weitere" but 5 are shown
+        lines = [f"📚 {intro}", ""]
+        if sorry := too_many(wanted):
+            lines.insert(0, sorry + "\n")
         for i, b in enumerate(picks, 1):
             h = b.get("hit") or {}
             year = (h.get("releaseDate") or "")[:4]

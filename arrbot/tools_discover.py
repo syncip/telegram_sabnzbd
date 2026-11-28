@@ -13,7 +13,8 @@ import uuid
 from . import plex, profiles, recommend, sitewatch, together, urlinfo, wishlist
 from .arr import ArrError
 from .tmdb import TmdbError
-from .tooltypes import Candidate, Final, Flow, Held, MAX_SUGGESTIONS, MAX_TOP, MONTHS, NO_TMDB, Offer, View
+from .tooltypes import (Candidate, Final, Flow, Held, MAX_SUGGESTIONS, MAX_TOP, MONTHS, NO_TMDB, Offer, View,
+                        asked_count, too_many)
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class DiscoverTools:
                 main, extra = (acc_a, acc_b) if acc_a else (acc_b, None)
                 items_main = await self.plex.library(main)
                 items_extra = await self.plex.library(extra) if extra else None
-                here = [p for p in together.from_library(items_main, items_extra, a, b) if p.kind in kinds][:6]
+                here = [p for p in together.from_library(items_main, items_extra, a, b) if p.kind in kinds][:MAX_SUGGESTIONS]
             except plex.PlexError as e:
                 log.info("Plex für gemeinsame Vorschläge: %s", e)
 
@@ -62,7 +63,7 @@ class DiscoverTools:
                         continue
                     old = pool.get(key, (0.0, r))[0]
                     pool[key] = (old + score + (20 - rank) / 40, r)  # recommended for both: adds up
-            best = sorted(pool.items(), key=lambda kv: -kv[1][0])[:5]
+            best = sorted(pool.items(), key=lambda kv: -kv[1][0])[:MAX_SUGGESTIONS]
             for (k, tid), (_, r) in best:
                 if k == "movie":
                     cands.append(Candidate("movie", r.tmdb_id, r.title, r.year, rating=r.rating, tmdb_id=r.tmdb_id,
@@ -73,6 +74,8 @@ class DiscoverTools:
                         cands.append(Candidate("series", tvdb, r.title, r.year, rating=r.rating, tmdb_id=r.tmdb_id,
                                                genres=r.genres))
         text = together.render(self.users.name(chat_id), self.users.name(other), here, len(cands))
+        if sorry := too_many(asked_count(self.user_text.get(chat_id, ""))):
+            text = sorry + "\n\n" + text
         if cands:
             self._offer(chat_id, cands, "➕ Neu für euch:", suggest=True)
         return Final(text)
@@ -389,7 +392,8 @@ class DiscoverTools:
                 return Final(f"🤷 Dazu ({wish_text() or like}) finde ich gerade nichts Neues. "
                              "Magst du den Wunsch etwas lockern?")
             return Final("🤷 Mir fällt gerade nichts Neues ein – ihr habt schon alles Passende. 😄")
-        text = "\n".join([intro, *lines, *([""] + tip_lines if tip_lines else []), "",
+        sorry = too_many(asked_count(self.user_text.get(chat_id, "")))
+        text = "\n".join([*([sorry, ""] if sorry else []), intro, *lines, *([""] + tip_lines if tip_lines else []), "",
                           "Tippe einen Titel an, um ihn hinzuzufügen. 👎/👁 unter „Bewerten“."])
         self._offer(chat_id, cands, text, suggest=True)
         return Final("")
@@ -565,7 +569,9 @@ class DiscoverTools:
         if not self.tmdb:
             return Final(NO_TMDB)
         self._svc(kind)
-        count = max(1, min(int(count or 5), MAX_TOP))
+        asked = int(count or 5)
+        count = max(1, min(asked, MAX_TOP if download else MAX_SUGGESTIONS))  # a list to read: 5; to load: up to 10
+        sorry = "" if download else too_many(asked)
         start: date | None = None
         end: date | None = None
         period = ""
@@ -607,7 +613,7 @@ class DiscoverTools:
         what = "Filme" if kind == "movie" else "Serien"
         how = {"rating": "bestbewertet", "revenue": "nach Einspielergebnis"}.get(sort, "meistgesehen")
         label = f"{studio}-{what}" if studio else what
-        head = f"🏆 Top {len(cands)} {label}{' ' + period if period else ''} ({how}):"
+        head = (sorry + "\n\n" if sorry else "") + f"🏆 Top {len(cands)} {label}{' ' + period if period else ''} ({how}):"
         if not download:
             lines = [f"{i}. {c.title}" + (f" ({c.year})" if c.year else "")
                      + (f" ⭐ {c.rating:.1f}".replace(".", ",") if c.rating else "") + (" ✅ schon da" if have else "")

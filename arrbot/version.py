@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.25.1"
+__version__ = "1.25.2"
 
 CHANGES = {
+    "1.25.2": "Empfehlungen jeder Art (Bücher, Filme, Serien, gemeinsame Tipps, Top-Listen): höchstens 5 auf "
+              "einmal – spart Tokens. Willst du mehr („10 weitere“, „Top 20“), sagt der Bot „Sorry, ich kann nur 5 "
+              "Empfehlungen auf einmal machen“; „mehr“ bringt die nächsten. Die Einleitung nennt nicht mehr eine "
+              "andere Zahl als die gezeigten. „Lade die Top 10“ lädt weiterhin bis zu 10",
     "1.25.1": "🔍 „Gesucht, aber nichts geladen“ bietet jetzt Buttons pro Qualität und Sprache, die es bei deinen "
               "Indexern gibt – z. B. „⬇️ 720p Deutsch laden“, „⬇️ 1080p Englisch laden“, „⬇️ 1080p Multi (DE/EN) "
               "laden“. Ein Tipp holt das beste Release davon, bei Serien das Staffelpaket",
