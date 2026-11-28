@@ -228,7 +228,10 @@ Außerdem:
   sind. Wurde nichts geladen, prüft er sofort selbst, warum, und sagt es (statt erst nach 30 Minuten):
   Titel/Staffel nicht überwacht? Liefern die Indexer gar nichts (dann auch: sind nur Hauptkategorien wie
   5000/5100 eingetragen, ohne Unterkategorien)? Oder gibt es Releases, die alle abgelehnt werden – mit
-  Qualität, Sprache und Grund („3× DVD (Deutsch), Qualität nicht im Profil“). Dazu die üblichen Buttons.
+  Qualität, Sprache und Grund („3× DVD (Deutsch), Qualität nicht im Profil“). Dazu die üblichen Buttons
+  und je einer pro Qualität und Sprache, die es gibt (bis zu 6, Deutsch zuerst): „⬇️ 720p Deutsch laden“,
+  „⬇️ 1080p Englisch laden“, „⬇️ 1080p Multi (DE/EN) laden“. Ein Tipp holt das beste Release davon am Profil
+  vorbei, bei Serien das Staffelpaket, sonst das beste pro Folge.
 - **Nur in anderer Sprache:** Gibt es einen Titel bei deinen Indexern nur z. B. auf Koreanisch und
   Englisch, sagt der Bot das direkt – und dass dein gewähltes Profil (etwa „1080p Deutsch“) dafür im
   Zweifel nicht passt. Buttons: „⬇️ Auf Koreanisch laden“, „⬇️ Auf Englisch laden“, „⬇️ Auf Multi laden“,

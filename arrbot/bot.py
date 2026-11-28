@@ -395,13 +395,20 @@ def build_app(cfg: Config) -> Application:
             except ArrError:
                 profile = {}
             offer = langpick.build(kind, item_id, season, chat_id, item.get("title", "?"), profile.get("name", ""), rels)
+            choice = None if offer else langpick.choices(kind, item_id, season, chat_id, item.get("title", "?"),
+                                                         profile.get("name", ""), rels)
+            if choice is not None:  # German exists too, but nothing was loaded: pick quality and language
+                oid = format(abs(hash((key, season, now))) % 16**8, "08x")
+                lang_offers[oid] = (choice, 1080)
+                text += "\n⬇️ Selbst aussuchen? Ein Tipp lädt das beste Release in dieser Qualität und Sprache."
+                buttons = [(choice.button(lbl), f"n:lg:{oid}:{i}") for i, lbl in enumerate(choice.groups)] + buttons
         if offer is not None:
             oid = format(abs(hash((key, season, now))) % 16**8, "08x")
             lang_offers[oid] = (offer, qprofiles.max_resolution(profile) or 1080)
             while len(lang_offers) > 200:
                 lang_offers.pop(next(iter(lang_offers)))
             text = offer.text()
-            buttons = ([(f"⬇️ Auf {lbl} laden", f"n:lg:{oid}:{i}") for i, lbl in enumerate(offer.groups)]
+            buttons = ([(offer.button(lbl), f"n:lg:{oid}:{i}") for i, lbl in enumerate(offer.groups)]
                        + [("🔔 Auf Deutsch warten", f"n:w:{key}"), ("🗑 Wieder löschen", f"n:rm:{key}"),
                           ("👍 Okay", "n:ok")])
         await tracker.tell(chat_id, text, buttons, kind="nothing")
@@ -774,10 +781,10 @@ def build_app(cfg: Config) -> Application:
         offer, target = entry
         lang = list(offer.groups)[idx]
         svc = radarr if offer.kind == "movie" else sonarr
-        await query.answer(f"Lade auf {lang} …")
+        await query.answer(f"Lade {offer.done(lang)} …")
         await query.edit_message_reply_markup(None)
         grabbed, failed = 0, []
-        for r in langpick.pick(offer.groups[lang], target):
+        for r in langpick.pick(offer.groups[lang], offer.targets.get(lang, target)):
             try:
                 await svc.grab(r)
                 grabbed += 1
@@ -785,12 +792,15 @@ def build_app(cfg: Config) -> Application:
                 failed.append(str(e))
         lang_offers.pop(oid, None)
         if not grabbed:
-            text = f"❌ Auf {lang} ging es nicht: {failed[0] if failed else 'kein passendes Release'}"
+            text = f"❌ {offer.done(lang).capitalize()} ging es nicht: {failed[0] if failed else 'kein passendes Release'}"
         else:
             what = offer.title + (f" (Staffel {offer.season})" if offer.season is not None else "")
-            text = (f"⬇️ {what}: {grabbed} Release{'s' if grabbed > 1 else ''} auf {lang} geholt. "
+            text = (f"⬇️ {what}: {grabbed} Release{'s' if grabbed > 1 else ''} {offer.done(lang)} geholt. "
                     "Ich melde mich, wenn der Download startet.")
-            if offer.kind == "series":
+            if offer.kind == "series" and lang in offer.targets:
+                text += (f"\nℹ️ Weitere Staffeln und neue Folgen sucht Sonarr weiter mit "
+                         f"„{offer.profile or 'deinem Profil'}“.")
+            elif offer.kind == "series":
                 text += (f"\nℹ️ Weitere Staffeln und neue Folgen sucht Sonarr weiter mit "
                          f"„{offer.profile or 'deinem Profil'}“ – also auf Deutsch. Willst du alles auf {lang}, "
                          "stell die Serie in Sonarr auf ein Profil ohne Deutsch-Pflicht.")

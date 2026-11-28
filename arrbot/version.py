@@ -14,9 +14,12 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.25.0"
+__version__ = "1.25.1"
 
 CHANGES = {
+    "1.25.1": "🔍 „Gesucht, aber nichts geladen“ bietet jetzt Buttons pro Qualität und Sprache, die es bei deinen "
+              "Indexern gibt – z. B. „⬇️ 720p Deutsch laden“, „⬇️ 1080p Englisch laden“, „⬇️ 1080p Multi (DE/EN) "
+              "laden“. Ein Tipp holt das beste Release davon, bei Serien das Staffelpaket",
     "1.25.0": "Der Bot folgt dem Gespräch: Er merkt sich die letzten 6 Fragen und Antworten samt dem, was er als "
               "Buttons gezeigt hat (Vorschläge, Treffer), 30 Minuten lang. „Die kenne ich alle schon“ oder „mehr“ "
               "nach Buch-Vorschlägen bringt neue Bücher; die bekannten merkt er sich für immer, schon Gezeigtes "

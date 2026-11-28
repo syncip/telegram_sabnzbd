@@ -124,3 +124,20 @@ def test_suggested_series_asks_for_seasons(tmp_path):
     flow = asyncio.run(tools._start_flow(ADMIN, Candidate("series", 70, "Dark", 2017)))
     assert flow.stage == "seasons" and "Welche Staffeln" in flow.step.text
     assert [v for _, v in flow.step.buttons][:4] == ["all", "s1", "s2", "s3"]
+
+
+def test_choices_per_quality_and_language():
+    def r(title, langs, res, rejected=True, reason="Quality not wanted in profile"):
+        return {"title": title, "guid": title, "indexerId": 1, "fullSeason": True, "rejected": rejected,
+                "rejections": [reason] if rejected else [], "languages": [{"name": x} for x in langs],
+                "quality": {"quality": {"name": f"WEBDL-{res}p", "resolution": res}}}
+    rels = [r("Show.S01.German.720p", ["German"], 720), r("Show.S01.German.1080p", ["German"], 1080, False),
+            r("Show.S01.1080p", ["English"], 1080), r("Show.S01.MULTi.1080p", ["German", "English"], 1080),
+            r("Show.S01.German.480p", ["German"], 480, reason="Unable to identify correct episode(s)")]
+    o = langpick.choices("series", 5, 1, ADMIN, "Show", "Deutsch 1080p", rels)
+    assert list(o.groups) == ["1080p Deutsch", "720p Deutsch", "1080p Englisch", "1080p Multi"]
+    assert o.button("1080p Multi") == "⬇️ 1080p Multi (DE/EN) laden"
+    assert o.button("720p Deutsch") == "⬇️ 720p Deutsch laden" and o.done("720p Deutsch") == "in 720p Deutsch"
+    assert [x["title"] for x in langpick.pick(o.groups["720p Deutsch"], o.targets["720p Deutsch"])] == \
+        ["Show.S01.German.720p"]
+    assert langpick.choices("series", 5, 1, ADMIN, "Show", "", []) is None
