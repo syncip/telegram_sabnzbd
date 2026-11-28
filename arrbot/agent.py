@@ -67,6 +67,9 @@ Welche Bücher schon da sind ("welche Bücher haben wir"): book_library; "meine 
 Buch-EMPFEHLUNGEN ("Bücher wie X", "ähnliche Bücher", "was soll ich lesen"): book_suggest mit 8–10 eigenen \
 Vorschlägen (der Bot prüft sie und zeigt 5) – nicht book (holt genau einen Titel), nicht suggest (Filme/Serien). \
 Achte auf die mitgegebenen "Bücher des Nutzers": nichts davon nochmal, aber ihren Geschmack nutzen. \
+Folge dem Verlauf: "die kenne ich alle schon", "mehr", "andere" beziehen sich auf das eben Gezeigte \
+([Gezeigt: …] in deiner letzten Antwort) – nie nach einer Liste fragen, sondern book_suggest mit known=[diese \
+Titel] und neuen Vorschlägen (bei Filmen/Serien genauso: suggest mit anderen Titeln). \
 "Aktuelle/neue" Bücher oder "was ist gerade beliebt": ERST book_charts (kind new + subject bzw. trending), \
 dann book_suggest mit recent=true und Titeln aus dieser Liste. \
 Hörbücher kann der Bot (noch) nicht.
@@ -146,6 +149,12 @@ class Conversation:
     last_used: datetime = field(default_factory=utcnow)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     groups: set[str] = field(default_factory=set)  # tool groups this conversation needed so far
+    # Plain question/answer pairs of the last exchanges (no tool calls): what stays after an action or when the
+    # full history gets too long, so "die kenne ich alle schon" still knows what was suggested.
+    log: list[Turn] = field(default_factory=list)
+
+
+MEMORY_TURNS = 12  # 6 exchanges
 
 
 class Agent:
@@ -199,9 +208,10 @@ class Agent:
         async with conv.lock:
             # Start fresh after a pause or when the thread gets long. The whole history is
             # dropped instead of trimmed, so provider-side reasoning state stays valid.
-            if utcnow() - conv.last_used > self.idle or len(conv.history) > self.max_messages:
-                conv.history = []
-                conv.groups = set()
+            if utcnow() - conv.last_used > self.idle:
+                conv.history, conv.log, conv.groups = [], [], set()
+            elif len(conv.history) > self.max_messages:
+                conv.history = list(conv.log)  # the full thread got long: keep the short memory
             conv.last_used = utcnow()
             conv.groups |= toolgroups.groups_for(text)
             self.tools.user_text[chat_id] = text
@@ -258,7 +268,8 @@ class Agent:
                     if all(r.final is not None and not r.is_error for r in results):
                         # Action done (or handed to buttons): no further AI call, fresh start next time.
                         replies += [r.final for r in results if r.final]
-                        conv.history = _short_context(text, replies)
+                        conv.log = (conv.log + _short_context(text, replies, self.tools.shown_text(chat_id)))[-MEMORY_TURNS:]
+                        conv.history = list(conv.log)
                         return "\n\n".join(replies)
                 else:
                     replies.append("(Ich habe zu viele Schritte gebraucht und abgebrochen. Formulier es bitte anders.)")
@@ -268,14 +279,16 @@ class Agent:
                 return f"⚠️ {e}"
 
             conv.history = work
+            conv.log = (conv.log + _short_context(text, replies, self.tools.shown_text(chat_id)))[-MEMORY_TURNS:]
             return "\n\n".join(replies) or "Erledigt."
 
 
-def _short_context(question: str, replies: list[str]) -> list[Turn]:
-    """After an action only the last question and a short answer stay (~50 tokens): enough for follow-ups
-    like "wie ist der Status bei der Suche?", without the long tool results."""
-    answer = " ".join(" ".join(replies).split())[:200]
+def _short_context(question: str, replies: list[str], shown: str = "") -> list[Turn]:
+    """One exchange in short (~50-200 tokens): the question, the answer and what was shown as buttons (the
+    suggested titles …), without the long tool results. Enough for "und der Status?", "die kenne ich schon"."""
+    answer = " ".join(" ".join(replies).split())[:300]
+    if shown:
+        answer = (answer + " " if answer else "") + "[Gezeigt: " + " ".join(shown.split())[:700] + "]"
     if not answer:
-        # Answer went out as buttons/view: the question alone says what it was about.
         answer = "(Ergebnis als Buttons/Übersicht angezeigt.)"
     return [Turn(role="user", text=question[:300]), Turn(role="assistant", text=answer)]

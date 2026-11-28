@@ -260,6 +260,23 @@ class BookHistory:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self.by_chat, ensure_ascii=False), encoding="utf-8")
 
+    def add_known(self, chat_id: int, text: str) -> None:
+        """A book the user already knows ("die kenne ich alle schon"): never suggested again, shapes the taste,
+        not shown in /buecher."""
+        title, _, author = (text or "").partition(" – ")
+        if not title.strip():
+            return
+        key = _key({"title": title, "authorTitle": author})[0]
+        with self._lock:
+            mine = self.by_chat.setdefault(str(chat_id), [])
+            if any(_key({"title": e.get("title") or ""})[0] == key for e in mine):
+                return
+            mine.append({"id": 0, "title": title.strip(), "author": author.strip(), "foreign": "", "known": True,
+                         "at": datetime.now(timezone.utc).isoformat()})
+            self.by_chat[str(chat_id)] = mine[-self.MAX:]
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.by_chat, ensure_ascii=False), encoding="utf-8")
+
     def of(self, chat_id: int) -> list[dict]:
         return list(self.by_chat.get(str(chat_id), []))
 

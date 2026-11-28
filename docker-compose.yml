@@ -136,8 +136,9 @@ services:
       NO_RELEASE_NOTICE_MINUTES: "30"
       # So lange werden Serien nach der letzten Aktivität weiter beobachtet (Tage)
       TRACK_DAYS: "30"
-      # Nach so vielen Minuten Pause beginnt ein neues Gespräch
-      CONVERSATION_IDLE_MINUTES: "10"
+      # So lange merkt sich der Bot das Gespräch (die letzten 6 Fragen/Antworten samt Vorschlägen);
+      # nach so vielen Minuten Pause beginnt ein neues
+      CONVERSATION_IDLE_MINUTES: "30"
       LOG_LEVEL: "INFO"
 
     # Laufen Radarr/Sonarr in einem anderen Compose-Projekt, das gemeinsame Netzwerk

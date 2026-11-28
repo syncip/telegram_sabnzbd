@@ -326,6 +326,7 @@ def test_suggestions_checked_mine_left_out_recent_filtered(tmp_path):
     flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
     assert "1. Der Schwarm" in flow.step.text and "Limit" not in flow.step.text
     assert "(2 weitere habe ich weggelassen: gibt es so nicht, hast du schon.)" in flow.step.text
+    tools.__dict__["_book_suggested"].clear()  # a new conversation: shown ones may come again
     res = asyncio.run(tools.run(ToolCall("2", "book_suggest", {"books": picks, "recent": True}), CHAT))
     assert "nicht neu genug" in res.final  # Der Schwarm is from 2004
     ctx = tools.book_context(CHAT, "empfiehl mir ein Buch")
@@ -511,3 +512,22 @@ def test_shelf_finds_books_by_title_and_shows_why_not_there(tmp_path):
     tools.book_history.mark_sent(CHAT, 0, "Unbekannt – X")  # had it once, now not in Chaptarr: deleted
     asyncio.run(tools.run(ToolCall("3", "book_library", {"mine": True, "check": True}), CHAT))
     assert [e["title"] for e in tools.book_history.of(CHAT)] == ["Broder", "Pony Show", "Die Briefeschreiberin"]
+
+
+def test_known_books_and_no_repeats(tmp_path):
+    tools, _, _ = setup(tmp_path)
+    tools.book_history = books.BookHistory(str(tmp_path))
+    picks = [{"title": "Limit", "author": "Frank Schätzing", "why": "a"},
+             {"title": "Der Schwarm", "author": "Frank Schätzing", "why": "b"}]
+    asyncio.run(tools.run(ToolCall("1", "book_suggest", {"books": picks[:1]}), CHAT))
+    assert "Limit" in tools.shown_text(CHAT)  # goes into the conversation memory
+    tools.take_outbox(CHAT)
+    # "die kenne ich alle schon" -> known; "mehr" -> Limit is not shown again
+    asyncio.run(tools.run(ToolCall("2", "book_suggest", {"books": picks, "known": ["Limit – Frank Schätzing"]}), CHAT))
+    flow = next(x for x in tools.take_outbox(CHAT) if isinstance(x, Flow))
+    assert "1. Der Schwarm" in flow.step.text and "Limit" not in flow.step.text
+    assert "weggelassen: hast du schon" in flow.step.text
+    res = asyncio.run(tools.run(ToolCall("3", "book_suggest", {"books": picks[1:]}), CHAT))
+    assert "schon vorgeschlagen" in res.final
+    assert "Limit – Frank Schätzing" in tools.book_context(CHAT, "noch ein Buch bitte")
+    assert all(e.get("known") for e in tools.book_history.of(CHAT))  # not in /buecher

@@ -14,9 +14,13 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.24.3"
+__version__ = "1.25.0"
 
 CHANGES = {
+    "1.25.0": "Der Bot folgt dem Gespräch: Er merkt sich die letzten 6 Fragen und Antworten samt dem, was er als "
+              "Buttons gezeigt hat (Vorschläge, Treffer), 30 Minuten lang. „Die kenne ich alle schon“ oder „mehr“ "
+              "nach Buch-Vorschlägen bringt neue Bücher; die bekannten merkt er sich für immer, schon Gezeigtes "
+              "kommt 6 Stunden nicht nochmal",
     "1.24.3": "📚 /buecher erkennt Bücher auch, wenn Chaptarr sie unter anderer ID angelegt hat (Abgleich über Titel "
               "und Autor), und sagt ehrlich, woran es hängt: ⬇️ lädt gerade, 📥 geladen, aber von Chaptarr noch "
               "nicht übernommen, ⏳ noch nicht in Chaptarr. „Neu prüfen“ nimmt nur noch Bücher raus, die du schon "

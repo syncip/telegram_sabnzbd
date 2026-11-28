@@ -28,6 +28,7 @@ MAX_HITS = 5
 MAX_SUGGEST = 5  # shown
 MAX_PICKS = 10  # checked (the AI may send more, some drop out)
 RECENT_DAYS = 550  # "aktuell/neu": out in the last ~18 months
+SHOWN_SECONDS = 6 * 3600  # a suggested book is not suggested again for this long ("weitere Vorschläge")
 FOLLOW_SECONDS = 900  # after SABnzbd finished: look for the file this long (unpacking, import)
 NUDGE_SECONDS = 15  # and ask Chaptarr to import this often meanwhile
 PAGE = 8  # books per page in /buecher
@@ -100,11 +101,18 @@ class BookTools:
         return None
 
     async def _t_book_suggest(self, chat_id: int, books_: list | None = None, intro: str = "", recent: bool = False,
-                              **kw: Any) -> Final:
+                              known: list | None = None, **kw: Any) -> Final:
+        if known and self.book_history is not None:
+            for k in known:
+                self.book_history.add_known(chat_id, str(k))
         picks = [b for b in (books_ or kw.get("books") or []) if isinstance(b, dict) and b.get("title")][:MAX_PICKS]
         if not picks:
             return Final("🤷 Mir fällt gerade nichts Passendes ein – nenn mir ein Buch oder einen Autor, den du magst.")
-        dropped = {"fake": 0, "mine": 0, "old": 0}
+        dropped = {"fake": 0, "mine": 0, "old": 0, "again": 0}
+        shown = self.__dict__.setdefault("_book_suggested", {}).setdefault(chat_id, {})
+        for k, t in list(shown.items()):
+            if time.monotonic() - t > SHOWN_SECONDS:
+                shown.pop(k)
         if self.chaptarr is not None:
             found = await asyncio.gather(*(self._book_verify(p) for p in picks))
             mine = {books._key({"title": e.get("title"), "authorTitle": e.get("author")})[0]
@@ -116,15 +124,20 @@ class BookTools:
                     dropped["fake"] += 1
                 elif books._key(h)[0] in mine:
                     dropped["mine"] += 1
+                elif books._key(h)[0] in shown:
+                    dropped["again"] += 1
                 elif recent and (h.get("releaseDate") or "")[:10] < cutoff:
                     dropped["old"] += 1
                 else:
                     kept.append(dict(p, hit=h))
             picks = kept[:MAX_SUGGEST]
+            for p in picks:
+                shown[books._key(p["hit"])[0]] = time.monotonic()
         else:
             picks = picks[:MAX_SUGGEST]
         why_not = ", ".join(t for t, n in (("gibt es so nicht", dropped["fake"]), ("hast du schon", dropped["mine"]),
-                                            ("nicht neu genug", dropped["old"])) if n)
+                                            ("nicht neu genug", dropped["old"]),
+                                            ("schon vorgeschlagen", dropped["again"])) if n)
         if not picks:
             return Final("🤷 Davon blieb nichts übrig (" + (why_not or "keine Treffer") + "). Sag mir genauer, was du "
                          "suchst – oder ein Buch, das dir gefallen hat.")
@@ -171,7 +184,8 @@ class BookTools:
     async def _shelf_load(self, chat_id: int, d: dict) -> None:
         lib = [b for b in await self.chaptarr.library() if b.get("title")]
         entries: list[dict] = []
-        mine = self.book_history.of(chat_id) if self.book_history is not None else []
+        mine = [e for e in (self.book_history.of(chat_id) if self.book_history is not None else [])
+                if not e.get("known")]
         if d["mode"] == "mine" and not mine:
             d["mode"], d["note"] = "all", "Von dir habe ich noch keine Bücher – hier alles auf dem Server."
         if d["mode"] == "mine":
@@ -318,10 +332,10 @@ class BookTools:
         """The user's books (titles only, ~100 tokens), only in front of messages about books."""
         if self.book_history is None or "books" not in toolgroups.groups_for(text):
             return ""
-        mine = self.book_history.of(chat_id)[:20]
+        mine = self.book_history.of(chat_id)[:30]
         if not mine:
             return ""
-        return "[Bücher des Nutzers, neueste zuerst: " + "; ".join(
+        return "[Bücher des Nutzers (kennt er alle), neueste zuerst: " + "; ".join(
             f"{e.get('title')}" + (f" – {e['author']}" if e.get("author") else "") for e in mine) + "]"
 
     def _book_question(self, data: dict) -> Step:

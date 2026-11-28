@@ -90,6 +90,17 @@ class ToolRunner(MediaTools, AdminTools, DiscoverTools, GermanTools, BookTools):
         self.trace: dict[int, list[tuple[str, str | None, str]]] = {}
 
     # ---- plumbing -------------------------------------------------------
+    def shown_text(self, chat_id: int) -> str:
+        """What the button messages of this turn say (for the conversation memory), before the bot sends them."""
+        parts = []
+        for x in self._outbox.get(chat_id, []):
+            if isinstance(x, Flow) and x.step is not None:
+                parts.append(x.step.text)
+            elif isinstance(x, Offer):
+                parts.append(x.text + " " + "; ".join(f"{c.title} ({c.year})" if c.year else c.title
+                                                      for c in x.cands[:8]))
+        return " | ".join(p for p in parts if p)
+
     def take_outbox(self, chat_id: int) -> list[Flow | Offer | View]:
         """Button messages created during the last AI turn; the bot sends them."""
         return self._outbox.pop(chat_id, [])

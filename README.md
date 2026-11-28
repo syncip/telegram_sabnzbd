@@ -47,7 +47,8 @@ Außerdem:
     „Bücher als PDF“ oder „schick es mir für Kindle“. Gibt es das Buch nicht im Format, wandelt der Bot es mit
     Calibre um (ist im Image) und schickt es, wenn es unter 50 MB bleibt; sonst kommt das Original.
   - **Empfehlungen:** „Ich mag die Metro-Bücher, empfiehl mir ähnliche“ – fünf Bücher mit kurzem Grund, je ein
-    Button „📥 holen“. Jeder Vorschlag wird vorher in Chaptarr geprüft (Erfundenes fliegt raus, echtes Jahr,
+    Button „📥 holen“. „Die kenne ich alle schon“ / „mehr“ bringt neue – die bekannten merkt er sich und
+    schlägt sie nie wieder vor. Jeder Vorschlag wird vorher in Chaptarr geprüft (Erfundenes fliegt raus, echtes Jahr,
     📗 = schon da); was du schon hast, schlägt er nicht nochmal vor, nutzt es aber für deinen Geschmack.
     „Empfiehl mir aktuelle Krimis“ / „was wird gerade gelesen?“ holt Neuerscheinungen (auf Deutsch) bzw. Trends
     von Open Library (kostenlos, ohne Key) und zeigt nur, was in den letzten ~18 Monaten erschienen ist.
@@ -341,7 +342,9 @@ Für alle:
 
 - `/downloads` (auch `/status`) – deine Downloads mit Fortschritt
 - `/verbrauch` – deine Anfragen, Tokens und Kosten, mit Balken bis zum Limit
-- `/neu` – Gespräch zurücksetzen
+- `/neu` – Gespräch zurücksetzen. Sonst merkt sich der Bot die letzten 6 Fragen und Antworten samt dem, was
+  er als Buttons gezeigt hat, bis `CONVERSATION_IDLE_MINUTES` (Standard 30) Minuten Pause sind – „die kenne ich
+  alle schon“, „mehr davon“ oder „nimm den zweiten“ beziehen sich darauf.
 - `/stumm [30 | 2h | 1d]` – Download-Meldungen eine Weile stumm (Standard 60 Min., auch per Text: „Nerv mich
   10 Minuten nicht“, „3 Tage Ruhe“). Danach kommt eine kurze Zusammenfassung, was in der Zeit war. `/laut` –
   sofort wieder an

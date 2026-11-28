@@ -805,3 +805,27 @@ def test_agent_knows_what_it_sent_outside_the_chat(tmp_path):
     assert "Metro 2033" in sent and "Nachricht 2" not in sent and sent.endswith("schick mir das letzte Buch nochmal")
     asyncio.run(agent.handle(42, "danke"))
     assert "Metro" not in llm.seen[1][-1].text  # said once, not again and again
+
+
+def test_agent_remembers_suggestions_shown_as_buttons(tmp_path):
+    from arrbot.tools import Candidate, Flow, Step
+
+    fr, fs, radarr, sonarr, store = make(tmp_path)
+    tools = ToolRunner(radarr, sonarr, store, "released")
+
+    async def fake_tool(chat_id, **kw):
+        flow = Flow("f1", chat_id, Candidate("movie", 0, "Buch", None), stage="book")
+        flow.step = Step("📚 1. Limit – Frank Schätzing 2. Der Schwarm", [("x", "s0")])
+        tools._outbox.setdefault(chat_id, []).append(flow)
+        from arrbot.tools import Final
+        return Final("")
+
+    tools._t_book_suggest = fake_tool
+    llm = ScriptedLLM([Turn("assistant", tool_calls=[ToolCall("1", "book_suggest", {})]),
+                       Turn("assistant", text="ok")])
+    agent = Agent(llm, tools, 30, 40)
+    asyncio.run(agent.handle(42, "empfiehl mir Bücher"))
+    tools.take_outbox(42)
+    asyncio.run(agent.handle(42, "die kenne ich alle schon"))
+    seen = " ".join(t.text or "" for t in llm.seen[1])
+    assert "empfiehl mir Bücher" in seen and "Limit – Frank Schätzing" in seen and "Gezeigt" in seen

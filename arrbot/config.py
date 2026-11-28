@@ -51,7 +51,7 @@ class Config:
     poll_interval: int = 60
     no_release_minutes: int = 30
     track_days: int = 30
-    history_idle_minutes: int = 10
+    history_idle_minutes: int = 30
     max_history_messages: int = 16
     minimum_availability: str = "released"
     quality_prompt_seconds: int = 60
@@ -177,7 +177,7 @@ def load_config() -> Config:
         poll_interval=int(_env("POLL_INTERVAL_SECONDS", "60")),  # type: ignore[arg-type]
         no_release_minutes=int(_env("NO_RELEASE_NOTICE_MINUTES", "30")),  # type: ignore[arg-type]
         track_days=int(_env("TRACK_DAYS", "30")),  # type: ignore[arg-type]
-        history_idle_minutes=int(_env("CONVERSATION_IDLE_MINUTES", "10")),  # type: ignore[arg-type]
+        history_idle_minutes=int(_env("CONVERSATION_IDLE_MINUTES", "30")),  # type: ignore[arg-type]
         minimum_availability=_env("RADARR_MINIMUM_AVAILABILITY", "released"),  # type: ignore[arg-type]
         quality_prompt_seconds=int(_env("QUALITY_PROMPT_SECONDS", "60")),  # type: ignore[arg-type]
         data_dir=_env("DATA_DIR", "/data"),  # type: ignore[arg-type]

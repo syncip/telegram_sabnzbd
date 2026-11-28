@@ -159,8 +159,11 @@ def build_specs(has_radarr: bool, has_sonarr: bool, has_tmdb: bool = False) -> l
             "gewünscht; Reihen mit Band 1; nichts aus den Büchern des Nutzers), je mit kurzem Grund auf Deutsch. "
             "Der Bot prüft jeden Titel in Chaptarr, lässt Erfundenes und Bekanntes weg und zeigt 5 mit Buttons. "
             "recent=true bei \"aktuell/neu\": nur, was in den letzten ~18 Monaten erschienen ist. intro: ein Satz, "
-            "worauf du geachtet hast.",
+            "worauf du geachtet hast. known: Bücher, die der Nutzer laut Chat schon kennt (\"die kenne ich alle "
+            "schon\" → die eben gezeigten Titel) – der Bot merkt sie sich und schlägt sie nie wieder vor. Bei "
+            "\"mehr\"/\"andere\"/\"kenne ich schon\" einfach neue Titel schicken; schon Gezeigtes filtert der Bot.",
             obj({"intro": {"type": "string"}, "recent": {"type": "boolean"},
+                 "known": {"type": "array", "items": {"type": "string"}},
                  "books": {"type": "array", "items": obj({"title": {"type": "string"}, "author": {"type": "string"},
                                                           "why": {"type": "string"}}, ["title", "author", "why"])}},
                 ["books"]),
